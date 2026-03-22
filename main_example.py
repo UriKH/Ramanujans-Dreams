@@ -2,7 +2,6 @@ from dreamer import System, config
 from dreamer import analysis, search, extraction
 from dreamer.loading import *
 from dreamer import zeta
-import sympy as sp
 
 
 # Because of pickling format we need to define these functions here
@@ -29,9 +28,9 @@ if __name__ == '__main__':
             'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func_analysis
         },
         extraction={
-            'INIT_POINT_MAX_COORD': 3,
+            'INIT_POINT_MAX_COORD': 2,
             # In this case this indicates usage of pFq symmetries utilization to reduce the number of shards
-            'IGNORE_DUPLICATE_SEARCHABLES': True
+            'IGNORE_DUPLICATE_SEARCHABLES': False
         },
         search={
             # number of trajectories to be auto-generated in search if needed by the module
@@ -41,13 +40,33 @@ if __name__ == '__main__':
 
     p = 4
     q = 3
-    z = -1
+    z = 1
 
     System(
-        if_srcs=[pFq_formatter(zeta(3), p, q, z)],
+        if_srcs=[pFq_formatter(zeta(2), p, q, z)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
         searcher=search.SearcherModV1
-    ).run(constants=[zeta(3)])
+    ).run(constants=[zeta(2)])
+
+    config.configure(
+        system={
+            'EXPORT_CMFS': './mycmfs_short',  # export CMF as objects to directory: ./mycmfs
+            'EXPORT_ANALYSIS_PRIORITIES': './myshards_short',  # export shards found in analysis into: ./myshards
+            'EXPORT_SEARCH_RESULTS': './mysearchresults_short'  # export the search results into: ./mysearchresults
+        },
+        extraction={
+            'INIT_POINT_MAX_COORD': 2,
+            # In this case this indicates usage of pFq symmetries utilization to reduce the number of shards
+            'IGNORE_DUPLICATE_SEARCHABLES': True
+        }
+    )
+
+    System(
+        if_srcs=[pFq_formatter(zeta(2), p, q, z)],
+        extractor=extraction.extractor.ShardExtractorMod,
+        analyzers=[analysis.AnalyzerModV1],
+        searcher=search.SearcherModV1
+    ).run(constants=[zeta(2)])
 
 

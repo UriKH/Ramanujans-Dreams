@@ -24,37 +24,26 @@ class Hyperplane:
                 f'Missing symbols in ordering. Expression contains {self.expr.free_symbols} but given {self.symbols}'
             )
 
-        try:
-            polys = {var: sp.Poly(self.expr, var) for var in self.expr.free_symbols}
-            if any(poly.degree() > 1 for poly in polys.values()):
-                raise sp.PolynomialError
-        except sp.PolynomialError:
+        if not all(sp.diff(self.expr, v).is_Number for v in self.symbols):
             raise ValueError(f'Expression is not linear: {self.expr}')
 
-        # self.sym_coef_map = self.expr.as_coefficients_dict()
-        # self.free_term = self.sym_coef_map.get(1, 0)
-        # self.linear_term = self.expr - self.free_term
-        # if sp.Poly(self.expr).coeffs()[0] < 1:
-        #     self.linear_term = -self.linear_term
-        #     self.free_term = -self.free_term
-        # 1. Extract raw coefficients
         raw_coef_map = self.expr.as_coefficients_dict()
 
-        # 2. Find LCM to scale everything to integers
+        # multiply by LCM if needed
         common_denom = sp.Integer(1)
         for val in raw_coef_map.values():
             common_denom = sp.lcm(common_denom, sp.denom(sp.Rational(val)))
-
-        # 3. Apply the scaling
         if common_denom != 1:
             self.expr = sp.expand(self.expr * common_denom)
 
-        # 4. Normalize the sign (ensure positive leading coefficient)
-        # Because we scaled to integers, < 1 safely means <= 0
+        gcd = sp.gcd(list(self.expr.as_coefficients_dict().values()))
+        if gcd != 1:
+            self.expr = sp.expand(self.expr / gcd)
+
+        # Transform to canonical form
         if sp.Poly(self.expr).coeffs()[0] < 1:
             self.expr = -self.expr
 
-        # 5. Lock in the synchronized, purely integer state
         self.sym_coef_map = self.expr.as_coefficients_dict()
         self.free_term = self.sym_coef_map.get(1, 0)
         self.linear_term = self.expr - self.free_term
@@ -95,7 +84,7 @@ class Hyperplane:
         """
         :return: lhs = rhs where lhs is the linear term and the rhs is the free trem
         """
-        return self.linear_term, self.free_term
+        return self.linear_term, -self.free_term
 
     @cached_property
     def vectors(self) -> Tuple[np.ndarray, float]:

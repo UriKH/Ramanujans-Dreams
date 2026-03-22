@@ -1,4 +1,4 @@
-import numpy as np
+from dreamer.utils.rand import *
 from scipy.special import gamma, zeta
 
 from dreamer.extraction.utils.fast_gcd import *

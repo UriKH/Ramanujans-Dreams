@@ -72,10 +72,10 @@ class System:
         for constant, funcs in cmf_data.items():
             functions = '\n'
             for i, func in enumerate(funcs):
-                if not func.raw:
-                    functions += f'{i+1}. {func}\n'
-                else:
-                    functions += f'{i+1}. Manually added CMF of dimension={func.cmf.dim()} and shift={func.shift}\n'
+                # if not func.raw:
+                functions += f'{i+1}. CMF: {repr(func.cmf)} with offset {tuple(func.shift.values())}\n'
+                # else:
+                #     functions += f'{i+1}. Manually added CMF of dimension={func.cmf.dim()} and shift={func.shift}\n'
             Logger(
                 f'Searching for {constant.name} using inspiration functions: {functions}', Logger.Levels.info
             ).log(msg_prefix='\n')

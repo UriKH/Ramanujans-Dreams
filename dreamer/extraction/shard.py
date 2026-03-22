@@ -1,13 +1,13 @@
 from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.types import *
+from dreamer.utils.rand import *
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs import config
 from .sampler_chrr import CHRRSampler
 from .sampler_sphere import PrimitiveSphereSampler
 
 from scipy.special import gamma, zeta
-import numpy as np
 
 
 class Shard(Searchable):
