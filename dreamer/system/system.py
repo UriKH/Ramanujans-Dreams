@@ -118,6 +118,8 @@ class System:
         # =======================================================
         # SEARCH STAGE - preform deep search
         # =======================================================
+        if len(filtered_priorities) == 0:
+            filtered_priorities = priorities
         self.__search_stage(filtered_priorities)
 
     def __loading_stage(self, constants: List[Constant]) -> Dict[Constant, List[ShiftCMF]]:
@@ -221,7 +223,6 @@ class System:
         for const in priorities.keys():
             best_delta = -sp.oo
             best_sv = None
-            best_space = None
             dir_path = os.path.join(sys_config.EXPORT_SEARCH_RESULTS, const.name)
 
             stream_gen = Importer.import_stream(dir_path)
@@ -241,6 +242,10 @@ class System:
                     f'* Trajectory: {best_sv.trajectory} \n* Start: {best_sv.start}',
                     Logger.Levels.info
                 ).log(msg_prefix='\n')
+
+        # delete temp directory
+        if sys_config.EXPORT_SEARCH_RESULTS.split('.')[-1] == sys_config.DEFAULT_DIR_SUFFIX:
+            os.rmdir(sys_config.EXPORT_SEARCH_RESULTS)
 
     @staticmethod
     def __aggregate_analyzers(dicts: List[Dict[Constant, List[Searchable]]]) -> Dict[Constant, List[Searchable]]:

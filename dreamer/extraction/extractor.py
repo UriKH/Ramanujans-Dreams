@@ -22,6 +22,7 @@ from numba.typed import Dict
 import math
 import numpy as np
 from .utils import initial_points as init_points
+from functools import partial
 
 
 class ShardExtractorMod(ExtractionModScheme):
@@ -135,7 +136,6 @@ class ShardExtractor(ExtractionScheme):
             ]
 
         symbols = list(hps)[0].symbols
-        generated = []
         shard_encodings = dict()
         selected = [] if self.cmf_data.selected_points is None else self.cmf_data.selected_points
         if self.cmf_data.only_selected:
@@ -164,11 +164,17 @@ class ShardExtractor(ExtractionScheme):
             shifted_hps = [hp.apply_shift(self.cmf_data.shift) for hp in hps_list]
             A = np.array([hp.vectors[0] for hp in shifted_hps], dtype=np.int64)
             b = np.array([hp.vectors[1] for hp in shifted_hps], dtype=np.int64)
-            S = config.extraction.BASE_EDGE_LENGTH * 2 + 1
+            S = config.extraction.INIT_POINT_MAX_COORD * 2 + 1
             prefix_dims = max(min(int(round(math.log(os.cpu_count(), S))), os.cpu_count() - 1), 1)
 
+            symmetries_func = None
+            if issubclass(self.cmf_data.cmf.__class__, pFq) and config.extraction.IGNORE_DUPLICATE_SEARCHABLES:
+                symmetries_func = partial(init_points.filter_symmetrical_cones,
+                                          p=self.cmf_data.cmf.p,
+                                          q=self.cmf_data.cmf.q,
+                                          shift=list(self.cmf_data.shift.values()))
             final_results = init_points.compute_mapping(
-                self.cmf_data.cmf.dim(), S, A, b, prefix_dims
+                self.cmf_data.cmf.dim(), S, A, b, prefix_dims, symmetries_func
             )
             unique_sigs = list(final_results.keys())
             decoded_vectors = init_points.decode_signatures(unique_sigs, len(hps))

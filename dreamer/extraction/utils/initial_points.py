@@ -1,13 +1,77 @@
+from typing import Callable, Optional, Tuple, Dict
 from numba import njit, types
 from numba.typed import Dict
 import numpy as np
 import multiprocessing as mp
 import itertools
 from dreamer.utils.logger import Logger
-
+from functools import partial
+from numba import njit
 
 _worker_cache = {}
 
+MAPPING_DICT = dict[Tuple, np.ndarray]
+FILTER_FUNC_DTYPE = Callable[[MAPPING_DICT], MAPPING_DICT]
+
+
+# ------------------------------------------------------------
+#   pFq symmetries mapping filters
+# ------------------------------------------------------------
+
+def __same_shift_indices(shift, p, q):
+    if p + q != len(shift):
+        raise ValueError(f'p + q must be the dimension of the space: {len(shift)} != {p} + {q}')
+    reduced = np.array([v - int(v) for v in shift])
+    reduced_nom = reduced[:p]
+    reduced_denom = reduced[p:]
+
+    p_groups = []
+    for unique_offset in np.unique(reduced_nom):
+        indices = np.where(reduced_nom == unique_offset)[0]
+        p_groups.append(indices)
+
+    q_groups = []
+    for unique_offset in np.unique(reduced_denom):
+        indices = np.where(reduced_denom == unique_offset)[0]
+        q_groups.append(indices)
+    return p_groups, q_groups
+
+
+def filter_symmetrical_cones(mapping, p, q, shift):
+    """
+    Filters a dictionary of {encoding: point} to remove symmetrical cones
+    using fast NumPy vectorization.
+    """
+    if not mapping:
+        return {}
+
+    if p + q != len(shift):
+        raise ValueError(f'p + q must be the dimension of the space: {len(shift)} != {p} + {q}')
+
+    encodings = list(mapping.keys())
+    points = np.array(list(mapping.values()))
+    p_part = points[:, :p]
+    q_part = points[:, p:]
+
+    p_groups, q_groups = __same_shift_indices(shift, p, q)
+
+    canonical_points = np.empty_like(points)
+
+    for group_indices in p_groups:
+        sorted_subgroup = np.sort(p_part[:, group_indices], axis=1)
+        canonical_points[:, group_indices] = sorted_subgroup
+
+    for group_indices in q_groups:
+        sorted_subgroup = np.sort(q_part[:, group_indices], axis=1)
+        canonical_points[:, p + group_indices] = sorted_subgroup
+
+    _, unique_indices = np.unique(canonical_points, axis=0, return_index=True)
+    return {encodings[i]: points[i] for i in unique_indices}
+
+
+# ------------------------------------------------------------
+#   Compute shard encoding and initial point pairs
+# ------------------------------------------------------------
 
 def __generate_numba_worker(M):
     """
@@ -122,7 +186,8 @@ def decode_signatures(unique_tuples, M):
     return (bits * 2) - 1
 
 
-def __worker_wrapper(fixed_prefix, D, S, A, b):
+def __worker_wrapper(fixed_prefix: np.ndarray, D: int, S: int, A: np.ndarray, b: np.ndarray,
+                     filter_func: Optional[FILTER_FUNC_DTYPE] = None) -> MAPPING_DICT:
     """
     Compiles and runs the relevant numba generator
     :param fixed_prefix: Dimension reduction prefix
@@ -130,6 +195,7 @@ def __worker_wrapper(fixed_prefix, D, S, A, b):
     :param S: Hypercube side length
     :param A: Linear equations expression matrix
     :param b: Linear equations free variables vector
+    :param filter_func: Elimination function for filtering shards
     :return: A mapping from shard signature to an initial point
     """
     global _worker_cache
@@ -140,10 +206,15 @@ def __worker_wrapper(fixed_prefix, D, S, A, b):
 
     compiled_func = _worker_cache[M]
     numba_dict = compiled_func(fixed_prefix, D, S, A, b)
-    return {key_tuple: np.array(point_array) for key_tuple, point_array in numba_dict.items()}
+    local_mapping = {key_tuple: np.array(point_array) for key_tuple, point_array in numba_dict.items()}
+
+    if filter_func:
+        local_mapping = filter_func(local_mapping)
+    return local_mapping
 
 
-def compute_mapping(D, S, A, b, prefix_dims=2):
+def compute_mapping(D: int, S: int, A: np.ndarray, b: np.ndarray, prefix_dims: int = 2,
+                    filter_func: Optional[FILTER_FUNC_DTYPE] = None) -> MAPPING_DICT:
     """
     Computes a mapping from shard signature to an initial point.
     :param D: Dimension of the hypercube
@@ -151,6 +222,7 @@ def compute_mapping(D, S, A, b, prefix_dims=2):
     :param A: Linear equations expression matrix
     :param b: Linear equations free variables vector
     :param prefix_dims: Manually compute prefix_dims out of the D of the points
+    :param filter_func: Elimination function for filtering shards
     :return: A mapping from shard signature to an initial point
     """
     prefix_dims = min(prefix_dims, D)
@@ -169,11 +241,14 @@ def compute_mapping(D, S, A, b, prefix_dims=2):
     Logger(f"Launching {len(tasks)} jobs across {num_cores} cores...").log()
 
     with mp.Pool(num_cores) as pool:
-        results = pool.starmap(__worker_wrapper, tasks)
+        results = pool.starmap(partial(__worker_wrapper, filter_func=filter_func), tasks)
 
         # Merge dictionaries from all workers
         for local_mapping in results:
             for sig, point in local_mapping.items():
                 if sig not in global_mapping:
                     global_mapping[sig] = point
+
+    if filter_func:
+        global_mapping = filter_func(global_mapping)
     return global_mapping
