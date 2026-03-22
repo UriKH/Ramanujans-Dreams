@@ -30,7 +30,7 @@ if __name__ == '__main__':
         extraction={
             'INIT_POINT_MAX_COORD': 2,
             # In this case this indicates usage of pFq symmetries utilization to reduce the number of shards
-            'IGNORE_DUPLICATE_SEARCHABLES': False
+            'IGNORE_DUPLICATE_SEARCHABLES': True
         },
         search={
             # number of trajectories to be auto-generated in search if needed by the module
@@ -43,30 +43,9 @@ if __name__ == '__main__':
     z = 1
 
     System(
+        # if_srcs=['./mycmfs/zeta-2/pFq__4__3__1.pkl'],
         if_srcs=[pFq_formatter(zeta(2), p, q, z)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
         searcher=search.SearcherModV1
     ).run(constants=[zeta(2)])
-
-    config.configure(
-        system={
-            'EXPORT_CMFS': './mycmfs_short',  # export CMF as objects to directory: ./mycmfs
-            'EXPORT_ANALYSIS_PRIORITIES': './myshards_short',  # export shards found in analysis into: ./myshards
-            'EXPORT_SEARCH_RESULTS': './mysearchresults_short'  # export the search results into: ./mysearchresults
-        },
-        extraction={
-            'INIT_POINT_MAX_COORD': 2,
-            # In this case this indicates usage of pFq symmetries utilization to reduce the number of shards
-            'IGNORE_DUPLICATE_SEARCHABLES': True
-        }
-    )
-
-    System(
-        if_srcs=[pFq_formatter(zeta(2), p, q, z)],
-        extractor=extraction.extractor.ShardExtractorMod,
-        analyzers=[analysis.AnalyzerModV1],
-        searcher=search.SearcherModV1
-    ).run(constants=[zeta(2)])
-
-

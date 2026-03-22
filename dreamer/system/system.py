@@ -32,18 +32,24 @@ class System:
                  searcher: Type[SearcherModScheme] | partial[SearcherModScheme]):
         """
         Constructing a system runnable instance for a given combination of modules.
-        :param if_srcs: A list of DBModScheme instances used as sources
+        :param if_srcs: A list of DBModScheme instances used as sources.
         :param extractor: An optional ExtractionModScheme type used to extract shards from the CMFs.
         If extractor not provided, analysis will try to read from the default searchables directory.
         :param analyzers: A list of AnalyzerModScheme types used for prioritization + preparation before the search
         :param searcher: A SearcherModScheme type used to deepen the search done by the analyzers
         """
+        if not isinstance(if_srcs, list):
+            raise ValueError(f'Inspiration Functions must be contained in a list')
+
         self.if_srcs = if_srcs
         self.extractor = extractor
         self.analyzers = analyzers
         self.searcher = searcher
 
-    def run(self, constants: List[str] | str | Constant | List[Constant] = None):
+        if not self.if_srcs and self.extractor:
+            raise ValueError(f'Could not preform extraction if no sourced to extract from where provided')
+
+    def run(self, constants: Optional[List[str | Constant] | str | Constant] = None):
         """
         Run the system given the constants to search for.
         :param constants: if None, search for constants defined in the configuration file in 'configs.database.py'.
@@ -54,6 +60,7 @@ class System:
         # LOAD STAGE - loading constants (and optional storage)
         # ======================================================
         cmf_data = self.__loading_stage(constants)
+
         if path := sys_config.EXPORT_CMFS:
             os.makedirs(path, exist_ok=True)
 
@@ -61,9 +68,12 @@ class System:
                 safe_key = "".join(c for c in const.name if c.isalnum() or c in ('-', '_'))
                 const_path = os.path.join(path, safe_key)
 
-                l = [ShiftCMF(scmf.cmf, scmf.shift, True) for scmf in l]
-
-                Exporter.export(const_path, exists_ok=True, clean_exists=True, data=l, fmt=Formats.PICKLE)
+                for scmf in l:
+                    filename = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in repr(scmf.cmf)).strip('_')
+                    Exporter.export(
+                        root=const_path, f_name=filename, exists_ok=True, clean_exists=True,
+                        data=[ShiftCMF(scmf.cmf, scmf.shift, True)], fmt=Formats.PICKLE
+                    )
                 Logger(
                     f'CMFs for {const.name} exported to {const_path}', Logger.Levels.info
                 ).log(msg_prefix='\n')
@@ -72,10 +82,7 @@ class System:
         for constant, funcs in cmf_data.items():
             functions = '\n'
             for i, func in enumerate(funcs):
-                # if not func.raw:
                 functions += f'{i+1}. CMF: {repr(func.cmf)} with offset {tuple(func.shift.values())}\n'
-                # else:
-                #     functions += f'{i+1}. Manually added CMF of dimension={func.cmf.dim()} and shift={func.shift}\n'
             Logger(
                 f'Searching for {constant.name} using inspiration functions: {functions}', Logger.Levels.info
             ).log(msg_prefix='\n')
@@ -83,9 +90,18 @@ class System:
         # ====================================================
         # EXTRACTION STAGE - computing shards and saving them
         # ====================================================
-        shard_dict = None
+        shard_dict = dict()
         if self.extractor:
             shard_dict = self.extractor(cmf_data).execute()
+        else:
+            # Load saved shards from the default directory if data not provided
+            for const_name in os.listdir(extraction_config.PATH_TO_SEARCHABLES):
+                import_stream = Importer.import_stream(f'{extraction_config.PATH_TO_SEARCHABLES}\\{const_name}')
+                const_shards = []
+                for shards in import_stream:
+                    const_shards += shards
+                if const_shards:
+                    shard_dict[const_shards[0].const] = const_shards
 
         # =======================================================
         # ANALYSIS STAGE - analyzes shards and prioritize search
@@ -128,6 +144,9 @@ class System:
         :param constants: A list of all constants relevant to this run
         :return: A mapping from a constant to the list of its CMFs (matching the inspiration functions)
         """
+        if not self.if_srcs:
+            return dict()
+
         Logger('Loading CMFs ...', Logger.Levels.info).log(msg_prefix='\n')
         modules = []
         cmf_data = defaultdict(set)
@@ -137,11 +156,11 @@ class System:
                 modules.append(db)
             elif isinstance(db, str):
                 shift_cmf = Importer.imprt(db)
-                cmf_data[Constant.get_constant(db.split('/')[-2])].add(shift_cmf)
+                cmf_data[Constant.get_constant(db.split('/')[-2])].add(shift_cmf[0])
             elif isinstance(db, Formatter):
                 cmf_data[Constant.get_constant(db.const)].add(db.to_cmf())
             else:
-                raise ValueError(f'Not a known format: {db} (accepts only str | DBModScheme | Formatter)')
+                raise ValueError(f'Unknown format: {db} (accepts only str | DBModScheme | Formatter)')
 
         # If DB were used, aggregate extracted constants
         cmf_data_2 = dict()
@@ -188,15 +207,15 @@ class System:
                     raise TypeError(f'unknown analyzer type {analyzer}')
 
         # Load saved shards from the default directory if data not provided
-        if not cmf_data:
-            cmf_data = {}
-            for const_name in os.listdir(extraction_config.PATH_TO_SEARCHABLES):
-                import_stream = Importer.import_stream(f'{extraction_config.PATH_TO_SEARCHABLES}\\{const_name}')
-                const_shards = []
-                for shards in import_stream:
-                    const_shards += shards
-                if const_shards:
-                    cmf_data[const_shards[0].const] = const_shards
+        # if not cmf_data:
+        #     cmf_data = {}
+        #     for const_name in os.listdir(extraction_config.PATH_TO_SEARCHABLES):
+        #         import_stream = Importer.import_stream(f'{extraction_config.PATH_TO_SEARCHABLES}\\{const_name}')
+        #         const_shards = []
+        #         for shards in import_stream:
+        #             const_shards += shards
+        #         if const_shards:
+        #             cmf_data[const_shards[0].const] = const_shards
 
         analyzers_results = [analyzer(cmf_data).execute() for analyzer in analyzers]
         priorities = self.__aggregate_analyzers(analyzers_results)
@@ -289,7 +308,12 @@ class System:
         return result
 
     @staticmethod
-    def __validate_constants(constants) -> List[Constant]:
+    def __validate_constants(constants: Optional[List[str | Constant] | str | Constant] = None) -> List[Constant]:
+        """
+        Validates constants are in the correct format and usable
+        :param constants: One or more Constant object or a constant name
+        :return: A list of Constant objects
+        """
         if not constants:
             Logger(
                 'No constants provided, searching for all constants in configurations', Logger.Levels.warning
