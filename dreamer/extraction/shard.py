@@ -19,7 +19,7 @@ class Shard(Searchable):
                  shift: Position,
                  symbols: List[sp.Symbol],
                  interior_point: Optional[Position] = None,
-                 use_inv_t: bool = config.search.DEFAULT_USES_INV_T
+                 use_inv_t: Optional[bool] = None
                  ):
         """
         :param cmf: The CMF this shard is a part of
@@ -33,6 +33,9 @@ class Shard(Searchable):
         :param interior_point: A point within the shard
         :param use_inv_t: Whether to use inverse transpose when preforming walk or not
         """
+        if use_inv_t is None:
+            use_inv_t = config.search.DEFAULT_USES_INV_T
+
         super().__init__(cmf, constant, shift, use_inv_t)
         self.A = A
         self.b = b

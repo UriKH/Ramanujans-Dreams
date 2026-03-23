@@ -11,7 +11,7 @@ class pFq_formatter(Formatter):
                  const: str | Constant, p: int, q: int, z: sp.Expr | int, shifts: Optional[list] = None,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
-                 use_inv_t: bool = config.search.DEFAULT_USES_INV_T
+                 use_inv_t: bool = None
                  ):
         """
         Represents a pFq and its CMF + allows conversion to and from JSON.
@@ -24,6 +24,9 @@ class pFq_formatter(Formatter):
         :param selected_start_points: Optional list of start points to extract shards from.
         :param only_selected: If True, only extract shards from the selected start points.
         """
+        if use_inv_t is None:
+            use_inv_t = config.search.DEFAULT_USES_INV_T
+
         super().__init__(const, use_inv_t)
         self.p = p
         self.q = q

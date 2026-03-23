@@ -111,6 +111,7 @@ class System:
 
         # Store priorities to be used in the search stage and future runs
         filtered_priorities = dict()
+        bad_run = False
         if path := sys_config.EXPORT_ANALYSIS_PRIORITIES:
             os.makedirs(path, exist_ok=True)
 
@@ -130,6 +131,13 @@ class System:
                     f'Priorities for {const.name} exported to {const_path}', Logger.Levels.info
                 ).log(msg_prefix='\n')
                 filtered_priorities[const] = l
+
+            if not filtered_priorities:
+                bad_run = True
+
+        if bad_run or not priorities:
+            Logger('No relevant shards found, run stopped', Logger.Levels.warning).log(msg_prefix='\n')
+            return
 
         # =======================================================
         # SEARCH STAGE - preform deep search

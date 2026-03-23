@@ -10,7 +10,7 @@ def trajectory_compute_func(d):
 
 
 def trajectory_compute_func_analysis(d):
-    return max(10 ** (d - 4), 10)
+    return max(10 ** (d-4), 10)
 
 
 if __name__ == '__main__':
@@ -28,13 +28,14 @@ if __name__ == '__main__':
             'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func_analysis
         },
         extraction={
-            'INIT_POINT_MAX_COORD': 2,
+            'INIT_POINT_MAX_COORD': 10,
             # In this case this indicates usage of pFq symmetries utilization to reduce the number of shards
             'IGNORE_DUPLICATE_SEARCHABLES': True
         },
         search={
             # number of trajectories to be auto-generated in search if needed by the module
-            'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func
+            'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func,
+            'DEFAULT_USES_INV_T': False
         }
     )
 
@@ -43,8 +44,7 @@ if __name__ == '__main__':
     z = 1
 
     System(
-        # if_srcs=['./mycmfs/zeta-2/pFq__4__3__1.pkl'],
-        if_srcs=[pFq_formatter(zeta(2), p, q, z)],
+        if_srcs=[pFq_formatter(zeta(2), p, q, z, selected_start_points=[(9, 8, 7, -6, 2, 3, 4)], only_selected=True)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
         searcher=search.SearcherModV1

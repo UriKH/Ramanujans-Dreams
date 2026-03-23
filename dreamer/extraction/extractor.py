@@ -141,24 +141,6 @@ class ShardExtractor(ExtractionScheme):
         if self.cmf_data.only_selected:
             if self.cmf_data.selected_points is None:
                 raise ValueError('No start points were provided for extraction.')
-
-            points = [
-                tuple(coord + shift for coord, shift in zip(p, self.cmf_data.shift.values()))
-                for p in selected
-            ]
-
-            # validate shards using the sampled points
-            for p in SmartTQDM(points, desc='Computing shard encodings', **sys_config.TQDM_CONFIG):
-                enc = []
-                point_dict = {sym: coord for sym, coord in zip(symbols, p)}
-                for hp in hps:
-                    res = hp.expr.subs(point_dict)
-                    if res == 0:
-                        break
-                    enc.append(1 if res > 0 else -1)
-
-                if len(enc) == len(hps):
-                    shard_encodings[tuple(enc)] = Position(point_dict)
         else:
             hps_list = list(hps)
             shifted_hps = [hp.apply_shift(self.cmf_data.shift) for hp in hps_list]
@@ -186,6 +168,25 @@ class ShardExtractor(ExtractionScheme):
                 shard_encodings[tuple(sign_vector)] = Position(
                     {sym: int(v) + self.cmf_data.shift[sym] for sym, v in zip(symbols, actual_point)}
                 )
+
+        if self.cmf_data.selected_points:
+            points = [
+                tuple(coord + shift for coord, shift in zip(p, self.cmf_data.shift.values()))
+                for p in selected
+            ]
+
+            # validate shards using the sampled points
+            for p in SmartTQDM(points, desc='Computing shard encodings', **sys_config.TQDM_CONFIG):
+                enc = []
+                point_dict = {sym: coord for sym, coord in zip(symbols, p)}
+                for hp in hps:
+                    res = hp.expr.subs(point_dict)
+                    if res == 0:
+                        break
+                    enc.append(1 if res > 0 else -1)
+
+                if len(enc) == len(hps):
+                    shard_encodings[tuple(enc)] = Position(point_dict)
 
         Logger(
             f'In CMF no. {call_number}: found {len(hps)} hyperplanes and {len(shard_encodings)} shards ',

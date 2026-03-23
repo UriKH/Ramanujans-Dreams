@@ -11,7 +11,7 @@ class ShiftCMF:
     shift: Position
     selected_points: Optional[List[Tuple[int | sp.Rational]]] = None
     only_selected: bool = False
-    use_inv_t: bool = False
+    use_inv_t: Optional[bool] = None
 
     def __hash__(self):
         return hash((self.cmf, self.shift))
