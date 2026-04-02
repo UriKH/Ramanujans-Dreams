@@ -106,7 +106,7 @@ class Searchable(ABC):
                 Logger(
                     f'LIReC failed with: "{e}"\n'
                     f'walk matrix column: {t1_col}',
-                    Logger.Levels.inform
+                    Logger.Levels.exception
                 ).log()
 
 
@@ -183,12 +183,12 @@ class Searchable(ABC):
             if delta == sp.oo or delta == sp.zoo:
                 if err == 0:
                     Logger(f'delta guardrails failed, got delta={delta} with: error=0',
-                           Logger.Levels.warning).log(msg_prefix='\n')
+                           Logger.Levels.warning).log()
                 if denom == 0:
                     Logger(f'delta guardrails failed, got delta={delta} with: denom=0',
-                           Logger.Levels.warning).log(msg_prefix='\n')
+                           Logger.Levels.warning).log()
                 if denom != 0 and err != 0:
-                    Logger(f'delta guardrails failed, got delta={delta} with: \nerror={err} \ndenom = {denom}', Logger.Levels.warning).log(msg_prefix='\n')
+                    Logger(f'delta guardrails failed, got delta={delta} with: \nerror={err} \ndenom = {denom}', Logger.Levels.warning).log()
                 return None, None, None
 
         return float(delta.evalf(10)), rt.Matrix([p, q]), float(limit.as_float())
@@ -225,8 +225,8 @@ class Searchable(ABC):
         except Exception as e:
             Logger(
                 f'error while computing trajectory matrix for start={start}, trajectory={traj}: {e}\n'
-                f'This was not expected to happen', Logger.Levels.inform
-            ).log(msg_prefix='\n')
+                f'This was not expected to happen', Logger.Levels.exception
+            ).log()
             return sd
 
         if find_limit:

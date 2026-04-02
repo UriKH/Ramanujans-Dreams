@@ -35,12 +35,12 @@ class ConfigManager:
             else:
                 Logger(
                     f'section {section} is not defined, try: system / database / analysis / search',
-                    Logger.Levels.inform
+                    Logger.Levels.exception
                 ).log()
                 if not warned:
                     warned = True
                     Logger(f'Note that these are the builtin attributes: '
-                           f'{system}\n\n{database}\n\n{extraction}\n\n{analysis}\n\n{search}', Logger.Levels.inform
+                           f'{system}\n\n{database}\n\n{extraction}\n\n{analysis}\n\n{search}', Logger.Levels.exception
                            ).log()
 
     def get_configurables(self) -> Dict[str, List[str]]:

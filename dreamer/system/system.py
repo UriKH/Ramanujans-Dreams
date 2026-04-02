@@ -80,7 +80,7 @@ class System:
                     )
                 Logger(
                     f'CMFs for {const.name} exported to {const_path}', Logger.Levels.info
-                ).log(msg_prefix='\n')
+                ).log()
 
         # print constants and CMFs
         for constant, funcs in cmf_data.items():
@@ -93,7 +93,7 @@ class System:
                     functions += f'{i+1}. CMF: {repr(func.cmf)} with offset {tuple(func.shift.values())}\n'
             Logger(
                 f'Searching for {constant.name} using inspiration functions: {functions}', Logger.Levels.info
-            ).log(msg_prefix='\n')
+            ).log()
 
         # ====================================================
         # EXTRACTION STAGE - computing shards and saving them
@@ -128,7 +128,7 @@ class System:
                     Logger(
                         f'No shards remained after analysis. Run for constant "{const.name}" is stopped.',
                         Logger.Levels.warning
-                    ).log(msg_prefix='\n')
+                    ).log()
                     continue
 
                 safe_key = "".join(c for c in const.name if c.isalnum() or c in ('-', '_'))
@@ -137,14 +137,14 @@ class System:
                 Exporter.export(const_path, exists_ok=True, clean_exists=False, data=l, fmt=Formats.PICKLE)
                 Logger(
                     f'Priorities for {const.name} exported to {const_path}', Logger.Levels.info
-                ).log(msg_prefix='\n')
+                ).log()
                 filtered_priorities[const] = l
 
             if not filtered_priorities:
                 bad_run = True
 
         if bad_run or not priorities:
-            Logger('No relevant shards found, run stopped', Logger.Levels.warning).log(msg_prefix='\n')
+            Logger('No relevant shards found, run stopped', Logger.Levels.warning).log()
             return
 
         # =======================================================
@@ -163,7 +163,7 @@ class System:
         if not self.if_srcs:
             return dict()
 
-        Logger('Loading CMFs ...', Logger.Levels.info).log(msg_prefix='\n')
+        Logger('Loading CMFs ...', Logger.Levels.info).log()
         modules = []
         cmf_data = defaultdict(set)
 
@@ -192,7 +192,7 @@ class System:
                 Logger(
                     f'constant {k} is not in the search list, its inspiration function(s) will be ignored',
                     level=Logger.Levels.warning
-                ).log(msg_prefix='\n')
+                ).log()
                 continue
             as_list[k] = list(v)
         return as_list
@@ -271,13 +271,13 @@ class System:
 
             if best_sv is None:
                 # Should not happen
-                Logger('No best delta found').log(msg_prefix='\n')
+                Logger('No best delta found').log()
             else:
                 Logger(
                     f'Best delta for "{const.name}" found by the searcher is {best_delta}\n'
                     f'* Trajectory: {best_sv.trajectory} \n* Start: {best_sv.start}',
                     Logger.Levels.info
-                ).log(msg_prefix='\n')
+                ).log()
 
         # delete temp directory
         if sys_config.EXPORT_SEARCH_RESULTS.split('.')[-1] == sys_config.DEFAULT_DIR_SUFFIX:

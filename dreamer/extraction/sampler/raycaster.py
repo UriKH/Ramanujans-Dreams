@@ -2,6 +2,7 @@ import scipy.optimize as opt
 from numba import njit, prange
 import time
 import numpy as np
+from dreamer.utils.logger import Logger
 
 
 @njit(parallel=True)
@@ -74,62 +75,6 @@ def _raycast_kernel_parallel(d_orig, d_flat, Z_int, B, continuous_rays, R_max, t
 
     return harvest_buffer, ray_counts
 
-# @njit(parallel=True)
-# def _generate_guide_rays_kernel(d_flat, B, start_pos, target_rays, mix_steps=200):
-#     rays = np.zeros((target_rays, d_flat), dtype=np.float64)
-#     m = len(B)
-#
-#     for i in prange(target_rays):
-#         pos = start_pos.copy()
-#
-#         for _ in range(mix_steps):
-#             # 1. Random Direction
-#             v = np.random.randn(d_flat)
-#             norm_v = 0.0
-#             for j in range(d_flat): norm_v += v[j]*v[j]
-#             norm_v = np.sqrt(norm_v)
-#             for j in range(d_flat): v[j] /= norm_v
-#
-#             # 2. Raycast against 80 hyperplanes
-#             t_min = -1e12
-#             t_max = 1e12
-#
-#             for j in range(m):
-#                 dot_v = 0.0
-#                 dot_p = 0.0
-#                 for k in range(d_flat):
-#                     dot_v += B[j, k] * v[k]
-#                     dot_p += B[j, k] * pos[k]
-#
-#                 if dot_v > 1e-9:
-#                     t = -dot_p / dot_v
-#                     if t < t_max: t_max = t
-#                 elif dot_v < -1e-9:
-#                     t = -dot_p / dot_v
-#                     if t > t_min: t_min = t
-#
-#             # 3. Move continuous walker
-#             if t_max > t_min:
-#                 t_step = np.random.uniform(t_min, t_max)
-#                 for k in range(d_flat):
-#                     pos[k] += t_step * v[k]
-#             else:
-#                 for k in range(d_flat):
-#                     pos[k] *= 0.99
-#
-#         # 4. Finalize the ray (normalize position to get pure direction)
-#         norm_pos = 0.0
-#         for k in range(d_flat): norm_pos += pos[k]*pos[k]
-#         norm_pos = np.sqrt(norm_pos)
-#
-#         if norm_pos > 0:
-#             for k in range(d_flat):
-#                 rays[i, k] = pos[k] / norm_pos
-#         else:
-#             for k in range(d_flat):
-#                 rays[i, k] = v[k]
-#
-#     return rays
 
 @njit(parallel=True)
 def _generate_guide_rays_mcmc_kernel(d_flat, B, start_pos, target_rays, mix_steps=200):
@@ -315,6 +260,7 @@ class Stage2_Raycaster:
         else:
             raise ValueError('Unknown guidance method')
 
+    @Logger.log_exec
     def _get_chebyshev_center(self):
         m, d = self.B.shape
         c = np.zeros(d + 1)
@@ -332,6 +278,7 @@ class Stage2_Raycaster:
             return res.x[:-1]
         return None
 
+    @Logger.log_exec
     def _generate_continuous_guide_rays(self, target_rays, mix_steps=200):
         """Ultra-fast parallel C-kernel generation of continuous guide rays."""
         start_pos = self._get_chebyshev_center()
@@ -346,13 +293,13 @@ class Stage2_Raycaster:
     def harvest(self, target_rays, R_max, max_per_ray=1):
         if self.d_flat == 0: return np.array([])
 
-        # print(f"Raycaster: Generating {target_rays} Continuous Guide Rays...")
+        Logger(f"Raycaster: Generating {target_rays} Continuous Guide Rays...", Logger.Levels.debug).log()
         guide_rays = self._generate_continuous_guide_rays(target_rays)
         if guide_rays is None:
-            # print("XXX Closed Cone.")
+            Logger("XXX Closed Cone.", Logger.Levels.debug).log()
             return np.array([])
 
-        # print(f"Raycaster: Sweeping lattice along Guide Rays...")
+        Logger(f"Raycaster: Sweeping lattice along Guide Rays...", Logger.Levels.debug).log()
         start_t = time.time()
 
         # Pass max_per_ray into the Numba kernel
@@ -360,7 +307,6 @@ class Stage2_Raycaster:
             self.d_orig, self.d_flat, self.Z, self.B, guide_rays, R_max, max_per_ray=max_per_ray
         )
 
-        # FIXED: Use max_per_ray dynamically instead of the hardcoded 5
         valid_blocks = [raw_buffer[i * max_per_ray : i * max_per_ray + counts[i]]
                         for i in range(len(counts)) if counts[i] > 0]
 
@@ -370,5 +316,5 @@ class Stage2_Raycaster:
         merged = np.vstack(valid_blocks)
         unique_rays = np.unique(merged, axis=0)
 
-        # print(f"Raycaster Yielded {len(unique_rays)} unique, shortest trajectories in {time.time()-start_t:.3f}s")
+        Logger(f"Raycaster Yielded {len(unique_rays)} unique, shortest trajectories in {time.time()-start_t:.3f}s", Logger.Levels.debug).log()
         return unique_rays

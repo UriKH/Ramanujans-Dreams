@@ -35,7 +35,7 @@ class Analyzer(AnalyzerScheme):
 
         for i, shard in enumerate(SmartTQDM(self.shards, desc=f'Analyzing shards', **config.system.TQDM_CONFIG)):
             start = shard.get_interior_point()
-            Logger(f'{"=" * 10} SHARD NO. {i + 1} {"=" * 10}').log(msg_prefix='\n')
+            Logger(f'{"=" * 10} SHARD NO. {i + 1} {"=" * 10}', Logger.Levels.message).log(msg_prefix='\n')
             if analysis_config.SHOW_START_POINT:
                 Logger(f'Chosen shard start point: {start}', Logger.Levels.info).log()
             if analysis_config.SHOW_SEARCHABLE:
@@ -94,7 +94,7 @@ class Analyzer(AnalyzerScheme):
         """
         if ranks < 3:
             Logger('prioritization ranks must be >= 3 (resulting to default = 3), '
-                   'continuing to prevent data loss', Logger.Levels.inform).log()
+                   'continuing to prevent data loss', Logger.Levels.exception).log()
 
         def match_rank(n: int, num):
             step = 1 / n

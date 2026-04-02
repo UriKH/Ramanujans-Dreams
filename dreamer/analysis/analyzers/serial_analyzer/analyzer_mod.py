@@ -42,8 +42,8 @@ class AnalyzerModV1(AnalyzerModScheme):
                                           desc='Analyzing constants and their CMFs', **sys_config.TQDM_CONFIG):
             queue: List[Dict[Searchable, Dict[str, int]]] = []
             Logger(
-                Logger.buffer_print(sys_config.LOGGING_BUFFER_SIZE, f'Analyzing for {constant.name}', '=')
-            ).log(msg_prefix='\n')
+                Logger.buffer_print(sys_config.LOGGING_BUFFER_SIZE, f'Analyzing for {constant.name}', '='), Logger.Levels.message
+            ).log()
 
             # TODO: add option to use mpf - depends on the use_LIReC I guess. maybe there is a way to use only sympy format
             analyzer = Analyzer(constant, shards)
