@@ -1,14 +1,17 @@
 import numpy as np
 import scipy.optimize as opt
 import sympy as sp
-import platform
 from dreamer.utils.logger import Logger
 
-if platform.system().lower() == "windows":
-    Logger(f'This project works best on Linux/MacOS (current OS: Windows), please see instruction manual', Logger.Levels.warning).log()
-else:
+IMPORT_SUCCESS = False
+try:
     from fpylll import IntegerMatrix, LLL, BKZ
-from dreamer.utils.logger import Logger
+    IMPORT_SUCCESS = True
+except ImportError as e:
+    Logger(
+        f'[IMPORTANT!] This project works best on Linux/MacOS (current OS: Windows), please see instruction manual',
+        Logger.Levels.warning
+    ).log()
 
 
 class Stage1_Conditioner:

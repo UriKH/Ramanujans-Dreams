@@ -50,11 +50,13 @@ class Searchable(ABC):
         """
         return self.cmf.dim()
 
-    def calc_delta(self, traj_m, constant: sp.Expr, traj_len: float) \
+    def calc_delta(self, trajectory_matrix, trajectory: Position, start: Position, constant: sp.Expr, traj_len: float) \
             -> Tuple[Optional[float], Optional[rt.Matrix], Optional[float]]:
         """
         Computes delta for a given trajectory, start point, and constant.
-        :param traj_m: The trajectory matrix.
+        :param trajectory_matrix: The trajectory matrix.
+        :param trajectory: Trajectory of the trajectory matrix
+        :param start: Start of the trajectory matrix
         :param constant: The constant to compute delta for.
         :param traj_len: The length of the trajectory vector.
         :return: The pair (delta, estimated_value).
@@ -62,17 +64,48 @@ class Searchable(ABC):
         # Do walk
         try:
             with Logger.simple_timer('Initial walk and inverse'):
-                walked = traj_m.walk({n: 1}, search_config.DEPTH_FROM_TRAJECTORY_LEN(traj_len, self.dim), {n: 0})
+                walked = trajectory_matrix.walk({n: 1}, search_config.DEPTH_FROM_TRAJECTORY_LEN(traj_len, self.dim), {n: 0})
                 if self.use_inv_t:
                     walked = walked.inv().T
         except Exception as e:
             Logger(f'Unexpected exception "{e}" when trying to walk, ignoring trajectory', Logger.Levels.warning).log()
             return None, None, None
-        t1_col = (walked / walked[0, 0]).col(0)
+
+        valid_col = None
+        walk_col = None
+        walk_col_ind = 0
+
+        for col_ind in range(sp.shape(walked)[1]):
+            if walked[0, col_ind].is_zero:
+                continue
+
+            col = (walked / walked[0, col_ind]).col(col_ind)
+            if walk_col is None:
+                walk_col = col
+
+            if all([not v.is_zero for v in col]):
+                valid_col = col
+                walk_col_ind = col_ind
+                if col_ind != 0:
+                    Logger(
+                        f'Using column {col_ind} instead of column 0 in walk matrix delta computation [start={start}, trajectory={trajectory}]',
+                        Logger.Levels.warning
+                    ).log()
+                break
+
+        if walk_col is None:
+            Logger(
+                f'Could not normalize any walk matrix column [start={start}, trajectory={trajectory}]. Skipping trajectory...',
+                Logger.Levels.warning
+            ).log()
+            return None, None, None
+
+        if valid_col is not None:
+            walk_col = valid_col
 
         # initial values
         p, q = None, None
-        values = [item for item in t1_col]
+        values = [item for item in walk_col]
         with Logger.simple_timer('constant heavy evalf'):
             pi_30000 = constant.evalf(30000)
             pi_300 = constant.evalf(300)
@@ -99,15 +132,18 @@ class Searchable(ABC):
 
         # If cache misses - use LIReC
         if not cache_hit:
+            if walk_col is None:
+                Logger(
+                    'All walk matrix columns have a 0 therefore LIReC could not be used. Skipping trajectory...',
+                    Logger.Levels.warning
+                ).log()
+                return None, None, None
+
             try:
                 with Logger.simple_timer('LIReC identify'):
-                    res = db.identify([pi_300] + t1_col[1:])
+                    res = db.identify([pi_300] + walk_col[1:])
             except Exception as e:
-                Logger(
-                    f'LIReC failed with: "{e}"\n'
-                    f'walk matrix column: {t1_col}',
-                    Logger.Levels.exception
-                ).log()
+                Logger(f'LIReC failed with: "{e}"', Logger.Levels.exception).log()
 
 
                 # LIReC might fail for some reason like tolerance or something else.
@@ -137,7 +173,7 @@ class Searchable(ABC):
                 numerator, denom = sp.fraction(estimated_expr)
                 p_dict = numerator.as_coefficients_dict()
                 q_dict = denom.as_coefficients_dict()
-                syms = sp.symbols(f'c:{traj_m.shape[0]}')[1:]
+                syms = sp.symbols(f'c:{trajectory_matrix.shape[0]}')[1:]
                 ext_syms = [1] + list(syms)
                 p, q = [p_dict[sym] for sym in ext_syms], [q_dict[sym] for sym in ext_syms]
 
@@ -150,9 +186,9 @@ class Searchable(ABC):
         # Check path convergence
         try:
             with Logger.simple_timer('convergence check'):
-                converge, (_, limit, _) = self._does_converge(traj_m, traj_len, p, q, self.dim)
+                converge, (_, limit, _) = self._does_converge(trajectory_matrix, traj_len, p, q, self.dim, walk_col_ind)
         except Exception as e:
-            print(f'convergence exception: {e}')
+            Logger(f'convergence exception: {e}', Logger.Levels.exception).log(add_stack_trace=config.logging.EXCEPTION_SHOW_TRACE)
             converge = False
         if not converge:
             return None, None, None
@@ -224,8 +260,8 @@ class Searchable(ABC):
                 traj_m.matrix = traj_m.matrix.applyfunc(sp.cancel)
         except Exception as e:
             Logger(
-                f'error while computing trajectory matrix for start={start}, trajectory={traj}: {e}\n'
-                f'This was not expected to happen', Logger.Levels.exception
+                f'error while computing trajectory matrix for start={start}, trajectory={traj}: {e} ',
+                Logger.Levels.exception
             ).log()
             return sd
 
@@ -249,13 +285,13 @@ class Searchable(ABC):
             if not use_LIReC and not find_limit:
                 print('in order to compute delta must find limit - defaulting to using LIReC')
             sd.delta, sd.initial_values, sd.limit = self.calc_delta(
-                traj_m, self.const.value_sympy, np.sqrt(np.sum(np.array(list(traj.values()), dtype=np.float64) ** 2)).astype(float)
+                traj_m, traj, start, self.const.value_sympy, np.sqrt(np.sum(np.array(list(traj.values()), dtype=np.float64) ** 2)).astype(float)
             )
             if sd.delta is not None:
                 sd.LIReC_identify = True
         return sd
 
-    def _does_converge(self, t_mat: rt.Matrix, traj_len: float, p, q, dim: int)\
+    def _does_converge(self, t_mat: rt.Matrix, traj_len: float, p, q, dim: int, walk_col_ind: int = 0)\
             -> Tuple[bool, Tuple[Limit, Limit, Limit]]:
         """
         Checks if the trajectory matrix converges to the constant using the p, q vectors.
@@ -264,6 +300,7 @@ class Searchable(ABC):
         :param p: p vector
         :param q: q vector
         :param dim: Dimension of the searchable.
+        :param walk_col_ind: Walk matrix column index to extract the limit from.
         :return: True if the trajectory matrix converges, false otherwise.
         """
         # compute limits
@@ -281,7 +318,7 @@ class Searchable(ABC):
             mat = lim.current
             if self.use_inv_t:
                 mat = mat.inv().T
-            t1_col = (mat / mat[0, 0]).col(0)
+            t1_col = (mat / mat[0, walk_col_ind]).col(walk_col_ind)
             values = [item for item in t1_col]
             values_vec = sp.Matrix(values)
             p = sp.Matrix(p).T

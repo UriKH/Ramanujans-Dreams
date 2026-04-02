@@ -99,7 +99,7 @@ class Logger:
             case Logger.Levels.warning:
                 sys_logger.warning(final_msg)
             case Logger.Levels.exception:
-                sys_logger.error(final_msg)
+                sys_logger.error(final_msg, exc_info=add_stack_trace)
             case Logger.Levels.fatal:
                 sys_logger.critical(f"{final_msg} in {self.calling_function_name} -> exiting", exc_info=True)
                 exit(1)
