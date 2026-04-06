@@ -10,7 +10,8 @@ from dreamer.configs import (
     sys_config,
     DBUsages
 )
-from typing import Optional, List, Dict, ShiftCMF
+from typing import Optional, List, Dict
+from dreamer.utils.types import ShiftCMF
 
 class BasicDBMod(DBModScheme):
     """

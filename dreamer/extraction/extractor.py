@@ -24,7 +24,8 @@ from .utils import initial_points as init_points
 from functools import partial
 from ramanujantools.cmf import pFq as rt_pFq
 from ramanujantools import Position
-from typing import List, Dict, Set, ShiftCMF
+from typing import List, Dict, Set
+from dreamer.utils.types import ShiftCMF
 
 
 class ShardExtractorMod(ExtractionModScheme):

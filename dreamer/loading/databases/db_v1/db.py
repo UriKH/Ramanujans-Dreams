@@ -8,7 +8,8 @@ from dreamer.utils.constants.constant import Constant
 from dreamer.loading.funcs.formatter import Formatter
 from ...errors import *
 from dreamer.loading.config import *
-from typing import Optional, List, Dict, ShiftCMF
+from typing import Optional, List, Dict
+from dreamer.utils.types import ShiftCMF
 
 
 class DB(DBScheme):
