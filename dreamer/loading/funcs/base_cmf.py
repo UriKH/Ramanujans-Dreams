@@ -2,8 +2,12 @@ import json
 
 from ramanujantools import Matrix
 from dreamer.utils.constants.constant import Constant
+from dreamer.utils.types import ShiftCMF
 from dreamer.loading.funcs.formatter import Formatter
-from dreamer.utils.types import *
+from typing import Optional, List, Tuple, Union
+from ramanujantools.cmf import CMF
+from ramanujantools import Position
+import sympy as sp
 
 
 class BaseCMF(Formatter):

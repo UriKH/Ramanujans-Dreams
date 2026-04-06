@@ -1,4 +1,8 @@
 from collections import defaultdict
+from ramanujantools.cmf import CMF
+from functools import partial
+from typing import List, Dict, Optional, Type
+import sympy as sp
 import networkx as nx
 from itertools import combinations
 import os
@@ -10,12 +14,10 @@ from dreamer.loading.funcs.formatter import Formatter
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.schemes.extraction_scheme import ExtractionModScheme
 from dreamer.utils.storage import Exporter, Importer, Formats
-from dreamer.utils.types import *
+from dreamer.utils.types import ShiftCMF
 from dreamer.utils.logger import Logger
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs import config
-from functools import partial
-import sympy as sp
 
 sys_config = config.system
 extraction_config = config.extraction

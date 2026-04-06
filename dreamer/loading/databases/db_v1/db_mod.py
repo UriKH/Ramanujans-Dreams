@@ -1,6 +1,7 @@
 from .db import DB
 from dreamer.utils.schemes.db_scheme import DBModScheme
 from dreamer.utils.constants.constant import Constant
+from dreamer.utils.schemes.module import CatchErrorInModule
 from ...errors import MissingPath
 from . import config as v1_config
 
@@ -9,9 +10,7 @@ from dreamer.configs import (
     sys_config,
     DBUsages
 )
-from dreamer.utils.types import *
-from dreamer.utils.schemes.module import CatchErrorInModule
-
+from typing import Optional, List, Dict, ShiftCMF
 
 class BasicDBMod(DBModScheme):
     """

@@ -1,8 +1,8 @@
-from dreamer.utils.types import *
 from dataclasses import dataclass, field
-from ramanujantools import Matrix
+from ramanujantools import Matrix, Position
 import pandas as pd
 from collections import UserDict
+from typing import Dict, List, Optional, Tuple
 
 
 @dataclass(frozen=True)

@@ -10,7 +10,6 @@ from dreamer.utils.constants.constant import Constant
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.storage.exporter import Exporter
 from dreamer.utils.storage.formats import Formats
-from dreamer.utils.types import *
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.configs import config
 from dreamer.utils.mp_manager import create_pool
@@ -24,6 +23,8 @@ import numpy as np
 from .utils import initial_points as init_points
 from functools import partial
 from ramanujantools.cmf import pFq as rt_pFq
+from ramanujantools import Position
+from typing import List, Dict, Set, ShiftCMF
 
 
 class ShardExtractorMod(ExtractionModScheme):

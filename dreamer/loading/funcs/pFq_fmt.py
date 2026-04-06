@@ -2,8 +2,10 @@ import json
 from ramanujantools.cmf import pFq as rt_pFq
 from dreamer.utils.constants.constant import Constant
 from dreamer.loading.funcs.formatter import Formatter
-from dreamer.utils.types import *
-from dreamer.configs import config
+from dreamer.utils.types import ShiftCMF
+from typing import Optional, List, Tuple, Union
+import sympy as sp
+from ramanujantools import Position
 
 
 class pFq(Formatter):

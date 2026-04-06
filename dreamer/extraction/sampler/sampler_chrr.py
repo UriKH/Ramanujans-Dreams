@@ -2,8 +2,8 @@ import time
 
 from dreamer.utils.rand import *
 from dreamer.utils.logger import Logger
-from dreamer.utils.types import *
 from dreamer.extraction.utils.fast_gcd import *
+from typing import Tuple
 
 
 @njit(cache=True)

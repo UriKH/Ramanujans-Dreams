@@ -1,6 +1,7 @@
 import mpmath as mp
 from .configurable import Configurable
-from dreamer.utils.types import *
+from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional
 
 
 @dataclass

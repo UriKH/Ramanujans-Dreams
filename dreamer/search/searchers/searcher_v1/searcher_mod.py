@@ -3,11 +3,12 @@ from dreamer.utils.storage.exporter import Exporter, Formats
 from dreamer.utils.storage.storage_objects import DataManager
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.schemes.module import CatchErrorInModule
-from dreamer.utils.types import *
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from ...methods.serial.serial_searcher import SerialSearcher
 from . import config as search_config_local
 from dreamer.configs import config
+from ramanujantools.cmf import CMF
+from typing import Dict, List
 import os
 
 search_config = config.search

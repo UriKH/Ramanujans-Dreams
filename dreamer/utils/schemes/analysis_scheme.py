@@ -1,10 +1,10 @@
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.storage.storage_objects import DataManager
 from dreamer.utils.schemes.module import Module
-from dreamer.utils.types import *
 from dreamer.utils.constants.constant import Constant
 
 from abc import abstractmethod, ABC
+from typing import Dict, List, Optional, Any
 
 
 class AnalyzerModScheme(Module):
