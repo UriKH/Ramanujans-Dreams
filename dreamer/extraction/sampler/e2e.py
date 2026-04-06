@@ -20,7 +20,8 @@ class EndToEndSamplingEngine:
         :param d_flat: dimension of the flatland space
         :param samples: number of samples - darts to throw.
         """
-        if len(B) == 0: return 1.0
+        if len(B) == 0:
+            return 1.0
 
         # Pure Gaussian distribution (Spherically symmetric)
         darts = np.random.randn(samples, d_flat)
@@ -58,7 +59,8 @@ class EndToEndSamplingEngine:
         :param fraction: The fraction of space the cone takes
         :param d_flat: The dimension of the sample space
         """
-        if len(rays) < 2: return
+        if len(rays) < 2:
+            return
 
         # 1. Calculate the dynamic theoretical threshold
         surface_dim = max(1.0, float(d_flat - 1))
@@ -112,7 +114,7 @@ class EndToEndSamplingEngine:
 
         if not success:
             Logger(
-                f"Could not preform uniform sampling as expected... (if this repeats many times please report)",
+                "Could not preform uniform sampling as expected... (if this repeats many times please report)",
                 Logger.Levels.warning
             ).log()
 
@@ -140,7 +142,7 @@ class EndToEndSamplingEngine:
             Logger.Levels.debug
         ).log()
 
-        if type(target_func) == int:
+        if type(target_func) is int:
             target_rays = target_func
         else:
             amount_safety = 1.05

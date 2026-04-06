@@ -83,4 +83,3 @@ class pFq(Formatter):
 
     def __hash__(self):
         return hash((self.p, self.q, self.z, super().__hash__()))
-

@@ -48,10 +48,9 @@ class ExtractionScheme(ABC):
         self.cmf_data: ShiftCMF = cmf_data
 
     @abstractmethod
-    def extract_searchables(self, *args) -> List[Searchable]:
+    def extract(self, *args) -> List[Searchable]:
         """
         Extracts searchables from the CMF matching the provided shift.
         :return: A list of searchables found in the CMF.
         """
         raise NotImplementedError
-    

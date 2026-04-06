@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Tuple, Dict
+from typing import Callable, Optional, Tuple
 from numba import njit, types
 from numba.typed import Dict
 import numpy as np
@@ -6,7 +6,6 @@ import multiprocessing as mp
 import itertools
 from dreamer.utils.logger import Logger
 from functools import partial
-from numba import njit
 
 _worker_cache = {}
 
@@ -88,7 +87,7 @@ def __generate_numba_worker(M):
 def dynamic_compute_block(fixed_prefix, D, S, A, b):
     M_val = A.shape[0]
     K = len(fixed_prefix)
-    rem_D = D - K  
+    rem_D = D - K
 
     state = np.zeros(D, dtype=np.int32)
     for i in range(K):
@@ -103,7 +102,7 @@ def dynamic_compute_block(fixed_prefix, D, S, A, b):
 
     BLOCK_SIZE = {chunk_size}
     block = np.zeros((BLOCK_SIZE, D), dtype=np.int64) # Pure integer block!
-    total_points = np.int64(S) ** np.int64(rem_D) 
+    total_points = np.int64(S) ** np.int64(rem_D)
     points_generated = np.int64(0)
 
     while points_generated < total_points:
@@ -116,8 +115,8 @@ def dynamic_compute_block(fixed_prefix, D, S, A, b):
             points_generated += 1
             for d in range(D - 1, K - 1, -1):   # Advance the state to smallest step
                 state[d] += 1
-                if state[d] < S: break 
-                else: state[d] = 0 
+                if state[d] < S: break
+                else: state[d] = 0
 
         for i in range(current_batch_size):
             is_on_hyperplane = False

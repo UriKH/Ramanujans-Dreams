@@ -1,7 +1,6 @@
 import numpy as np
 from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.extraction.utils.initial_points import compute_mapping
-import pytest
 import sympy as sp
 
 

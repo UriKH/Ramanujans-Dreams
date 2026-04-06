@@ -38,7 +38,7 @@ class FormattingError(JSONError):
     {
         "command": <"update" or "replace" or "insert"">,
         "data":
-        [   
+        [
             {
                 "constant": <constant>,
                 "data": {
@@ -50,7 +50,7 @@ class FormattingError(JSONError):
             {...}
         ]
     }
-    
+
     (or create an example manually by exporting a formatter to JSON)
     """
     pass

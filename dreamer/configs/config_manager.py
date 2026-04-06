@@ -1,0 +1,66 @@
+from .system import sys_config
+from .database import db_config
+from .analysis import analysis_config
+from .search import search_config
+from .extraction import extraction_config
+from .logging import logging_config
+from dreamer.utils.logger import Logger
+from typing import Dict, List, Any
+
+
+class ConfigManager:
+    """
+    Global configuration manager for the search system
+    """
+    system = sys_config
+    database = db_config
+    extraction = extraction_config
+    analysis = analysis_config
+    search = search_config
+    logging = logging_config
+
+    def configure(self, **overrides):
+        """
+        Override multiple configs at once.
+
+        Example:
+            Config.configure(system={"CONSTANT": "X"}, database={"DB_NAME": "foo"})
+        """
+        warned = False
+        for section, values in overrides.items():
+            cfg = getattr(self, section, None)
+            if cfg is not None:
+                for key, val in values.items():
+                    setattr(cfg, key, val)
+            else:
+                Logger(
+                    f'section {section} is not defined, try: system / database / analysis / search',
+                    Logger.Levels.exception
+                ).log()
+                if not warned:
+                    warned = True
+                    Logger(
+                        'Note that these are the builtin attributes: '
+                        'system\n\ndatabase\n\nextraction\n\nanalysis\n\nsearch\n\nlogging',
+                        Logger.Levels.exception
+                    ).log()
+
+    def get_configurables(self) -> Dict[str, List[str]]:
+        return {
+            'system': self.system.get_configurations(),
+            'database': self.database.get_configurations(),
+            'extraction': self.extraction.get_configurations(),
+            'analysis': self.analysis.get_configurations(),
+            'search': self.search.get_configurations(),
+            'logging': self.logging.get_configurations(),
+        }
+
+    def export_configurations(self) -> Dict[str, Dict[str, Any]]:
+        return {
+            'system': self.system.export_configurations(),
+            'database': self.database.export_configurations(),
+            'extraction': self.extraction.export_configurations(),
+            'analysis': self.analysis.export_configurations(),
+            'search': self.search.export_configurations(),
+            'logging': self.logging.export_configurations(),
+        }

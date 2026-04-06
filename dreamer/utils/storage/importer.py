@@ -41,7 +41,6 @@ class Importer:
         A generator for data (imports data from directory in chunks)
         :param path: Path of directory to import from as stream
         """
-        
         if not os.path.exists(path):
             raise ValueError(f"Path {path} does not exist")
 

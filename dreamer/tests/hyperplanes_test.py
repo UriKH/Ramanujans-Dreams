@@ -91,7 +91,7 @@ class TestClass:
         (x + y, Position({x: sp.Rational(1, 2), y: -sp.Rational(1, 2), z: 0}), x + y),
         (6 * x + 6 * y + 5, Position({x: sp.Rational(1, 2), y: sp.Rational(1, 3), z: 0}), x + y)
     ])
-    def test_shift_application(self, input_expr, shift, output_expr):
+    def test_shift_removal(self, input_expr, shift, output_expr):
         hp = Hyperplane(input_expr, symbols=[x, y, z])
         shifted = hp.remove_shift(shift).expr
         assert shifted.equals(output_expr), f"Expected {output_expr}, but got {shifted}"

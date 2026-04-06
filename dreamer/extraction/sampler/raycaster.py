@@ -6,7 +6,7 @@ from dreamer.utils.logger import Logger
 
 
 @njit(parallel=True)
-def _raycast_kernel_parallel(d_orig, d_flat, Z_int, B, continuous_rays, R_max, t_step=0.1, max_per_ray=5):
+def _raycast(d_orig, d_flat, Z_int, B, continuous_rays, R_max, t_step=0.1, max_per_ray=5):
     num_rays = len(continuous_rays)
     m = len(B)
 
@@ -18,7 +18,7 @@ def _raycast_kernel_parallel(d_orig, d_flat, Z_int, B, continuous_rays, R_max, t
     # Launch parallel threads!
     for r_idx in prange(num_rays):
         v_dir = continuous_rays[r_idx]
-        base_idx = r_idx * max_per_ray # The exact memory lane for this specific ray
+        base_idx = r_idx * max_per_ray  # The exact memory lane for this specific ray
         hits = 0
 
         t = 1.0
@@ -55,7 +55,8 @@ def _raycast_kernel_parallel(d_orig, d_flat, Z_int, B, continuous_rays, R_max, t
                 a = abs(v_real[0])
                 for i in range(1, d_orig):
                     b = abs(v_real[i])
-                    while b: a, b = b, a % b
+                    while b:
+                        a, b = b, a % b
 
                 if a == 1:
                     is_new = True
@@ -63,7 +64,9 @@ def _raycast_kernel_parallel(d_orig, d_flat, Z_int, B, continuous_rays, R_max, t
                         prev = harvest_buffer[base_idx + hits - 1]
                         match = True
                         for dim in range(d_orig):
-                            if prev[dim] != v_real[dim]: match = False; break
+                            if prev[dim] != v_real[dim]:
+                                match = False
+                                break
                         if match:
                             is_new = False
 
@@ -80,7 +83,7 @@ def _raycast_kernel_parallel(d_orig, d_flat, Z_int, B, continuous_rays, R_max, t
 
 
 @njit(parallel=True)
-def _generate_guide_rays_mcmc_kernel(d_flat, B, start_pos, target_rays, mix_steps=200):
+def _guide_rays_mcmc(d_flat, B, start_pos, target_rays, mix_steps=200):
     rays = np.zeros((target_rays, d_flat), dtype=np.float64)
     m = len(B)
     num_chains = 16
@@ -99,9 +102,11 @@ def _generate_guide_rays_mcmc_kernel(d_flat, B, start_pos, target_rays, mix_step
         for _ in range(1000):   # Burn-in
             v = np.random.randn(d_flat)
             norm_v = 0.0
-            for j in range(d_flat): norm_v += v[j]*v[j]
+            for j in range(d_flat):
+                norm_v += v[j]*v[j]
             norm_v = np.sqrt(norm_v)
-            for j in range(d_flat): v[j] /= norm_v
+            for j in range(d_flat):
+                v[j] /= norm_v
 
             # Standard Hit-and-Run on Hyperplanes
             t_min, t_max = -1e9, 1e9
@@ -187,7 +192,7 @@ def _generate_guide_rays_mcmc_kernel(d_flat, B, start_pos, target_rays, mix_step
                     for k in range(d_flat):
                         pos[k] *= 0.99
 
-                # Project back to sphere
+                # Project back to a sphere
                 norm_pos = 0.0
                 for k in range(d_flat):
                     norm_pos += pos[k]*pos[k]
@@ -203,7 +208,7 @@ def _generate_guide_rays_mcmc_kernel(d_flat, B, start_pos, target_rays, mix_step
 
 
 @njit(parallel=True)
-def _generate_guide_rays_mhs_kernel(d_flat, B, start_pos, target_rays, mix_steps=200):
+def _guide_rays_mhs(d_flat, B, start_pos, target_rays, mix_steps=200):
     rays = np.zeros((target_rays, d_flat), dtype=np.float64)
     m = len(B)
     num_chains = 16
@@ -260,7 +265,8 @@ def _generate_guide_rays_mhs_kernel(d_flat, B, start_pos, target_rays, mix_steps
 
             # Metropolis-Hastings Rule: Accept if valid, stay in place if invalid
             if valid:
-                for k in range(d_flat): pos[k] = new_pos[k]
+                for k in range(d_flat):
+                    pos[k] = new_pos[k]
 
             # Record Breadcrumb
             if step_idx >= 1000 and (step_idx - 1000) % mix_steps == 0:
@@ -286,9 +292,9 @@ class Stage2Raycaster:
         self.d_flat = self.Z.shape[1]
 
         if guidance_method == 'mcmc':
-            self.guidance_method = _generate_guide_rays_mcmc_kernel
+            self.guidance_method = _guide_rays_mcmc
         elif guidance_method == 'mhs':
-            self.guidance_method = _generate_guide_rays_mhs_kernel
+            self.guidance_method = _guide_rays_mhs
         else:
             raise ValueError('Unknown guidance method')
 
@@ -352,11 +358,11 @@ class Stage2Raycaster:
         Logger("Raycaster: Sweeping lattice along Guide Rays...", Logger.Levels.debug).log()
         start_t = time.time()
 
-        raw_buffer, counts = _raycast_kernel_parallel(
+        raw_buffer, counts = _raycast(
             self.d_orig, self.d_flat, self.Z, self.B, guide_rays, R_max, max_per_ray=max_per_ray
         )
 
-        valid_blocks = [raw_buffer[i * max_per_ray : i * max_per_ray + counts[i]]
+        valid_blocks = [raw_buffer[i * max_per_ray: i * max_per_ray + counts[i]]
                         for i in range(len(counts)) if counts[i] > 0]
 
         if not valid_blocks:

@@ -76,4 +76,3 @@ class BaseCMF(Formatter):
 
     def __hash__(self):
         return hash((hash(self.cmf), super().__hash__()))
-

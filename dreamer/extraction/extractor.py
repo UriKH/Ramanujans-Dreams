@@ -20,7 +20,6 @@ import sympy as sp
 import numpy as np
 import math
 from collections import defaultdict
-from numba.typed import Dict
 from functools import partial
 from ramanujantools.cmf import pFq as rt_pFq
 from ramanujantools import Position
@@ -66,7 +65,7 @@ class ShardExtractorMod(ExtractionModScheme):
                     extractor = ShardExtractor(
                         const, cmf_shift
                     )
-                    shards = extractor.extract_searchables(call_number=i + 1)
+                    shards = extractor.extract(call_number=i + 1)
                     all_shards[const] += shards
                     export_stream(shards)
         return all_shards
@@ -93,7 +92,7 @@ class ShardExtractor(ExtractionScheme):
         """
         return list(self.cmf_data.cmf.matrices.keys())
 
-    def extract_cmf_hps(self) -> Set[Hyperplane]:
+    def _extract_cmf_hps(self) -> Set[Hyperplane]:
         """
         Compute the hyperplanes of the CMF - zeros of the characteristic polynomial of each matrix and the poles of each
          matrix entry.
@@ -129,13 +128,13 @@ class ShardExtractor(ExtractionScheme):
                 filtered_hps.add(hp)
         return filtered_hps
 
-    def extract_searchables(self, call_number=None) -> List[Shard]:
+    def extract(self, call_number=None) -> List[Shard]:
         """
         Extracts the shards from the CMF
         :return: The list of shards matching the CMF
         """
         # compute hyperplanes and prepare sample point
-        hps = self.extract_cmf_hps()
+        hps = self._extract_cmf_hps()
 
         if not hps:
             return [
@@ -218,7 +217,7 @@ if __name__ == '__main__':
     # This is pi 2F1 CMF
     pi = pFq(2, 1, sp.Rational(1, 2))
 
-    shift = Position({x0: sp.Rational(1, 2), x1: sp.Rational(1,2), y0: sp.Rational(1,2)})
+    shift = Position({x0: sp.Rational(1, 2), x1: sp.Rational(1, 2), y0: sp.Rational(1, 2)})
     # pprint(ShardExtractor('pi', pi, shift).extract_cmf_hps())
     # ppt = ShardExtractor('pi', pi, shift).extract_shards()
     # pprint(len(ppt))

@@ -12,7 +12,8 @@ class TestHarness:
         self.EngineClass = engine_class
         self.results = {}
 
-    def _generate_gauntlet_matrix(self, scenario_type, seeding=False):
+    @staticmethod
+    def _generate_matrix(scenario_type, seeding=False):
         """
         Dynamically generates guaranteed-valid matrices for the 3 archetypes.
         """
@@ -61,7 +62,8 @@ class TestHarness:
                     row, dot = -row, -dot
                 if dot > 0:
                     max_dot = max(1, 10 // thinness)
-                    if thinness > 1 and dot > max_dot: continue
+                    if thinness > 1 and dot > max_dot:
+                        continue
                     B.append(row)
             B = np.array(B)
             return np.vstack((E, -E, B))
@@ -113,8 +115,10 @@ class TestHarness:
         B = np.array(B)
 
         A_prime_blocks = []
-        if len(E) > 0: A_prime_blocks.extend([E, -E])
-        if len(B) > 0: A_prime_blocks.append(B)
+        if len(E) > 0:
+            A_prime_blocks.extend([E, -E])
+        if len(B) > 0:
+            A_prime_blocks.append(B)
 
         return np.vstack(A_prime_blocks)
 
@@ -123,7 +127,7 @@ class TestHarness:
 
         for name in scenarios:
             print(f"\n[{name}] Initiating Test Sequence...")
-            A_prime = self._generate_gauntlet_matrix(name, seeding)
+            A_prime = self._generate_matrix(name, seeding)
 
             try:
                 engine = self.EngineClass(A_prime)
@@ -185,7 +189,7 @@ class TestHarness:
         emp_quantiles = np.sort((lengths / R_max) ** data["d_flat"])
         theo_quantiles = np.linspace(0, 1, len(emp_quantiles))
         axs[1, 1].step(theo_quantiles, emp_quantiles, color='#5DADE2', label='Empirical')
-        axs[1, 1].plot([0,1], [0,1], 'r--', label='Ideal')
+        axs[1, 1].plot([0, 1], [0, 1], 'r--', label='Ideal')
         axs[1, 1].set_title(f'4. Radial Volume Uniformity for {scenario_name}')
         axs[1, 1].legend()
 
@@ -208,7 +212,7 @@ def run_diagnostic_dashboard(target_quota=100_000, scenario_name="15D_Realistic_
     if matrix is not None:
         A_prime = matrix
     else:
-        A_prime = harness._generate_gauntlet_matrix(scenario_name)
+        A_prime = harness._generate_matrix(scenario_name)
 
     # 3. Manually run the test so we can request a large quota
     print(f"\nTargeting {target_quota} rays for {scenario_name}...")

@@ -34,7 +34,7 @@ class Analyzer(AnalyzerScheme):
         """
         managers = {}
 
-        for i, shard in enumerate(SmartTQDM(self.shards, desc=f'Analyzing shards', **config.system.TQDM_CONFIG)):
+        for i, shard in enumerate(SmartTQDM(self.shards, desc='Analyzing shards', **config.system.TQDM_CONFIG)):
             start = shard.get_interior_point()
             Logger(f'{"=" * 10} SHARD NO. {i + 1} {"=" * 10}', Logger.Levels.message).log(msg_prefix='\n')
             if analysis_config.SHOW_START_POINT:
@@ -79,11 +79,11 @@ class Analyzer(AnalyzerScheme):
                 if best_delta is not None:
                     Logger(
                         f'Ignoring shard - identified <= {analysis_config.IDENTIFY_THRESHOLD * 100}% '
-                        f'of tested trajectories',
+                        'of tested trajectories',
                         Logger.Levels.info
                     ).log()
                 else:
-                    Logger(f'No best delta was found', Logger.Levels.warning).log()
+                    Logger('No best delta was found', Logger.Levels.warning).log()
         return managers
 
     # TODO: add tests for this function
@@ -102,16 +102,16 @@ class Analyzer(AnalyzerScheme):
         def match_rank(n: int, num):
             step = 1 / n
             ranks = [-1 + k * step for k in range(n + 1)]
-            l = 0
-            r = len(ranks) - 1
+            left = 0
+            right = len(ranks) - 1
 
-            while l < r:
-                mid = (l + r) // 2
+            while left < right:
+                mid = (left + right) // 2
                 if num > ranks[mid]:
-                    l = mid + 1
+                    left = mid + 1
                 else:
-                    r = mid
-            return l + 1
+                    right = mid
+            return left + 1
 
         ranked = {}
         for shard, dm in managers.items():

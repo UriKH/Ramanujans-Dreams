@@ -1,13 +1,16 @@
+# TODO: This is a bad test file which doesn't work. It is here as WIP and needs fixing!
+
 import unittest
 import sympy as sp
 from contextlib import contextmanager
 import os
 from ramanujantools.cmf import pFq
+from ramanujantools import Position
 
-from db_stage.errors import ConstantAlreadyExists, ConstantDoesNotExist
-from db_stage.funcs.pFq_fmt import pFq_formatter
+from dreamer.loading.errors import ConstantAlreadyExists, ConstantDoesNotExist
+from dreamer.loading.funcs.pFq_fmt import pFq as pFq_formatter
 from dreamer.loading.databases.db_v1.db import DB
-from utils.position import Position
+
 
 
 @contextmanager
@@ -20,15 +23,15 @@ def safe(testcase, exc_type=Exception):
 
 class TestDB(unittest.TestCase):
     test_db = None
-    path = f'db_v1_test.db'
-    json_path = f'db_v1_test.json'
+    path = 'db_v1_test.db'
+    json_path = 'db_v1_test.json'
 
     @classmethod
     def setUpClass(cls):
         try:
             os.remove(TestDB.path)
-        except:
-            pass
+        except Exception as e:
+            print(f'error: {e}')
         TestDB.test_db = DB(TestDB.path)
 
     @classmethod

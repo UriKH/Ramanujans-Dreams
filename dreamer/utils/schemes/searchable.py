@@ -303,16 +303,16 @@ class Searchable(ABC):
         """
         # compute limits
         depth = search_config.DEPTH_FROM_TRAJECTORY_LEN(traj_len, dim)
-        l1, l2, l3 = t_mat.limit(
+        lim1, lim2, lim3 = t_mat.limit(
             {n: 1},
             [round(coef * depth) for coef in search_config.DEPTH_CONVERGENCE_THRESHOLD],
             {n: 0}
         )
         floats = []
-        l = [l1, l2, l3]
+        limits = [lim1, lim2, lim3]
 
         # transform to floats
-        for lim in l:
+        for lim in limits:
             mat = lim.current
             if self.use_inv_t:
                 mat = mat.inv().T
@@ -332,8 +332,8 @@ class Searchable(ABC):
 
         # check diffs
         if diff1 < search_config.LIMIT_DIFF_ERROR_BOUND and diff2 < search_config.LIMIT_DIFF_ERROR_BOUND:
-            return True, (l1, l2, l3)
-        return False, (l1, l2, l3)
+            return True, (lim1, lim2, lim3)
+        return False, (lim1, lim2, lim3)
 
     @abstractmethod
     def get_interior_point(self) -> Position:

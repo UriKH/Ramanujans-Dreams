@@ -11,7 +11,7 @@ class Exporter:
     """
     A utility class for exporting data into files as pickle or JSON
     """
-    
+
     @classmethod
     def export(
         cls,

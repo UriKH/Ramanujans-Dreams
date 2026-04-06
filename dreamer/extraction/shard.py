@@ -92,7 +92,7 @@ class Shard(Searchable):
         and b is the free terms vector.
         """
         if any(ind != 1 and ind != -1 for ind in above_below_indicator):
-            raise ValueError(f"Indicators vector must be 1 (above) or -1 (below)")
+            raise ValueError("Indicators vector must be 1 (above) or -1 (below)")
 
         symbols = hyperplanes[0].symbols
         symbols = list(symbols)

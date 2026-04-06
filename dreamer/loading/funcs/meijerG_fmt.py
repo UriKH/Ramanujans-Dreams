@@ -92,4 +92,3 @@ class MeijerG(Formatter):
 
     def __hash__(self):
         return hash((self.m, self.n, self.p, self.q, self.z, self.shifts))
-

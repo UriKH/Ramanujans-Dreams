@@ -1,7 +1,7 @@
 from collections import defaultdict
 from ramanujantools.cmf import CMF
 from functools import partial
-from typing import List, Dict, Optional, Type
+from typing import List, Dict, Optional, Type, Union
 import sympy as sp
 import networkx as nx
 from itertools import combinations
@@ -21,6 +21,7 @@ from dreamer.configs import config
 
 sys_config = config.system
 extraction_config = config.extraction
+constant_type = Union[Constant, str]
 
 
 class System:
@@ -42,7 +43,7 @@ class System:
         :param searcher: A SearcherModScheme type used to deepen the search done by the analyzers
         """
         if not isinstance(if_srcs, list):
-            raise ValueError(f'Inspiration Functions must be contained in a list')
+            raise ValueError('Inspiration Functions must be contained in a list')
 
         self.if_srcs = if_srcs
         self.extractor = extractor
@@ -50,7 +51,7 @@ class System:
         self.searcher = searcher
 
         if not self.if_srcs and self.extractor:
-            raise ValueError(f'Could not preform extraction if no sourced to extract from where provided')
+            raise ValueError('Could not preform extraction if no sourced to extract from where provided')
 
     def run(self, constants: Optional[List[str | Constant] | str | Constant] = None):
         """
@@ -247,7 +248,7 @@ class System:
         #             cmf_data[const_shards[0].const] = const_shards
 
         analyzers_results = [analyzer(cmf_data).execute() for analyzer in analyzers]
-        priorities = self.__aggregate_analyzers(analyzers_results)
+        priorities = self.__compact_analysis_results(analyzers_results)
 
         # add unprioritized elements to the end
         for c, l in results.items():
@@ -297,7 +298,7 @@ class System:
             os.rmdir(sys_config.EXPORT_SEARCH_RESULTS)
 
     @staticmethod
-    def __aggregate_analyzers(dicts: List[Dict[Constant, List[Searchable]]]) -> Dict[Constant, List[Searchable]]:
+    def __compact_analysis_results(dicts: List[Dict[Constant, List[Searchable]]]) -> Dict[Constant, List[Searchable]]:
         """
         Aggregates the priority lists from several analyzers into one
         :param dicts: A list of mappings from constant name to a list of its relevant subspaces
@@ -315,7 +316,7 @@ class System:
             for lst in lists:
                 for i, a in enumerate(lst[:-1]):
                     for j, b in enumerate(lst[i + 1:]):
-                        prefs[(a, b)] += 1  #(j - i) * 1. / len(lst)
+                        prefs[(a, b)] += 1  # (j - i) * 1. / len(lst)
 
             G = nx.DiGraph()
             G.add_nodes_from(searchables)

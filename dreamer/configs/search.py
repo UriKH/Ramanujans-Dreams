@@ -32,4 +32,5 @@ class SearchConfig(Configurable):
     COMPUTE_GCD_SLOPE: bool = False
     COMPUTE_LIMIT: bool = False
 
+
 search_config: SearchConfig = SearchConfig()

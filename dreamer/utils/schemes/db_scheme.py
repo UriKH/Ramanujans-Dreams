@@ -29,7 +29,7 @@ class DBModScheme(Module):
         :return: A dictionary mapping each constant to a list of CMFs and their respective shifts
         """
         results = defaultdict(set)
-        for db in SmartTQDM(dbs, desc=f'Extracting data from DBs', **sys_config.TQDM_CONFIG):
+        for db in SmartTQDM(dbs, desc='Extracting data from DBs', **sys_config.TQDM_CONFIG):
             if not issubclass(db.__class__, cls):
                 raise ValueError(f"Invalid DBModConnector instance: {db}")
             for const, l in db.execute(constants).items():

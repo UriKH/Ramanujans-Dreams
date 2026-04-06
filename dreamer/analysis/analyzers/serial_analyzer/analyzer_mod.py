@@ -38,18 +38,23 @@ class AnalyzerModV1(AnalyzerModScheme):
             return merged
 
         queues = {c: [] for c in self.cmf_data.keys()}
-        for constant, shards in SmartTQDM(self.cmf_data.items(),
-                                          desc='Analyzing constants and their CMFs', **sys_config.TQDM_CONFIG):
+        for constant, shards in SmartTQDM(
+                self.cmf_data.items(), desc='Analyzing constants and their CMFs', **sys_config.TQDM_CONFIG
+        ):
             queue: List[Dict[Searchable, Dict[str, int]]] = []
             Logger(
-                Logger.buffer_print(sys_config.LOGGING_BUFFER_SIZE, f'Analyzing for {constant.name}', '='), Logger.Levels.message
+                Logger.buffer_print(
+                    sys_config.LOGGING_BUFFER_SIZE, f'Analyzing for {constant.name}', '='
+                ), Logger.Levels.message
             ).log()
 
-            # TODO: add option to use mpf - depends on the use_LIReC I guess. maybe there is a way to use only sympy format
+            # TODO: add option to use mpf - depends on the use_LIReC I guess.
+            #  maybe there is a way to use only sympy format
             analyzer = Analyzer(constant, shards)
             dms = analyzer.search()
             queue.append(analyzer.prioritize(dms, PRIORITIZATION_RANKS))
-            # TODO: Now we want to take the DataManagers and convert whose to databases per CMF - I don't know if we really want this or not...
+            # TODO: Now we want to take the DataManagers and convert whose to databases per CMF -
+            #  I don't know if we really want this or not...
             merged: Dict[Searchable, Dict[str, int]] = merge_dicts(queue)
             queues[constant] = sorted(
                 merged.keys(),

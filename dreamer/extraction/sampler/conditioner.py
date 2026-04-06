@@ -11,7 +11,7 @@ try:
 except ImportError as e:
     Logger(
         '[IMPORTANT!] This project works only on Linux/MacOS (current OS: Windows), '
-        'please see instruction manual',
+        f'please see instruction manual ({e})',
         Logger.Levels.warning
     ).log()
 
@@ -110,7 +110,8 @@ class Stage1Conditioner:
 
         # Volume of the fundamental parallelepiped
         det_L = np.sqrt(np.abs(np.linalg.det(Z.T @ Z)))
-        if det_L < 1e-9: return float('inf')
+        if det_L < 1e-9:
+            return float('inf')
         return prod_norms / det_L
 
     @Logger.log_exec
