@@ -1,6 +1,6 @@
 from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.utils.schemes.searchable import Searchable
-from dreamer.utils.rand import *
+from dreamer.utils.rand import np
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs import config
 from .sampler.e2e import EndToEndSamplingEngine
@@ -121,7 +121,7 @@ class Shard(Searchable):
     #         for p in samples
     #     }
 
-    def sample_trajectories(self, compute_n_samples: Callable[int, [int]], *, strict: Optional[bool] = False) -> Set[Position]:
+    def sample_trajectories(self, compute_n_samples: Callable[[int], int], *, strict: Optional[bool] = False) -> Set[Position]:
         # from dreamer.utils.logger import Logger
         # Logger(f'A:\n{self.A}\nb:{self.b}', Logger.Levels.info).log()
 

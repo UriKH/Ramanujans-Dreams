@@ -1,9 +1,10 @@
 import time
 
-from dreamer.utils.rand import *
+from dreamer.utils.rand import np
 from dreamer.utils.logger import Logger
-from dreamer.extraction.utils.fast_gcd import *
+from dreamer.extraction.utils.fast_gcd import get_gcd_of_array
 from typing import Tuple
+from numba import njit
 
 
 @njit(cache=True)

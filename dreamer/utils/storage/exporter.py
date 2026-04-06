@@ -2,7 +2,7 @@ import json
 import os
 import pickle as pkl
 from typing import Any, Generator, Callable, Optional
-from .formats import *
+from .formats import Formats
 import shutil
 from contextlib import contextmanager
 

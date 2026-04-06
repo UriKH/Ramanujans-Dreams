@@ -1,7 +1,8 @@
-from dreamer.utils.rand import *
-from scipy.special import gamma, zeta
+from dreamer.extraction.utils.fast_gcd import get_gcd_of_array
+from dreamer.utils.rand import np
 
-from dreamer.extraction.utils.fast_gcd import *
+from scipy.special import gamma, zeta
+from numba import njit
 
 
 @njit(cache=True)

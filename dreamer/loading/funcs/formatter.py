@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from dreamer.loading.config import *
+from dreamer.loading.config import DATA_ANNOTATE, TYPE_ANNOTATE
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.types import ShiftCMF
 from dreamer.configs import config

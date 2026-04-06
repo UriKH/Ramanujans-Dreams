@@ -1,7 +1,7 @@
 import json
 import os
 import pickle as pkl
-from .formats import *
+from .formats import Formats
 from pathlib import Path
 
 

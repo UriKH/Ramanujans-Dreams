@@ -1,7 +1,7 @@
 from dreamer import System, config
 from dreamer import analysis, search, extraction
-from dreamer.loading import *
-from dreamer import zeta, log, pi
+from dreamer.loading import pFq
+from dreamer import log
 
 
 # Because of pickling format we need to define these functions here

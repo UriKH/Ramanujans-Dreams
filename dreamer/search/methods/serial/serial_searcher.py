@@ -1,11 +1,12 @@
 from dreamer.utils.mp_manager import create_pool
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
-from dreamer.utils.storage.storage_objects import *
+from dreamer.utils.storage.storage_objects import DataManager, SearchVector
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.configs import config
 
 import mpmath as mp
 from functools import partial
+from typing import Optional, Position, Callable, List
 
 search_config = config.search
 
@@ -40,7 +41,7 @@ class SerialSearcher(SearchMethod):
                find_limit: bool = True,
                find_eigen_values: bool = True,
                find_gcd_slope: bool = True,
-               trajectory_generator: Callable[int, int] = search_config.NUM_TRAJECTORIES_FROM_DIM
+               trajectory_generator: Callable[[int], int] = search_config.NUM_TRAJECTORIES_FROM_DIM
                ) -> DataManager:
         """
         Performs the search.
