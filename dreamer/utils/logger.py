@@ -178,14 +178,9 @@ console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(ColorConsoleFormatter("%(message)s"))
 sys_logger.addHandler(console_handler)
 
-# log file handler
-should_roll_over = os.path.isfile(logging_config.LOG_FILENAME)
+# log file handler — mode='w' truncates any previous log on startup;
+# subsequent writes append within the same process.
 file_handler = logging.FileHandler(logging_config.LOG_FILENAME, mode='w')
-file_handler.setLevel(logging.DEBUG)
-file_formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | %(filename)s:%(funcName)s | %(message)s')
-file_handler.setFormatter(file_formatter)
-
-file_handler = logging.FileHandler(logging_config.LOG_FILENAME, mode='a')
 file_handler.setLevel(logging.DEBUG)
 file_formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | %(filename)s:%(funcName)s | %(message)s')
 file_handler.setFormatter(file_formatter)
