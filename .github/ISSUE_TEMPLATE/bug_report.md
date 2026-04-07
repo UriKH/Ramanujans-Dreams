@@ -4,20 +4,16 @@ about: Create a report to help us improve
 title: ''
 labels: bug
 assignees: UriKH
+type: Bug
 
 ---
 
-**Describe the bug**
-What happened?
+Describe the bug: What happened?
 
-**To Reproduce**
-Steps to reproduce the behavior (scenario and use case)
+To Reproduce: Steps to reproduce the behavior (scenario and use case)
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+Expected behavior: A clear and concise description of what you expected to happen.
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
+Screenshots: If applicable, add screenshots to help explain your problem.
 
-**Additional context**
-Add any other context about the problem here.
+Additional context: Add any other context about the problem here.
