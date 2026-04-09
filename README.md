@@ -4,7 +4,10 @@ Ramanujan's Dreams is a modular system for advanced search in CMFs.
 ## Installation
 * This project is supported fully only on Mac-OS and Linux.  
 If you are a Windows user, it is recommended to use [Windows Subsystem for Linux](https://learn.microsoft.com/en-us/windows/wsl/install) (WSL).
-* Install via: `pip install git+https://github.com/UriKH/RamanujansDreams.git`
+* Install via:
+    ```bash
+    pip install git+https://github.com/UriKH/RamanujansDreams.git
+    ```
 
 ## Usage
 Interaction with the system is via the System class (`from dreamer import System`) and using the config files.
