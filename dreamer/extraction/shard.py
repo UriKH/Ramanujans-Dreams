@@ -79,7 +79,6 @@ class Shard(Searchable):
             return Position({s: sp.Integer(0) for s in self.symbols})
         return Position({sym: self.start_coord[sym] for sym in self.symbols})
 
-
     @staticmethod
     def generate_matrices(
             hyperplanes: List[Hyperplane],

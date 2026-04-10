@@ -242,7 +242,6 @@ class TestTrajectoryValidity:
         assert not shard.is_valid_trajectory(_point(symbols, [-1, 2]))
 
 
-
 # ---------------------------------------------------------------------------
 # 4. generate_matrices
 # ---------------------------------------------------------------------------

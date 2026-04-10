@@ -40,7 +40,7 @@ class SerialSearcher(SearchMethod):
         self.pool = create_pool() if self.parallel else None
 
     def search(self,
-               starts: Optional[object] = None,
+               starts: Optional[Position | List[Position]] = None,
                find_limit: bool = True,
                find_eigen_values: bool = True,
                find_gcd_slope: bool = True,
