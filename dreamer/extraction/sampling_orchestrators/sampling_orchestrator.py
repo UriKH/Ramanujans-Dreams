@@ -16,6 +16,6 @@ class SamplingOrchestrator(ABC):
         self.searchable = searchable
 
     @abstractmethod
-    def sample_trajectories(self, compute_n_samples: Callable[[int], int]) -> Set[Position]:
+    def sample_trajectories(self, compute_n_samples: Callable[[int], int], *, exact: bool = False) -> Set[Position]:
         """Sample valid trajectories for the owning searchable."""
         raise NotImplementedError()
