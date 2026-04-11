@@ -6,8 +6,8 @@ import pytest
 import sympy as sp
 from ramanujantools import Position
 
-import dreamer.search.methods.sa as sa_mod
-from dreamer.search.methods.sa import SimulatedAnnealingSearchMethod
+import deprecate as sa_mod
+from deprecate import SimulatedAnnealingSearchMethod
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.storage.storage_objects import SearchData, SearchVector
 

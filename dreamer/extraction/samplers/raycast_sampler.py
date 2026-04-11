@@ -231,8 +231,5 @@ class RaycastPipelineSampler(Sampler):
                 ).log()
                 current_R_max *= multiplier
 
-        if exact and len(final_rays) > target_rays:
-            final_rays = final_rays[:target_rays]
-
         self._verify_uniformity(final_rays, fraction, d_flat)
         return final_rays

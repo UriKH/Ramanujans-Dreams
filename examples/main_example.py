@@ -10,7 +10,7 @@ def trajectory_compute_func(d):
 
 
 def trajectory_compute_func_analysis(d):
-    return max(10 ** (d - 1) / 5, 10)
+    return max(10 ** (d - 2), 10)
 
 
 if __name__ == '__main__':
@@ -45,5 +45,5 @@ if __name__ == '__main__':
         if_srcs=[pFq(log(2), 2, 1, -1)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
-        searcher=search.SearcherModV1
+        searcher=search.GeneticSearchMod
     ).run(constants=[log(2)])

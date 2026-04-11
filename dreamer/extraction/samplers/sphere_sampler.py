@@ -56,8 +56,8 @@ class PrimitiveSphereSampler(Sampler):
         R = (n_samples / (vol_unit_ball * density)) ** (1.0 / self.d)
         return np.ceil(R * 1.2)   # make sure to take a big enough buffer
 
-    def harvest(self, compute_n_samples: Callable[[int], int], exact: bool = False):
-        n_samples = compute_n_samples(self.d)
+    def harvest(self, compute_n_samples: Callable[[int], int] | int, exact: bool = True):
+        n_samples = compute_n_samples if type(compute_n_samples) is int else compute_n_samples(self.d)
         if n_samples <= 0:
             return np.empty((0, self.d), dtype=np.int64)
         R = self.compute_radius(n_samples)
