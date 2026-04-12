@@ -59,9 +59,9 @@ class SearcherModScheme(Module):
         """
         :param searchables: A list of all searchables to search in.
         :param use_LIReC: While searching, identify constants using LIReC
-        :param name: Optional - name of the module.
+        :param name: Optional - the name of the module.
         :param description: Optional - module description.
-        :param version: Optional - module version.
+        :param version: Optional - the module version.
         """
         super().__init__(name, description, version)
         self.searchables = searchables

@@ -11,7 +11,18 @@ class RaycastPipelineSampler(Sampler):
     def __init__(self, A_prime):
         self.A_prime = A_prime
         self.d_orig: int = int(A_prime.shape[1])
-        self.d_flat: int = 0
+
+        Logger("Initializing Sampler: Conditioning...", Logger.Levels.debug).log()
+        conditioner = HyperSpaceConditioner(self.A_prime, max_beta=10, defect_tolerance=5.0)
+        self.Z_reduced, self.B_reduced, _ = conditioner.process()
+        self.d_flat = int(self.Z_reduced.shape[1])
+        self.fraction = float(self._estimate_cone_fraction(self.B_reduced, self.d_flat))
+        Logger(
+            f"Shard Estimated Volume: {self.fraction * 100:.6f}%",
+            Logger.Levels.debug
+        ).log()
+
+        super().__init__(self.d_flat)
 
     @staticmethod
     def _estimate_cone_fraction(B: np.ndarray, d_flat: int, samples: int = 100_000) -> float:
@@ -133,22 +144,10 @@ class RaycastPipelineSampler(Sampler):
         :param exact: If true and target_func is callable, enforce exactly target_func(d_flat) rays.
         :return: The samples
         """
-        Logger("[Pipeline] Initializing Stage 1: Conditioning...", Logger.Levels.debug).log()
-        conditioner = HyperSpaceConditioner(self.A_prime, max_beta=10, defect_tolerance=5.0)
-
-        try:
-            Z_reduced, B_reduced, _ = conditioner.process()
-        except ValueError as e:
-            raise Exception(f"[Pipeline] Stage 1 Failed: {e}")
-
-        d_flat = int(Z_reduced.shape[1])
-        self.d_flat = d_flat
-
-        fraction = float(self._estimate_cone_fraction(B_reduced, d_flat))
-        Logger(
-            f"[Pipeline] Cone Volume Estimate: {fraction*100:.6f}% of total sphere.",
-            Logger.Levels.debug
-        ).log()
+        Z_reduced = self.Z_reduced
+        B_reduced = self.B_reduced
+        d_flat = self.d_flat
+        fraction = self.fraction
 
         requested_rays: int
         if isinstance(target_func, int):

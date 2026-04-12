@@ -9,6 +9,11 @@ if TYPE_CHECKING:
 
 class Sampler(ABC):
     """Abstract trajectory sampler bound to a searchable space."""
+    def __init__(self, d: int):
+        """
+        :param d: Dimensionality of the search space.
+        """
+        self.d = d
 
     @abstractmethod
     def harvest(self, compute_n_samples: Callable[[int], int] | int, exact: bool = False) -> np.ndarray:

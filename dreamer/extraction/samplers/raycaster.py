@@ -298,7 +298,6 @@ class RayCastingSamplingMethod:
         else:
             raise ValueError('Unknown guidance method')
 
-    @Logger.log_exec
     def _get_chebyshev_center(self):
         """
         Compute the chebyshev center point inside bounds
@@ -320,7 +319,6 @@ class RayCastingSamplingMethod:
             return res.x[:-1]
         return None
 
-    @Logger.log_exec
     def _generate_continuous_guide_rays(self, target_rays: int, mix_steps: int = 200):
         """
         Ultra-fast parallel C-kernel generation of continuous guide rays.
@@ -349,13 +347,13 @@ class RayCastingSamplingMethod:
         if self.d_flat == 0:
             return np.array([])
 
-        Logger(f"Raycaster: Generating {target_rays} Continuous Guide Rays...", Logger.Levels.debug).log()
+        Logger(f"\tRaycaster: Generating {target_rays} Continuous Guide Rays...", Logger.Levels.debug).log()
         guide_rays = self._generate_continuous_guide_rays(target_rays)
         if guide_rays is None:
             Logger("XXX Closed Cone.", Logger.Levels.debug).log()
             return np.array([])
 
-        Logger("Raycaster: Sweeping lattice along Guide Rays...", Logger.Levels.debug).log()
+        Logger("\tRaycaster: Sweeping lattice along Guide Rays...", Logger.Levels.debug).log()
         start_t = time.time()
 
         raw_buffer, counts = _raycast(
@@ -372,7 +370,7 @@ class RayCastingSamplingMethod:
         unique_rays = np.unique(merged, axis=0)
 
         Logger(
-            f"Raycaster Yielded {len(unique_rays)} unique, shortest trajectories in {time.time()-start_t:.3f}s",
+            f"\tRaycaster Yielded {len(unique_rays)} unique, shortest trajectories in {time.time()-start_t:.3f}s",
             Logger.Levels.debug
         ).log()
         return unique_rays

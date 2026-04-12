@@ -16,6 +16,27 @@ from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.storage.storage_objects import DataManager, SearchData, SearchVector
 
 
+def _configure_ga(
+    monkeypatch,
+    *,
+    generations=1,
+    pop_size=4,
+    parallel_search=False,
+    elite_fraction=0.5,
+    mutation_prob=0.0,
+    crossover_prob=0.0,
+    max_retries=1,
+):
+    """Patch GA config values used by GeneticSearchMethod for deterministic tests."""
+    monkeypatch.setattr(genetic_method_mod.search_config, "GA_GENERATIONS", generations)
+    monkeypatch.setattr(genetic_method_mod.search_config, "GA_POPULATION_SIZE", pop_size)
+    monkeypatch.setattr(genetic_method_mod.search_config, "PARALLEL_SEARCH", parallel_search)
+    monkeypatch.setattr(genetic_method_mod.search_config, "GA_ELITE_FRACTION", elite_fraction)
+    monkeypatch.setattr(genetic_method_mod.search_config, "GA_MUTATION_PROB", mutation_prob)
+    monkeypatch.setattr(genetic_method_mod.search_config, "GA_CROSSOVER_PROB", crossover_prob)
+    monkeypatch.setattr(genetic_method_mod.search_config, "GA_MAX_RETRIES", max_retries)
+
+
 class DummyCMF:
     """Minimal CMF-like object with two symbols for deterministic tests."""
 
@@ -35,6 +56,7 @@ class DummySpace:
 
     def __init__(self):
         self.cmf = DummyCMF()
+        self.dim = 2
         self.symbols = list(self.cmf.symbols)
         self.const = SimpleNamespace(name="dummy-const")
         self.cmf_name = "dummy-cmf"
@@ -138,6 +160,7 @@ class _StaticSampler:
     """Sampler stub that always yields a predefined set of trajectories."""
 
     pool = []
+    search_space_dim = 2
 
     def __init__(self, _space):
         """Store space argument for compatibility.
@@ -151,7 +174,6 @@ class _StaticSampler:
         :param exact: Sampling mode flag forwarded by caller.
         :return: Set of trajectories from the static pool.
         """
-        assert exact is True
         return set(self.pool)
 
 
@@ -180,17 +202,20 @@ def test_genetic_search_known_answer_finds_expected_best(monkeypatch):
         Position({x: 2, y: -2}),
     ]
     _patch_static_sampler(monkeypatch, pool)
+    _configure_ga(
+        monkeypatch,
+        generations=2,
+        pop_size=4,
+        parallel_search=False,
+        elite_fraction=0.5,
+        mutation_prob=0.0,
+        crossover_prob=0.0,
+        max_retries=0,
+    )
 
     method = GeneticSearchMethod(
         cast(Searchable, cast(object, space)),
         constant=None,
-        generations=2,
-        pop_size=4,
-        mutation_prob=0.0,
-        crossover_prob=0.0,
-        elite_fraction=0.5,
-        parallel_eval=False,
-        max_retries=0,
     )
 
     result = method.search(template_trajectory=Position({x: 1, y: -1}))
@@ -208,7 +233,16 @@ def test_genetic_search_uses_parallel_pool_when_enabled(monkeypatch):
     """
     space = DummySpace()
     called = {"pool_used": False}
-    _patch_static_sampler(monkeypatch, [Position({space.cmf.x: 1, space.cmf.y: -1})] * 4)
+    _patch_static_sampler(
+        monkeypatch,
+        [
+            Position({space.cmf.x: 1, space.cmf.y: -1}),
+            Position({space.cmf.x: 2, space.cmf.y: -1}),
+            Position({space.cmf.x: 0, space.cmf.y: -2}),
+            Position({space.cmf.x: -1, space.cmf.y: 0}),
+        ],
+    )
+    _configure_ga(monkeypatch, generations=1, pop_size=4, parallel_search=True)
 
     class _DummyPool:
         def map(self, func, trajectories, starts, chunksize=1):
@@ -224,30 +258,32 @@ def test_genetic_search_uses_parallel_pool_when_enabled(monkeypatch):
     method = GeneticSearchMethod(
         cast(Searchable, cast(object, space)),
         constant=None,
-        generations=1,
-        pop_size=4,
-        parallel_eval=True,
     )
     method.search(template_trajectory=Position({space.cmf.x: 1, space.cmf.y: -1}))
 
     assert called["pool_used"]
 
 
-def test_genetic_search_requires_valid_start_point():
+def test_genetic_search_requires_valid_start_point(monkeypatch):
     """Validate start-point guardrail raises when no interior point exists.
     Failure mode caught: silent None start propagating into trajectory evaluation.
     """
-    method = GeneticSearchMethod(cast(Searchable, cast(object, NoStartSpace())), constant=None, parallel_eval=False)
+    space = NoStartSpace()
+    _patch_static_sampler(monkeypatch, [Position({space.cmf.x: 0, space.cmf.y: 0})])
+    method = GeneticSearchMethod(cast(Searchable, cast(object, space)), constant=None)
     with pytest.raises(ValueError, match="requires a valid start point"):
         method.search()
 
 
-def test_genetic_search_rejects_invalid_population_size():
+def test_genetic_search_rejects_invalid_population_size(monkeypatch):
     """Validate constructor guardrail rejects too-small populations.
     Failure mode caught: degenerate GA setup accepted without explicit error.
     """
+    _configure_ga(monkeypatch, pop_size=1)
+    space = DummySpace()
+    _patch_static_sampler(monkeypatch, [Position({space.cmf.x: 0, space.cmf.y: 0})])
     with pytest.raises(ValueError, match="pop_size"):
-        GeneticSearchMethod(cast(Searchable, cast(object, DummySpace())), constant=None, pop_size=1)
+        GeneticSearchMethod(cast(Searchable, cast(object, space)), constant=None)
 
 
 def test_genetic_module_execute_exports_data(monkeypatch, tmp_path):
@@ -274,18 +310,16 @@ def test_genetic_module_execute_exports_data(monkeypatch, tmp_path):
     monkeypatch.setattr(genetic_searcher_mod.sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
     monkeypatch.setattr(genetic_searcher_mod.Exporter, "export_stream", _fake_export_stream)
 
-    def _fake_search(_self):
-        return DataManager(use_LIReC=True)
+    class _FakeGeneticSearchMethod:
+        def __init__(self, *_args, **_kwargs):
+            pass
 
-    monkeypatch.setattr(genetic_searcher_mod.GeneticSearchMethod, "search", _fake_search)
+        def search(self):
+            return DataManager(use_LIReC=True)
 
-    mod = GeneticSearchMod(
-        [cast(Searchable, cast(object, space))],
-        use_LIReC=True,
-        generations=1,
-        pop_size=4,
-        parallel_eval=False,
-    )
+    monkeypatch.setattr(genetic_searcher_mod, "GeneticSearchMethod", _FakeGeneticSearchMethod)
+
+    mod = GeneticSearchMod([cast(Searchable, cast(object, space))], use_LIReC=True)
     mod.execute()
 
     assert len(exported) == 1
@@ -307,6 +341,8 @@ def test_genetic_search_repairs_invalid_mutations_with_constrained_sampling(monk
     ]
 
     class _FakeSampler:
+        search_space_dim = 2
+
         def __init__(self, _space):
             pass
 
@@ -319,15 +355,18 @@ def test_genetic_search_repairs_invalid_mutations_with_constrained_sampling(monk
 
     monkeypatch.setattr(genetic_method_mod, "ShardSamplingOrchestrator", _FakeSampler)
     monkeypatch.setattr(genetic_method_mod, "_mutate_position", _always_invalid_mutate)
-
-    method = GeneticSearchMethod(
-        cast(Searchable, cast(object, space)),
-        constant=None,
+    _configure_ga(
+        monkeypatch,
         generations=2,
         pop_size=4,
         mutation_prob=1.0,
         crossover_prob=0.0,
-        parallel_eval=False,
+        parallel_search=False,
+    )
+
+    method = GeneticSearchMethod(
+        cast(Searchable, cast(object, space)),
+        constant=None,
     )
 
     result = method.search(template_trajectory=Position({x: -1, y: -1}))
@@ -344,13 +383,10 @@ def test_genetic_search_raises_when_constraints_have_no_valid_trajectories(monke
     space = ImpossibleConstrainedSpace()
     x, y = space.cmf.symbols
     _patch_static_sampler(monkeypatch, [Position({x: 1, y: 1}), Position({x: 2, y: 2})])
+    _configure_ga(monkeypatch, generations=1, pop_size=2, max_retries=1, parallel_search=False)
     method = GeneticSearchMethod(
         cast(Searchable, cast(object, space)),
         constant=None,
-        generations=1,
-        pop_size=2,
-        max_retries=1,
-        parallel_eval=False,
     )
 
     with pytest.raises(ValueError, match="could not sample enough valid trajectories"):
@@ -365,13 +401,11 @@ def test_evaluate_population_resamples_invalid_trajectories_in_batch(monkeypatch
     space = DummySpace()
     x, y = space.cmf.symbols
     start = space.get_interior_point()
+    _patch_static_sampler(monkeypatch, [Position({x: 0, y: 0})])
+    _configure_ga(monkeypatch, generations=1, pop_size=3, max_retries=1, parallel_search=False)
     method = GeneticSearchMethod(
         cast(Searchable, cast(object, space)),
         constant=None,
-        generations=1,
-        pop_size=3,
-        max_retries=1,
-        parallel_eval=False,
     )
 
     population = [
@@ -408,13 +442,11 @@ def test_evaluate_population_retries_unresolved_invalids_in_batch(monkeypatch):
     space = InvalidDeltaSpace()
     x, y = space.cmf.symbols
     start = space.get_interior_point()
+    _patch_static_sampler(monkeypatch, [Position({x: 0, y: 0})])
+    _configure_ga(monkeypatch, generations=1, pop_size=2, max_retries=2, parallel_search=False)
     method = GeneticSearchMethod(
         cast(Searchable, cast(object, space)),
         constant=None,
-        generations=1,
-        pop_size=2,
-        max_retries=2,
-        parallel_eval=False,
     )
 
     population = [

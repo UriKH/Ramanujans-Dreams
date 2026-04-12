@@ -92,14 +92,14 @@ def test_stage2_harvest_deduplicates_hits(monkeypatch):
 
 
 def test_pipeline_harvest_returns_target_quota_when_first_sweep_exceeds(monkeypatch):
-    a_prime = np.eye(3, dtype=np.float64)
-    sampler = RaycastPipelineSampler(a_prime)
-
     monkeypatch.setattr(
         "dreamer.extraction.samplers.raycast_sampler.HyperSpaceConditioner.process",
         lambda self: (np.eye(3, dtype=np.int64), np.empty((0, 3), dtype=np.float64), np.eye(3, dtype=np.int64)),
     )
     monkeypatch.setattr("dreamer.extraction.samplers.raycast_sampler.RaycastPipelineSampler._verify_uniformity", lambda *args, **kwargs: None)
+
+    a_prime = np.eye(3, dtype=np.float64)
+    sampler = RaycastPipelineSampler(a_prime)
 
     captured = {"max_per_ray": 0}
 
@@ -118,15 +118,15 @@ def test_pipeline_harvest_returns_target_quota_when_first_sweep_exceeds(monkeypa
 
 
 def test_pipeline_harvest_expands_radius_when_yield_too_low(monkeypatch):
-    a_prime = np.ones((2, 5), dtype=np.float64)
-    sampler = RaycastPipelineSampler(a_prime)
-
     monkeypatch.setattr(
         "dreamer.extraction.samplers.raycast_sampler.HyperSpaceConditioner.process",
         lambda self: (np.eye(5, 4, dtype=np.int64), np.ones((1, 4), dtype=np.float64), np.eye(4, dtype=np.int64)),
     )
     monkeypatch.setattr("dreamer.extraction.samplers.raycast_sampler.RaycastPipelineSampler._estimate_cone_fraction", lambda *args, **kwargs: 0.5)
     monkeypatch.setattr("dreamer.extraction.samplers.raycast_sampler.RaycastPipelineSampler._verify_uniformity", lambda *args, **kwargs: None)
+
+    a_prime = np.ones((2, 5), dtype=np.float64)
+    sampler = RaycastPipelineSampler(a_prime)
 
     rmax_calls = []
 
@@ -147,14 +147,14 @@ def test_pipeline_harvest_expands_radius_when_yield_too_low(monkeypatch):
 
 
 def test_pipeline_harvest_exact_mode_uses_callable_quota(monkeypatch):
-    a_prime = np.eye(3, dtype=np.float64)
-    sampler = RaycastPipelineSampler(a_prime)
-
     monkeypatch.setattr(
         "dreamer.extraction.samplers.raycast_sampler.HyperSpaceConditioner.process",
         lambda self: (np.eye(3, dtype=np.int64), np.empty((0, 3), dtype=np.float64), np.eye(3, dtype=np.int64)),
     )
     monkeypatch.setattr("dreamer.extraction.samplers.raycast_sampler.RaycastPipelineSampler._verify_uniformity", lambda *args, **kwargs: None)
+
+    a_prime = np.eye(3, dtype=np.float64)
+    sampler = RaycastPipelineSampler(a_prime)
 
 
     def _fake_harvest(self, target_rays, R_max, max_per_ray=1):
