@@ -40,7 +40,7 @@ class PrimitiveSphereSampler(Sampler):
         :param d: dimensions of the sphere
         :param batch_size: number of points to sample per batch
         """
-        self.d = d
+        super().__init__(d)
         self.batch_size = batch_size
         self.rng = np.random.default_rng()
 

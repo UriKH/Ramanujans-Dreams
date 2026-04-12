@@ -181,6 +181,7 @@ Ordered by impact. When choosing what to work on, prefer items higher on this li
 - [ ] **Automated proof sketches**: generate symbolic proofs or proof obligations for discovered formulas.
 - [ ] **Paper-ready output**: auto-generate LaTeX summaries of discovered formulas with full verification.
 
+
 ---
 
 ## 8. Code Conventions

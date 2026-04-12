@@ -1,11 +1,14 @@
 import random
+import numpy as np
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, cast, Callable
+from numba import njit
 
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.configs import sys_config
+from dreamer.utils.logger import Logger
 from dreamer.utils.multi_processing import create_pool
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.storage_objects import DataManager, SearchData, SearchVector
@@ -38,21 +41,21 @@ def _to_position(data: Dict[Any, Any]) -> Position:
     """
     return Position(list(data.items()))
 
-def _crossover_positions(parent1: Position, parent2: Position) -> Tuple[Position, Position]:
+def _crossover_positions(parent1: Position, parent2: Position, canonical_keys: List[Any]) -> Tuple[Position, Position]:
     """
     Perform one-point crossover over unified coordinate keys.
     :param parent1: First parent trajectory.
     :param parent2: Second parent trajectory.
+    :param canonical_keys: List of keys that are shared between trajectories.
     :return: Two child trajectories after crossover (or parents if crossover is degenerate).
     """
-    keys = sorted(set(parent1.keys()) | set(parent2.keys()), key=str)
-    if len(keys) < 2:
+    if len(canonical_keys) < 2:
         return parent1, parent2
 
-    point = random.randint(1, len(keys) - 1)
+    point = random.randint(1, len(canonical_keys) - 1)
     child1_dict: Dict[Any, Any] = {}
     child2_dict: Dict[Any, Any] = {}
-    for i, key in enumerate(keys):
+    for i, key in enumerate(canonical_keys):
         if i < point:
             child1_dict[key] = parent1.get(key, 0)
             child2_dict[key] = parent2.get(key, 0)
@@ -99,6 +102,60 @@ def _mutate_position(
     return new_pos
 
 
+@njit
+def _batch_mutate_population(
+        pop_matrix: np.ndarray,
+        mutation_prob: float,
+        max_step: int,
+        refine_prob: float,
+        refine_coord_prob: float
+) -> np.ndarray:
+    """
+    Compiled Numba function to mutate an entire population matrix instantly.
+    """
+    pop_size, dim = pop_matrix.shape
+    new_matrix = np.empty_like(pop_matrix)
+
+    for i in range(pop_size):
+        # Refine Mode
+        if np.random.random() < refine_prob:
+            scaled_pos = 2 * pop_matrix[i]
+            changed = False
+            for j in range(dim):
+                if np.random.random() < refine_coord_prob:
+                    scaled_pos[j] += (np.random.randint(0, 2) * 2 - 1)
+                    changed = True
+
+            if not changed and dim > 0:
+                idx = np.random.randint(0, dim)
+                scaled_pos[idx] += (np.random.randint(0, 2) * 2 - 1)
+
+            new_matrix[i] = scaled_pos
+
+        # Standard Mutation Mode
+        else:
+            mutated_pos = np.copy(pop_matrix[i])
+            for j in range(dim):
+                if np.random.random() < mutation_prob:
+                    mutated_pos[j] += np.random.randint(-max_step, max_step + 1)
+            new_matrix[i] = mutated_pos
+    return new_matrix
+
+
+def _positions_to_matrix(positions: List[Position], keys: List[Any]) -> np.ndarray:
+    """Bridge: Convert a list of Position dictionaries to a 2D NumPy array."""
+    matrix = np.zeros((len(positions), len(keys)), dtype=np.int64)
+    for i, pos in enumerate(positions):
+        for j, key in enumerate(keys):
+            matrix[i, j] = pos.get(key, 0)
+    return matrix
+
+
+def _matrix_to_positions(matrix: np.ndarray, keys: List[Any]) -> List[Position]:
+    """Bridge: Convert a 2D NumPy array back to a list of Position dictionaries."""
+    return [Position([(keys[j], int(val)) for j, val in enumerate(row)]) for row in matrix]
+
+
 class GeneticSearchMethod(SearchMethod):
     """
     Genetic trajectory search over a shard-constrained search space.
@@ -108,16 +165,6 @@ class GeneticSearchMethod(SearchMethod):
         self,
         space: Shard,
         constant,
-        generations: int = 25,
-        pop_size: int = 40,
-        elite_fraction: float = 0.2,
-        mutation_prob: float = 0.3,
-        mutation_step: int = 1,
-        crossover_prob: float = 0.5,
-        max_retries: int = 3,
-        refine_prob: float = 0.5,
-        refine_coord_prob: float = 0.5,
-        parallel_eval: bool = True,
         data_manager: DataManager = None,
         share_data: bool = True,
         use_LIReC: bool = True,
@@ -126,16 +173,6 @@ class GeneticSearchMethod(SearchMethod):
         Initialize GA hyperparameters and storage dependencies.
         :param space: Search space (Shard) that defines validity and trajectory evaluation.
         :param constant: Target constant metadata associated with this search.
-        :param generations: Number of evolutionary generations to run.
-        :param pop_size: Number of individuals in each generation.
-        :param elite_fraction: Fraction of top individuals kept unchanged each generation.
-        :param mutation_prob: Probability to mutate each child.
-        :param mutation_step: Max mutation step for coordinate updates.
-        :param crossover_prob: Probability to use crossover instead of cloning.
-        :param max_retries: Retry rounds for invalid/failed trajectory evaluations.
-        :param refine_prob: Probability of entering refine mutation mode.
-        :param refine_coord_prob: Per-coordinate refine perturbation probability.
-        :param parallel_eval: Whether to evaluate trajectories with multiprocessing.
         :param data_manager: Optional pre-existing DataManager for result sharing/caching.
         :param share_data: Whether to share storage with sibling search methods.
         :param use_LIReC: Forwarded flag for trajectory evaluation backend.
@@ -143,25 +180,46 @@ class GeneticSearchMethod(SearchMethod):
         :return: None.
         """
         super().__init__(space, constant, use_LIReC, data_manager, share_data)
-        if pop_size < 2:
-            raise ValueError("pop_size must be at least 2")
-        if generations < 1:
-            raise ValueError("generations must be at least 1")
 
-        self.generations = generations
-        self.pop_size = pop_size
-        self.elite_fraction = elite_fraction
-        self.mutation_prob = mutation_prob
-        self.mutation_step = mutation_step
-        self.crossover_prob = crossover_prob
-        self.max_retries = max_retries
-        self.refine_prob = refine_prob
-        self.refine_coord_prob = refine_coord_prob
-        self.parallel_eval = parallel_eval
+        self.elite_fraction = search_config.GA_ELITE_FRACTION
+        self.mutation_prob = search_config.GA_MUTATION_PROB
+        self.mutation_step = search_config.GA_MUTATION_STEP
+        self.crossover_prob = search_config.GA_CROSSOVER_PROB
+        self.max_retries = search_config.GA_MAX_RETRIES
+        self.refine_prob = search_config.GA_REFINE_PROB
+        self.refine_coord_prob = search_config.GA_REFINE_COORD_PROB
         self.space = cast(Shard, self.space)
 
         if self.data_manager is None:
             self.data_manager = DataManager(use_LIReC=self.use_LIReC)
+
+        self.sampling_orchestrator = ShardSamplingOrchestrator(self.space)
+        self.canonical_keys = sorted(self.space.symbols, key=str)
+
+        generations = search_config.GA_GENERATIONS
+        if isinstance(generations, int):
+            self.generations = generations
+        else:
+            self.generations = generations(self.sampling_orchestrator.search_space_dim)
+
+        pop_size = search_config.GA_POPULATION_SIZE
+        if isinstance(pop_size, int):
+            self.pop_size = pop_size
+        else:
+            self.pop_size = pop_size(self.sampling_orchestrator.search_space_dim)
+
+        if self.pop_size < 2:
+            raise ValueError("pop_size must be at least 2")
+        if self.generations < 1:
+            raise ValueError("generations must be at least 1")
+
+        Logger(
+            f'Initiating GA with population of {self.pop_size} running for {self.generations} generations',
+            Logger.Levels.debug
+        ).log()
+
+        self._valid_trajectory_buffer = []  # The dynamic pool
+        self._buffer_chunk_size = 25 * self.sampling_orchestrator.search_space_dim   # Oversample heavily
 
     def _resolve_start(self, starts: Optional[Position | List[Position]]) -> Position:
         """
@@ -190,7 +248,7 @@ class GeneticSearchMethod(SearchMethod):
         if provided is not None:
             return provided
 
-        sample_set = ShardSamplingOrchestrator(self.space).sample_trajectories(lambda dim: max(10, 2 * dim))
+        sample_set = self.sampling_orchestrator.sample_trajectories(lambda dim: max(10, 2 * dim))
         return next(iter(sample_set))
 
     def _sample_valid_trajectories(self, *, count: int, template_pos: Position) -> List[Position]:
@@ -207,28 +265,36 @@ class GeneticSearchMethod(SearchMethod):
         sampled: List[Position] = []
         max_sampling_rounds = max(3, self.max_retries + 1)
 
-        sampler = ShardSamplingOrchestrator(self.space)
-
         for _ in range(max_sampling_rounds):
             if len(sampled) >= count:
                 break
 
-            if sampler is not None:
-                needed = count - len(sampled)
-                candidates = list(
-                    sampler.sample_trajectories(lambda dim: max(needed, 2 * dim), exact=True)
-                )
+            needed = count - len(sampled)
+            candidates = list(
+                self.sampling_orchestrator.sample_trajectories(lambda dim: max(needed, 2 * dim), exact=True)
+            )
 
-                random.shuffle(candidates)
-                for traj in candidates:
-                    if self.space.is_valid_trajectory(traj):
-                        sampled.append(traj)
-                        if len(sampled) >= count:
-                            break
+            random.shuffle(candidates)
+            for traj in candidates:
+                if self.space.is_valid_trajectory(traj):
+                    sampled.append(traj)
+                    if len(sampled) >= count:
+                        break
 
         if len(sampled) < count:
             raise ValueError("Genetic search could not sample enough valid trajectories satisfying A v <= 0")
         return sampled[:count]
+
+    def _get_valid_repair_trajectory(self, template_pos: Position) -> Position:
+        """Pops a fresh valid trajectory from the buffer, refilling if empty."""
+        if not self._valid_trajectory_buffer:
+            # Batch sample a large chunk at once to minimize orchestrator overhead
+            self._valid_trajectory_buffer = self._sample_valid_trajectories(
+                count=self._buffer_chunk_size,
+                template_pos=template_pos
+            )
+            random.shuffle(self._valid_trajectory_buffer)
+        return self._valid_trajectory_buffer.pop()
 
     def _repair_trajectory(self, trajectory: Position, template_pos: Position) -> Position:
         """
@@ -239,7 +305,7 @@ class GeneticSearchMethod(SearchMethod):
         """
         if self.space.is_valid_trajectory(trajectory):
             return trajectory
-        return self._sample_valid_trajectories(count=1, template_pos=template_pos)[0]
+        return self._get_valid_repair_trajectory(template_pos)
 
     def _compute_missing_search_data(self, pairs: List[Tuple[Position, Position]]) -> None:
         """
@@ -254,7 +320,7 @@ class GeneticSearchMethod(SearchMethod):
         traj_list = [traj for traj, _ in missing_pairs]
         start_list = [start for _, start in missing_pairs]
 
-        if self.parallel_eval and len(missing_pairs) > 1:
+        if search_config.PARALLEL_SEARCH and len(missing_pairs) > 1:
             with create_pool() as pool:
                 results = list(
                     pool.map(
@@ -273,6 +339,32 @@ class GeneticSearchMethod(SearchMethod):
         for sd in results:
             if sd is not None:
                 self.data_manager[sd.sv] = sd
+
+    def _vectorized_crossover(
+            self, elite_count: int, children_needed: int, elite_matrix: np.ndarray, next_pop_matrix: np.ndarray
+    ) -> np.ndarray:
+        # Vectorized Crossover: Randomly pick parents from the elite pool
+        parent1_indices = np.random.randint(0, elite_count, size=children_needed)
+        parent2_indices = np.random.randint(0, elite_count, size=children_needed)
+
+        parents1 = elite_matrix[parent1_indices]
+        parents2 = elite_matrix[parent2_indices]
+
+        # Create a uniform crossover mask across the entire matrix instantly
+        crossover_mask = np.random.random(size=(children_needed, self.space.dim)) < self.crossover_prob
+        children = np.where(crossover_mask, parents1, parents2)
+
+        # Bridge Phase 2: Execute High-Speed Numba Mutation
+        mutated_children = _batch_mutate_population(
+            children,
+            mutation_prob=self.mutation_prob,
+            max_step=self.mutation_step,
+            refine_prob=self.refine_prob,
+            refine_coord_prob=self.refine_coord_prob
+        )
+
+        next_pop_matrix[elite_count:] = mutated_children
+        return next_pop_matrix
 
     def _evaluate_population(
         self,
@@ -362,57 +454,58 @@ class GeneticSearchMethod(SearchMethod):
             {"trajectory": traj, "delta": None, "sd": None} for traj in initial_trajectories
         ]
 
+        last_delta = None
+        unchanged_count = 0
+        unchanged_threshold = 1e-7
+        max_unchanged_count = 0.1 * self.generations
 
-        for gen in SmartTQDM(
-            range(self.generations),
-            desc="Evolving...",
-            **sys_config.TQDM_CONFIG,
-        ):
+        for _ in SmartTQDM(range(self.generations), desc="Evolving...", **sys_config.TQDM_CONFIG):
             population = self._evaluate_population(population, start=start_point, template_pos=template)
             population.sort(key=lambda ind: ind["delta"], reverse=True)
 
+            if last_delta is not None and abs(population[0]["delta"] - last_delta) < unchanged_threshold:
+                unchanged_count += 1
+            last_delta = population[0]["delta"]
+
             elite_count = max(1, int(self.elite_fraction * self.pop_size))
             elites = population[:elite_count]
-            next_population: List[Dict[str, Any]] = [
-                {"trajectory": ind["trajectory"], "delta": ind["delta"], "sd": ind["sd"]}
-                for ind in elites
-            ]
 
-            while len(next_population) < self.pop_size:
-                parent1 = random.choice(elites)
-                parent2 = random.choice(elites)
+            elite_positions = [ind["trajectory"] for ind in elites]
+            elite_matrix = _positions_to_matrix(elite_positions, self.canonical_keys)
 
-                if random.random() < self.crossover_prob:
-                    child1, child2 = _crossover_positions(parent1["trajectory"], parent2["trajectory"])
+            next_pop_matrix = np.zeros((self.pop_size, self.space.dim), dtype=np.int64)
+            next_pop_matrix[:elite_count] = elite_matrix  # Carry over elites
+
+            if (children_needed := self.pop_size - elite_count) > 0:
+                next_pop_matrix = self._vectorized_crossover(
+                    elite_count, children_needed, elite_matrix, next_pop_matrix
+                )
+
+            next_positions = _matrix_to_positions(next_pop_matrix, self.canonical_keys)
+
+            # Rebuild the population dictionary and apply constraint repairs
+            next_population: List[Dict[str, Any]] = []
+            for i in range(self.pop_size):
+                if i < elite_count:
+                    # Elites bypass repair and retain their cached evaluation
+                    next_population.append({
+                        "trajectory": next_positions[i],
+                        "delta": elites[i]["delta"],
+                        "sd": elites[i]["sd"]
+                    })
                 else:
-                    child1 = _to_position(dict(parent1["trajectory"]))
-                    child2 = _to_position(dict(parent2["trajectory"]))
-
-                if random.random() < self.mutation_prob:
-                    child1 = _mutate_position(
-                        child1,
-                        max_step=self.mutation_step,
-                        mutation_prob=self.mutation_prob,
-                        refine_prob=self.refine_prob,
-                        refine_coord_prob=self.refine_coord_prob,
-                    )
-                child1 = self._repair_trajectory(child1, template)
-                next_population.append({"trajectory": child1, "delta": None, "sd": None})
-
-                if len(next_population) < self.pop_size:
-                    if random.random() < self.mutation_prob:
-                        child2 = _mutate_position(
-                            child2,
-                            max_step=self.mutation_step,
-                            mutation_prob=self.mutation_prob,
-                            refine_prob=self.refine_prob,
-                            refine_coord_prob=self.refine_coord_prob,
-                        )
-                    child2 = self._repair_trajectory(child2, template)
-                    next_population.append({"trajectory": child2, "delta": None, "sd": None})
+                    # Mutated children must be repaired against the shard boundaries
+                    repaired_pos = self._repair_trajectory(next_positions[i], template)
+                    next_population.append({"trajectory": repaired_pos, "delta": None, "sd": None})
 
             population = next_population
+            if max_unchanged_count <= unchanged_count:
+                Logger(
+                    f'Stopping search after {unchanged_count} unchanged generations ...', Logger.Levels.debug
+                ).log()
+                break
 
+        # Final evaluation of the last generation
         population = self._evaluate_population(population, start=start_point, template_pos=template)
         population.sort(key=lambda ind: ind["delta"], reverse=True)
         return self.data_manager

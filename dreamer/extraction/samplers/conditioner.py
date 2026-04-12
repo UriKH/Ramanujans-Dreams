@@ -28,7 +28,6 @@ class HyperSpaceConditioner:
         self.defect_tolerance = defect_tolerance
         self.tol = tol
 
-    @Logger.log_exec
     def process(self):
         """
         Main orchestrator: returns the conditioned basis and transformed bounds.
@@ -51,7 +50,6 @@ class HyperSpaceConditioner:
 
         return Z_reduced, B_reduced, U_transform
 
-    @Logger.log_exec
     def _extract_constraints(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         Separates A_prime into Equality (E) and Inequality (B) matrices.
@@ -73,7 +71,6 @@ class HyperSpaceConditioner:
         B = np.array(ineq_rows, dtype=np.float64) if ineq_rows else np.empty((0, self.d_orig))
         return E, B
 
-    @Logger.log_exec
     def _compute_integer_basis(self, E: np.ndarray) -> np.ndarray:
         """
         Finds the gapless integer basis for the equality hyperplanes.
@@ -97,7 +94,6 @@ class HyperSpaceConditioner:
             int_basis.append(np.array(vec * common_denom, dtype=np.int64).flatten())
         return np.column_stack(int_basis)
 
-    @Logger.log_exec
     def _calculate_defect(self, Z: np.ndarray):
         """
         Calculates the Orthogonality Defect.
@@ -114,7 +110,6 @@ class HyperSpaceConditioner:
             return float('inf')
         return prod_norms / det_L
 
-    @Logger.log_exec
     def _ratchet_lattice_reduction(self, Z: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Dynamically applies LLL and BKZ to orthogonalize the space, retaining strictly the best reduction found.
@@ -129,7 +124,7 @@ class HyperSpaceConditioner:
         Z_current = np.array([list(row) for row in M_fpylll]).T
         U_current = np.array([list(row) for row in U_fpylll])
         defect = self._calculate_defect(Z_current)
-        Logger(f"  LLL applied. Orthogonality Defect: {defect:.2f}", Logger.Levels.debug).log()
+        Logger(f"\t\tLLL applied. Orthogonality Defect: {defect:.2f}", Logger.Levels.debug).log()
 
         # Escalation Ratchet: BKZ
         beta = 4
@@ -138,23 +133,22 @@ class HyperSpaceConditioner:
         best_defect = defect
 
         while defect > self.defect_tolerance and beta <= self.max_beta:
-            Logger(f"  Defect too high. Escalating to BKZ (Block Size: {beta})...", Logger.Levels.debug).log()
+            Logger(f"\t\tDefect too high. Escalating to BKZ (Block Size: {beta})...", Logger.Levels.debug).log()
             param = BKZ.Param(block_size=beta, strategies=BKZ.DEFAULT_STRATEGY, auto_abort=True)
             BKZ.reduction(M_fpylll, param, U=U_fpylll)
             Z_current = np.array([list(row) for row in M_fpylll]).T
             U_current = np.array([list(row) for row in U_fpylll])
             defect = self._calculate_defect(Z_current)
-            Logger(f"  BKZ-{beta} applied. New Defect: {defect:.2f}", Logger.Levels.debug).log()
+            Logger(f"\t\tBKZ-{beta} applied. New Defect: {defect:.2f}", Logger.Levels.debug).log()
             beta += 2
 
             if defect < best_defect:
                 best_defect = defect
                 best_Z = Z_current.copy()
                 best_U = U_current.copy()
-        Logger(f"  Final defect is {best_defect}", Logger.Levels.debug).log()
+        Logger(f"\t\tFinal defect is {best_defect}", Logger.Levels.debug).log()
         return best_Z, best_U
 
-    @Logger.log_exec
     def _transform_bounds(self, B_orig: np.ndarray, Z: np.ndarray, U_transform: np.ndarray):
         """
         Applies the transformation matrix U to the inequality bounds.
