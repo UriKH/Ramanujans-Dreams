@@ -22,7 +22,6 @@ class GeneticSearchMod(SearcherModScheme):
         use_LIReC: Optional[bool] = True,
         generations: int = 25,
         pop_size: int = 40,
-        max_coord_init: int = 10,
         elite_fraction: float = 0.2,
         mutation_prob: float = 0.3,
         mutation_step: int = 1,
@@ -38,7 +37,6 @@ class GeneticSearchMod(SearcherModScheme):
         :param use_LIReC: Optional backend flag forwarded to trajectory evaluation.
         :param generations: Number of GA generations.
         :param pop_size: Population size per generation.
-        :param max_coord_init: Reserved initialization bound forwarded to search method.
         :param elite_fraction: Fraction of elites retained each generation.
         :param mutation_prob: Probability to mutate each child.
         :param mutation_step: Max coordinate mutation step.
@@ -59,7 +57,6 @@ class GeneticSearchMod(SearcherModScheme):
         )
         self.generations = generations
         self.pop_size = pop_size
-        self.max_coord_init = max_coord_init
         self.elite_fraction = elite_fraction
         self.mutation_prob = mutation_prob
         self.mutation_step = mutation_step
@@ -95,7 +92,6 @@ class GeneticSearchMod(SearcherModScheme):
                     space.const,
                     generations=self.generations,
                     pop_size=self.pop_size,
-                    max_coord_init=self.max_coord_init,
                     elite_fraction=self.elite_fraction,
                     mutation_prob=self.mutation_prob,
                     mutation_step=self.mutation_step,

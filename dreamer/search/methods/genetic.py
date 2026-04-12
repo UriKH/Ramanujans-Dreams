@@ -110,7 +110,6 @@ class GeneticSearchMethod(SearchMethod):
         constant,
         generations: int = 25,
         pop_size: int = 40,
-        max_coord_init: int = 10,
         elite_fraction: float = 0.2,
         mutation_prob: float = 0.3,
         mutation_step: int = 1,
@@ -129,7 +128,6 @@ class GeneticSearchMethod(SearchMethod):
         :param constant: Target constant metadata associated with this search.
         :param generations: Number of evolutionary generations to run.
         :param pop_size: Number of individuals in each generation.
-        :param max_coord_init: Reserved initialization bound used by external callers.
         :param elite_fraction: Fraction of top individuals kept unchanged each generation.
         :param mutation_prob: Probability to mutate each child.
         :param mutation_step: Max mutation step for coordinate updates.
@@ -149,12 +147,9 @@ class GeneticSearchMethod(SearchMethod):
             raise ValueError("pop_size must be at least 2")
         if generations < 1:
             raise ValueError("generations must be at least 1")
-        if max_coord_init < 1:
-            raise ValueError("max_coord_init must be at least 1")
 
         self.generations = generations
         self.pop_size = pop_size
-        self.max_coord_init = max_coord_init
         self.elite_fraction = elite_fraction
         self.mutation_prob = mutation_prob
         self.mutation_step = mutation_step
