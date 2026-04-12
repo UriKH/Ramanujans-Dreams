@@ -63,9 +63,9 @@ class Logger:
     print_func: Callable = print
     _instance: Optional['Logger'] = None
     _file_handler: Optional[logging.Handler] = None
+    _force_overwrite_next_file_open: bool = True
     _generate_logs_at_import: bool = bool(logging_config.GENERATE_LOGS)
     _last_generate_logs_value: bool = bool(logging_config.GENERATE_LOGS)
-    _generate_logs_toggled_since_import: bool = False
 
     class Levels(Enum):
         debug = auto()
@@ -92,7 +92,9 @@ class Logger:
     def _track_generate_logs_toggle(cls):
         current_value = bool(logging_config.GENERATE_LOGS)
         if current_value != cls._last_generate_logs_value:
-            cls._generate_logs_toggled_since_import = True
+            if current_value:
+                # Enabling logs at runtime should continue appending in the current run.
+                cls._force_overwrite_next_file_open = False
             cls._last_generate_logs_value = current_value
 
     @classmethod
@@ -110,24 +112,69 @@ class Logger:
 
     @classmethod
     def _build_file_handler_mode(cls) -> str:
-        # If GENERATE_LOGS changed after import, append to avoid truncating an existing log history.
-        if cls._generate_logs_toggled_since_import:
-            return 'a'
-        return 'w'
+        if cls._force_overwrite_next_file_open:
+            cls._force_overwrite_next_file_open = False
+            return 'w'
+        return 'a'
+
+    @staticmethod
+    def _rotated_log_filename(base_filename: str, run_idx: int) -> str:
+        return f"{base_filename}.{run_idx}"
+
+    @classmethod
+    def _next_run_index(cls, base_filename: str) -> int:
+        run_idx = 1
+        while os.path.exists(cls._rotated_log_filename(base_filename, run_idx)):
+            run_idx += 1
+        return run_idx
+
+    @classmethod
+    def start_run(cls):
+        """
+        Mark the start of a new System.run lifecycle.
+
+        If file logging is enabled, archive the previous base log file as
+        LOG_FILENAME.<n> and start a fresh base file for this run.
+        """
+        cls._track_generate_logs_toggle()
+        cls._get_or_create_console_handler()
+
+        if not logging_config.GENERATE_LOGS:
+            cls._remove_file_handler()
+            return
+
+        desired_filename = os.path.abspath(logging_config.LOG_FILENAME)
+        cls._remove_file_handler()
+
+        if os.path.exists(desired_filename):
+            run_idx = cls._next_run_index(desired_filename)
+            os.replace(desired_filename, cls._rotated_log_filename(desired_filename, run_idx))
+
+        cls._force_overwrite_next_file_open = True
 
     @classmethod
     def _ensure_file_handler(cls):
         desired_filename = os.path.abspath(logging_config.LOG_FILENAME)
+        log_dir = os.path.dirname(desired_filename)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        recover_missing_file = False
 
         if cls._file_handler is not None:
             current_filename = getattr(cls._file_handler, 'baseFilename', None)
             if current_filename is not None:
                 current_filename = os.path.abspath(str(current_filename))
-            if current_filename == desired_filename:
+            if current_filename == desired_filename and os.path.exists(desired_filename):
                 return
+            if current_filename == desired_filename and not os.path.exists(desired_filename):
+                recover_missing_file = True
             sys_logger.removeHandler(cls._file_handler)
             cls._file_handler.close()
             cls._file_handler = None
+
+        if recover_missing_file:
+            # Same run + deleted file => recreate and keep appending semantics.
+            cls._force_overwrite_next_file_open = False
 
         file_handler = logging.FileHandler(desired_filename, mode=cls._build_file_handler_mode())
         file_handler.setLevel(logging.DEBUG)
@@ -190,11 +237,11 @@ class Logger:
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            Logger(f'Entered: {func.__name__}', Logger.Levels.debug).log()
+            Logger(f'-> Entered: {func.__name__}', Logger.Levels.debug).log()
             start = time.time()
             res = func(*args, **kwargs)
             end = time.time()
-            Logger(f'Exited: {func.__name__} [in {end - start:.6f} seconds]', Logger.Levels.debug).log()
+            Logger(f'<- Exited: {func.__name__} [in {end - start:.6f} seconds]', Logger.Levels.debug).log()
             return res
 
         return wrapper

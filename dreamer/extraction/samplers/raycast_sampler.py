@@ -226,13 +226,10 @@ class RaycastPipelineSampler(Sampler):
                     Logger.Levels.debug
                 ).log()
                 Logger(
-                    f"\n   -> Momentum Expansion: Multiplying R_max by {multiplier:.3f}",
+                    f"\n   Momentum Expansion: Multiplying R_max by {multiplier:.3f}",
                     Logger.Levels.debug
                 ).log()
                 current_R_max *= multiplier
-
-        if exact and len(final_rays) > target_rays:
-            final_rays = final_rays[:target_rays]
 
         self._verify_uniformity(final_rays, fraction, d_flat)
         return final_rays

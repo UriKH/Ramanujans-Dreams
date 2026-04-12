@@ -20,14 +20,15 @@ class ShardSamplingOrchestrator(SamplingOrchestrator):
         if not isinstance(self.searchable, Shard):
             raise ValueError(f"{self.__class__.__name__} can only be used with {Shard.__name__} objects.")
 
-    def sample_trajectories(self, compute_n_samples: Callable[[int], int], *, exact: bool = False) -> Set[Position]:
+    def sample_trajectories(self, compute_n_samples: Callable[[int], int] | int, *, exact: bool = False) -> Set[Position]:
         a_matrix = getattr(self.searchable, "A", None)
         symbols = self.searchable.symbols
         if a_matrix is None:
             sampler = PrimitiveSphereSampler(len(symbols))
+            samples = sampler.harvest(compute_n_samples)
         else:
             sampler = RaycastPipelineSampler(np.asarray(a_matrix, dtype=np.float64))
-        samples = sampler.harvest(compute_n_samples, exact=exact)
+            samples = sampler.harvest(compute_n_samples, exact=exact)
 
         return {
             Position({sym: sp.sympify(int(v)) for v, sym in zip(p, symbols)})

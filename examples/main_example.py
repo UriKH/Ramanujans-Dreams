@@ -10,15 +10,16 @@ def trajectory_compute_func(d):
 
 
 def trajectory_compute_func_analysis(d):
-    return max(10 ** (d - 1) / 5, 10)
+    return max(10 ** (d - 2), 10)
 
 
 if __name__ == '__main__':
     config.configure(
         system={
-            'EXPORT_CMFS': './mycmfs',                          # export CMF as objects to directory: ./mycmfs
-            'EXPORT_ANALYSIS_PRIORITIES': './myshards',         # export shards found in analysis into: ./myshards
-            'EXPORT_SEARCH_RESULTS': './mysearchresults'        # export the search results into: ./mysearchresults
+            'EXPORT_CMFS': './CMFs',                          # export CMF as objects to directory: ./mycmfs
+            'EXPORT_ANALYSIS_PRIORITIES': './analysis priorities',         # export shards found in analysis into: ./myshards
+            'EXPORT_SEARCH_RESULTS': './search results',        # export the search results into: ./mysearchresults
+            'PATH_TO_SEARCHABLES': './spaces'
         },
         analysis={
             # ignore shards with less than 0.1% identified trajectories as converge to the constant
@@ -45,5 +46,5 @@ if __name__ == '__main__':
         if_srcs=[pFq(log(2), 2, 1, -1)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
-        searcher=search.SearcherModV1
+        searcher=search.GeneticSearchMod
     ).run(constants=[log(2)])
