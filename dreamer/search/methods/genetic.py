@@ -457,7 +457,7 @@ class GeneticSearchMethod(SearchMethod):
         last_delta = None
         unchanged_count = 0
         unchanged_threshold = 1e-7
-        max_unchanged_count = 0.1 * self.generations
+        max_unchanged_count = max(0.1 * self.generations, 5)
 
         for _ in SmartTQDM(range(self.generations), desc="Evolving...", **sys_config.TQDM_CONFIG):
             population = self._evaluate_population(population, start=start_point, template_pos=template)
