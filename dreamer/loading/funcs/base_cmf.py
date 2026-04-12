@@ -27,11 +27,13 @@ class BaseCMF(Formatter):
         :param selected_start_points: Optional list of start points to extract shards from.
         :param only_selected: If True, only extract shards from the selected start points.
         """
-        super().__init__(const, shifts, selected_start_points, only_selected, use_inv_t, cmf_name)
-
         self.cmf = cmf
+
+        self.shifts = shifts
         if self.shifts is None:
             self.shifts = [0] * self.cmf.dim()
+
+        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t, cmf_name)
 
         if not isinstance(self.shifts, list) and not isinstance(self.shifts, Position):
             raise ValueError("Shifts should be a list or Position")

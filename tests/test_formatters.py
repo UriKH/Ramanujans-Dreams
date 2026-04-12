@@ -157,13 +157,13 @@ class TestBaseCMF:
     def test_creation_from_raw_cmf(self, log2):
         from ramanujantools.cmf import pFq as rt_pFq
         raw_cmf = rt_pFq(2, 1, -1)
-        fmt = BaseCMF(log2, raw_cmf)
+        fmt = BaseCMF(log2, 'UnknownCMF', raw_cmf)
         assert fmt.cmf is raw_cmf
 
     def test_json_roundtrip_not_supported(self, log2):
         """BaseCMF wraps arbitrary CMFs; round-trip may have limitations but shouldn't crash."""
         from ramanujantools.cmf import pFq as rt_pFq
         raw_cmf = rt_pFq(2, 1, -1)
-        fmt = BaseCMF(log2, raw_cmf)
+        fmt = BaseCMF(log2, 'UnknownCMF', raw_cmf)
         json_obj = fmt.to_json_obj()
         assert json_obj is not None
