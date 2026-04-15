@@ -30,7 +30,7 @@ class System:
     """
 
     def __init__(self,
-                 *
+                 *,
                  function_sources: List[DBModScheme | str | Formatter],
                  extractor: Optional[Type[ExtractionModScheme]] = None,
                  analyzers: List[Type[AnalyzerModScheme] | partial[AnalyzerModScheme] | str | Searchable],
