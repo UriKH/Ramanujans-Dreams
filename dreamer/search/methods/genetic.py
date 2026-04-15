@@ -282,7 +282,10 @@ class GeneticSearchMethod(SearchMethod):
                         break
 
         if len(sampled) < count:
-            raise ValueError("Genetic search could not sample enough valid trajectories satisfying A v <= 0")
+            Logger(
+                f"Genetic search could not sample enough valid trajectories. Sampled {len(sampled)}/{count}",
+                Logger.Levels.warning
+            ).log()
         return sampled[:count]
 
     def _get_valid_repair_trajectory(self, template_pos: Position) -> Position:

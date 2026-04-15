@@ -51,5 +51,7 @@ class SearchConfig(Configurable):
     GA_REFINE_PROB: float = 0.5     # Probability of entering refine mutation mode.
     GA_REFINE_COORD_PROB: float = 0.5   # Per-coordinate refine perturbation probability.
 
+    MAX_TRAJECTORY_COORD: int = 50
+
 
 search_config: SearchConfig = SearchConfig()
