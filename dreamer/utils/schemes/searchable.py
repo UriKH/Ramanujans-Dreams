@@ -312,6 +312,17 @@ class Searchable(ABC):
                 sd.LIReC_identify = True
         return sd
 
+    def compute_trajectory_data_from_tup(self, tup: Tuple[Position, Position],
+                                *, find_limit: bool = False,
+                                find_eigen_values: bool = False,
+                                find_gcd_slope: bool = False,
+                                use_LIReC: bool = True) -> SearchData:
+        return self.compute_trajectory_data(
+            *tup,
+            find_limit=find_limit, find_eigen_values=find_eigen_values,
+            find_gcd_slope=find_gcd_slope, use_LIReC=use_LIReC
+        )
+
     def _does_converge(self, t_mat: rt.Matrix, traj_len: float, p, q, dim: int, walk_col_ind: int = 0)\
             -> Tuple[bool, Tuple[Limit, Limit, Limit]]:
         """

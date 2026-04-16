@@ -4,8 +4,12 @@ from numba.typed import Dict
 import numpy as np
 import multiprocessing as mp
 import itertools
-from dreamer.utils.logger import Logger
 from functools import partial
+
+from dreamer.utils.logger import Logger
+from dreamer.utils.multi_processing import create_pool
+from dreamer.utils.ui.tqdm_config import SmartTQDM
+from dreamer.configs.system import sys_config
 
 _worker_cache = {}
 
@@ -243,6 +247,10 @@ def decode_signatures(unique_tuples, M):
     return (bits * 2) - 1
 
 
+def __worker_wrapper_adaptor(filter_func, args):
+    return __worker_wrapper(*args, filter_func=filter_func)
+
+
 def __worker_wrapper(fixed_prefix: np.ndarray, D: int, S: int, A: np.ndarray, b: np.ndarray,
                      filter_func: Optional[FILTER_FUNC_DTYPE] = None) -> MAPPING_DICT:
     """
@@ -309,14 +317,18 @@ def compute_mapping(D: int, S: int, A: np.ndarray, b: np.ndarray, prefix_dims: i
     num_cores = mp.cpu_count()
     Logger(f"Launching {len(tasks)} jobs across {num_cores} cores...").log()
 
-    with mp.Pool(num_cores) as pool:
-        results = pool.starmap(partial(__worker_wrapper, filter_func=filter_func), tasks)
+    results = []
+    with create_pool() as pool:
+        iterator = pool.imap_unordered(partial(__worker_wrapper_adaptor, filter_func), tasks)
 
-        # Merge dictionaries from all workers
-        for local_mapping in results:
-            for sig, point in local_mapping.items():
-                if sig not in global_mapping or __is_candidate_closer(point, global_mapping[sig]):
-                    global_mapping[sig] = point
+        for r in SmartTQDM(iterator, total=len(tasks), desc="Computing shard encodings", **sys_config.TQDM_CONFIG):
+            results.append(r)
+
+    # Merge dictionaries from all workers
+    for local_mapping in results:
+        for sig, point in local_mapping.items():
+            if sig not in global_mapping or __is_candidate_closer(point, global_mapping[sig]):
+                global_mapping[sig] = point
 
     if filter_func:
         global_mapping = filter_func(global_mapping)

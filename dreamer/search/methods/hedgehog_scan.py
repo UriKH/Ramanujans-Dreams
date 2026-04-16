@@ -1,8 +1,8 @@
+from dreamer.configs.system import sys_config
 from dreamer.utils.multi_processing import create_pool
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.storage_objects import DataManager, SearchVector, SearchData
-from dreamer.utils.schemes.searchable import Searchable
 from dreamer.configs import config
 from dreamer.extraction.shard import Shard
 
@@ -38,7 +38,6 @@ class SerialSearcher(SearchMethod):
         super().__init__(space, constant, use_LIReC, data_manager, share_data)
         self.data_manager = data_manager if data_manager else DataManager(use_LIReC)
         self.parallel = search_config.PARALLEL_SEARCH
-        self.pool = create_pool() if self.parallel else None
 
     def search(self,
                starts: Optional[Position | List[Position]] = None,
@@ -73,19 +72,26 @@ class SerialSearcher(SearchMethod):
 
         pairs = [(t, start) for start in starts_list for t in trajectories if
                  SearchVector(start, t) not in self.data_manager]
-        traj_lst = [p[0] for p in pairs]
-        start_lst = [p[1] for p in pairs]
 
         if self.parallel:
-            results = self.pool.map(
-                partial(
-                    self.space.compute_trajectory_data,
+            results = []
+            from dreamer.utils.ui.tqdm_config import SmartTQDM
+
+            with create_pool() as pool:
+                process_data = partial(
+                    self.space.compute_trajectory_data_from_tup,
                     use_LIReC=self.use_LIReC,
                     find_limit=find_limit,
                     find_eigen_values=find_eigen_values,
                     find_gcd_slope=find_gcd_slope
-                ),
-                traj_lst, start_lst, chunksize=search_config.SEARCH_VECTOR_CHUNK)
+                )
+
+                iterator = pool.imap_unordered(process_data, pairs, chunksize=search_config.SEARCH_VECTOR_CHUNK)
+                for r in SmartTQDM(
+                    iterator, total=len(pairs), desc="Evaluating trajectories", **sys_config.TQDM_CONFIG
+                ):
+                    results.append(r)
+
             for res in results:
                 if res is not None:
                     res_data = cast(SearchData, res)

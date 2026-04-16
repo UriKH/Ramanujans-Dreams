@@ -22,7 +22,7 @@ def ga_population(dim: int) -> int:
 @dataclass
 class SearchConfig(Configurable):
     PARALLEL_SEARCH: bool = True
-    SEARCH_VECTOR_CHUNK: int = 4                # number of search vectors per chunk for parallel search
+    SEARCH_VECTOR_CHUNK: int = 1               # number of search vectors per chunk for parallel search
     NUM_TRAJECTORIES_FROM_DIM: Callable = traj_from_dim
     DEPTH_FROM_TRAJECTORY_LEN: Callable = depth_from_len
     DEPTH_CONVERGENCE_THRESHOLD: Tuple[float, ...] = (0.9, 0.95, 1.0)
@@ -52,7 +52,7 @@ class SearchConfig(Configurable):
     GA_REFINE_COORD_PROB: float = 0.5   # Per-coordinate refine perturbation probability.
     GA_MAX_NO_IMPROVEMENT_COUNT_RETRY: int = 5  # Max retries when no improvement is observed before giving up.
 
-    MAX_TRAJECTORY_COORD: int = 50  # Max coordinate value for a trajectory.
+    MAX_TRAJECTORY_COORD: int = 30  # Max coordinate value for a trajectory.
 
 
 search_config: SearchConfig = SearchConfig()

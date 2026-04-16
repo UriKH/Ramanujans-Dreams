@@ -1,18 +1,18 @@
 import random
 import numpy as np
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple, cast, Callable
+from typing import Any, Dict, List, Optional, Tuple, cast
 from numba import njit
 
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.utils.ui.tqdm_config import SmartTQDM
-from dreamer.configs import sys_config
+from dreamer.configs.system import sys_config
+from dreamer.configs.search import search_config
 from dreamer.utils.logger import Logger
 from dreamer.utils.multi_processing import create_pool
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.storage_objects import DataManager, SearchData, SearchVector
-from dreamer.configs import search_config
 from ramanujantools import Position
 
 
@@ -167,6 +167,9 @@ class GeneticSearchMethod(SearchMethod):
         constant,
         data_manager: DataManager = None,
         share_data: bool = True,
+        find_limit: bool = False,
+        find_eigen_values: bool = False,
+        find_gcd_slope: bool = False,
         use_LIReC: bool = True,
     ):
         """
@@ -175,6 +178,9 @@ class GeneticSearchMethod(SearchMethod):
         :param constant: Target constant metadata associated with this search.
         :param data_manager: Optional pre-existing DataManager for result sharing/caching.
         :param share_data: Whether to share storage with sibling search methods.
+        :param find_limit: If true, compute the limit of the trajectory matrix.
+        :param find_eigen_values: If ture, compute the eigenvalues of the trajectory matrix.
+        :param find_gcd_slope: If true, compute the GCD slope.
         :param use_LIReC: Forwarded flag for trajectory evaluation backend.
         :raises ValueError: If key GA hyperparameters are outside valid ranges.
         :return: None.
@@ -188,6 +194,9 @@ class GeneticSearchMethod(SearchMethod):
         self.max_retries = search_config.GA_MAX_RETRIES
         self.refine_prob = search_config.GA_REFINE_PROB
         self.refine_coord_prob = search_config.GA_REFINE_COORD_PROB
+        self.find_limit = find_limit
+        self.find_eigen_values = find_eigen_values
+        self.find_gcd_slope = find_gcd_slope
         self.space = cast(Shard, self.space)
 
         if self.data_manager is None:
@@ -321,19 +330,25 @@ class GeneticSearchMethod(SearchMethod):
         if not missing_pairs:
             return
 
-        traj_list = [traj for traj, _ in missing_pairs]
-        start_list = [start for _, start in missing_pairs]
-
         if search_config.PARALLEL_SEARCH and len(missing_pairs) > 1:
+            results = []
+
             with create_pool() as pool:
-                results = list(
-                    pool.map(
-                        partial(self.space.compute_trajectory_data, use_LIReC=self.use_LIReC),
-                        traj_list,
-                        start_list,
-                        chunksize=search_config.SEARCH_VECTOR_CHUNK,
-                    )
+                iterator = pool.imap_unordered(
+                    partial(
+                        self.space.compute_trajectory_data_from_tup,
+                        use_LIReC=self.use_LIReC,
+                        find_limit=self.find_limit,
+                        find_eigen_values=self.find_eigen_values,
+                        find_gcd_slope=self.find_gcd_slope
+                    ),
+                    missing_pairs,
+                    chunksize=search_config.SEARCH_VECTOR_CHUNK
                 )
+                for r in SmartTQDM(
+                        iterator, total=len(missing_pairs), desc="Evaluating trajectories", **sys_config.TQDM_CONFIG
+                ):
+                    results.append(r)
         else:
             results = [
                 self.space.compute_trajectory_data(traj, start, use_LIReC=self.use_LIReC)
@@ -483,7 +498,7 @@ class GeneticSearchMethod(SearchMethod):
         unchanged_threshold = 1e-7
         max_unchanged_count = max(0.1 * self.generations, 5)
 
-        for _ in SmartTQDM(range(self.generations), desc="Evolving...", **sys_config.TQDM_CONFIG):
+        for _ in SmartTQDM(range(self.generations), desc="Generation Evolving...", **sys_config.TQDM_CONFIG):
             population = self._evaluate_population(population, start=start_point, template_pos=template)
             population.sort(key=lambda ind: ind["delta"], reverse=True)
 

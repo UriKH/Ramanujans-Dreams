@@ -39,8 +39,8 @@ class MeijerG(Formatter):
         if self.shifts is None:
             self.shifts = [0] * (self.p + self.q)
 
-        cmf_name = self.__class__.__name__ + f"_{self.m}_{self.n}_{self.p}_{self.q}_{self.z}"
-        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t, cmf_name)
+        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t,
+                         [[self.__class__.__name__, self.m, self.n, self.p, self.q, self.z]])
 
         if not (p > 0 and 0 <= n <= p) or not (q > 0 and 0 <= m <= q):
             raise ValueError("Meijer G must satisfy p > 0, 0 <= n <= p and q > 0, 0 <= m <= q")

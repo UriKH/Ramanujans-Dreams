@@ -47,7 +47,7 @@ class SearcherModV1(SearcherModScheme):
 
         with Exporter.export_stream(dir_path, exists_ok=True, clean_exists=True, fmt=Formats.PICKLE) as write_chunk:
             for shard in SmartTQDM(
-                    self.searchables, desc='Searching the searchable spaces: ', **sys_config.TQDM_CONFIG
+                    self.searchables, desc='Searching in shards: ', **sys_config.TQDM_CONFIG
             ):
                 searcher = SerialSearcher(shard, shard.const, use_LIReC=self.use_LIReC)
                 res = searcher.search(

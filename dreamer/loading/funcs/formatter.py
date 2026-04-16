@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from dreamer.loading.config import DATA_ANNOTATE, TYPE_ANNOTATE
+from dreamer.utils.caching import cached_property
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.types import CMFData
 from dreamer.configs import config
@@ -19,7 +20,7 @@ class Formatter(ABC):
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
                  use_inv_t: bool = None,
-                 cmf_name: Optional[str] = None):
+                 cmf_name_segments: Optional[List[List[Union[str, sp.Expr, int]]]] = None):
         if use_inv_t is None:
             use_inv_t = config.search.DEFAULT_USES_INV_T
 
@@ -29,12 +30,32 @@ class Formatter(ABC):
         self.only_selected = only_selected
         self.use_inv_t = use_inv_t
 
+        cmf_name_segments = cmf_name_segments if cmf_name_segments is not None else [[self.__class__.__name__]]
+        cmf_name_segments: List[List[Union[str, sp.Expr, int]]]
 
-        self.cmf_name = cmf_name if cmf_name else self.__class__.__name__
-        self.cmf_name += '_'
-        for s in shifts:
-            self.cmf_name += f'_{s}'
+        cmf_name_segments += [shifts, [self.const]]
 
+        name_segments_concat = []
+
+        for segment in cmf_name_segments:
+            segment_components = []
+
+            for component in segment:
+                match component:
+                    case str():
+                        segment_components.append(component)
+                    case sp.Expr():
+                        canonized_expr = sp.sympify(component)
+                        expr_str = str(canonized_expr).replace(" ", "")
+                        expr_str = expr_str.replace("**", "p")
+                        expr_str = expr_str.replace("*", "x")
+                        expr_str = expr_str.replace("/", ".")
+                        segment_components.append(expr_str)
+                    case int():
+                        segment_components.append(str(component))
+            segment_str = '_'.join(segment_components)
+            name_segments_concat.append(segment_str)
+        self.cmf_name = '__'.join(name_segments_concat)
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)

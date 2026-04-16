@@ -200,7 +200,8 @@ class RaycastPipelineSampler(Sampler):
             final_rays = best_rays
             return final_rays
 
-        max_radius = math.sqrt(pow(search_config.MAX_TRAJECTORY_COORD, 2) * d_flat) + 1
+        # max_radius = math.sqrt(pow(search_config.MAX_TRAJECTORY_COORD, 2) * d_flat) + 1
+        max_radius = search_config.MAX_TRAJECTORY_COORD
         raw_rays = np.array([])
 
         raddai = []

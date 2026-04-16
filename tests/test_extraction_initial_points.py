@@ -41,6 +41,19 @@ def test_filter_symmetrical_cones_validates_dimensions():
         initial_points.filter_symmetrical_cones({(1,): np.array([1, 2])}, p=1, q=2, shift=[0, 0])
 
 
+class _DummyIterator:
+    """Simple iterator wrapper that also exposes length for tqdm total handling."""
+
+    def __init__(self, items):
+        self._items = list(items)
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self):
+        return len(self._items)
+
+
 class _DummyPool:
     """Sequential Pool replacement to keep tests deterministic and process-safe."""
 
@@ -50,13 +63,20 @@ class _DummyPool:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def starmap(self, func, tasks):
-        return [func(*task) for task in tasks]
+    def imap_unordered(self, func, tasks, chunksize=1):
+        del chunksize
+        results = []
+        for task in tasks:
+            if isinstance(task, tuple):
+                results.append(func(*task))
+            else:
+                results.append(func(task))
+        return _DummyIterator(results)
 
 
 def test_compute_mapping_selects_closest_point_per_signature(monkeypatch):
     """Assumption: all points share one signature; failure mode: first-seen point leaks through instead of nearest."""
-    monkeypatch.setattr(initial_points.mp, "Pool", lambda *_args, **_kwargs: _DummyPool())
+    monkeypatch.setattr(initial_points, "create_pool", lambda: _DummyPool())
     monkeypatch.setattr(initial_points.mp, "cpu_count", lambda: 1)
 
     D = 1
@@ -79,7 +99,7 @@ def test_compute_mapping_tie_breaks_lexicographically(monkeypatch):
         result = {(1,): point}
         return filter_func(result) if filter_func else result
 
-    monkeypatch.setattr(initial_points.mp, "Pool", lambda *_args, **_kwargs: _DummyPool())
+    monkeypatch.setattr(initial_points, "create_pool", lambda: _DummyPool())
     monkeypatch.setattr(initial_points.mp, "cpu_count", lambda: 1)
     monkeypatch.setattr(initial_points, "__worker_wrapper", fake_worker)
 

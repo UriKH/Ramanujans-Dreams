@@ -33,8 +33,8 @@ class pFq(Formatter):
         if self.shifts is None:
             self.shifts = [0] * (self.p + self.q)
 
-        cmf_name = self.__class__.__name__ + f"_{self.p}_{self.q}_{self.z}"
-        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t, cmf_name)
+        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t,
+                         [[self.__class__.__name__, self.p, self.q, self.z]])
 
         if self.p <= 0 or self.q <= 0:
             raise ValueError("p and q should be positive integers")

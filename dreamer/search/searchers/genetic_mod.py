@@ -5,6 +5,7 @@ from dreamer.configs.system import sys_config
 from dreamer.search.methods.genetic import GeneticSearchMethod
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.extraction.shard import Shard
+from dreamer.configs import search_config
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.storage import Exporter, Formats
@@ -58,6 +59,9 @@ class GeneticSearchMod(SearcherModScheme):
                 searcher = GeneticSearchMethod(
                     space,
                     space.const,
+                    find_limit=search_config.COMPUTE_LIMIT,
+                    find_eigen_values=search_config.COMPUTE_EIGEN_VALUES,
+                    find_gcd_slope=search_config.COMPUTE_GCD_SLOPE,
                     use_LIReC=self.use_LIReC,
                 )
                 res = searcher.search()

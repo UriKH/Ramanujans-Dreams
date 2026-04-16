@@ -33,7 +33,7 @@ class BaseCMF(Formatter):
         if self.shifts is None:
             self.shifts = [0] * self.cmf.dim()
 
-        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t, cmf_name)
+        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t, [[cmf_name]])
 
         if not isinstance(self.shifts, list) and not isinstance(self.shifts, Position):
             raise ValueError("Shifts should be a list or Position")
