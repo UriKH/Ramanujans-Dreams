@@ -48,15 +48,45 @@ def __same_shift_indices(shift, p, q):
     return p_groups, q_groups
 
 
-def filter_symmetrical_cones(mapping, p, q, shift):
+# def filter_symmetrical_cones(mapping, p, q, shift):
+#     """
+#     Remove pFq-symmetric duplicates from a shard-to-point mapping.
+#     :param mapping: Dictionary mapping shard signatures to representative points.
+#     :param p: Number of numerator dimensions.
+#     :param q: Number of denominator dimensions.
+#     :param shift: Shift vector of length ``p + q`` used to define symmetry classes.
+#     :raises ValueError: If ``p + q`` does not match ``len(shift)``.
+#     :return: Filtered mapping with one representative per symmetric cone.
+#     """
+#     if not mapping:
+#         return {}
+#
+#     if p + q != len(shift):
+#         raise ValueError(f'p + q must be the dimension of the space: {len(shift)} != {p} + {q}')
+#
+#     encodings = list(mapping.keys())
+#     points = np.array(list(mapping.values()))
+#     p_part = points[:, :p]
+#     q_part = points[:, p:]
+#
+#     p_groups, q_groups = __same_shift_indices(shift, p, q)
+#
+#     canonical_points = np.empty_like(points)
+#
+#     for group_indices in p_groups:
+#         sorted_subgroup = np.sort(p_part[:, group_indices], axis=1)
+#         canonical_points[:, group_indices] = sorted_subgroup
+#
+#     for group_indices in q_groups:
+#         sorted_subgroup = np.sort(q_part[:, group_indices], axis=1)
+#         canonical_points[:, p + group_indices] = sorted_subgroup
+#
+#     _, unique_indices = np.unique(canonical_points, axis=0, return_index=True)
+#     return {encodings[int(i)]: points[int(i)] for i in unique_indices}
+
+def filter_symmetrical_cones(mapping, p, q, shift, A, b):
     """
-    Remove pFq-symmetric duplicates from a shard-to-point mapping.
-    :param mapping: Dictionary mapping shard signatures to representative points.
-    :param p: Number of numerator dimensions.
-    :param q: Number of denominator dimensions.
-    :param shift: Shift vector of length ``p + q`` used to define symmetry classes.
-    :raises ValueError: If ``p + q`` does not match ``len(shift)``.
-    :return: Filtered mapping with one representative per symmetric cone.
+    Remove pFq-symmetric duplicates by calculating the canonical shard encodings.
     """
     if not mapping:
         return {}
@@ -66,6 +96,7 @@ def filter_symmetrical_cones(mapping, p, q, shift):
 
     encodings = list(mapping.keys())
     points = np.array(list(mapping.values()))
+
     p_part = points[:, :p]
     q_part = points[:, p:]
 
@@ -73,15 +104,27 @@ def filter_symmetrical_cones(mapping, p, q, shift):
 
     canonical_points = np.empty_like(points)
 
-    for group_indices in p_groups:
-        sorted_subgroup = np.sort(p_part[:, group_indices], axis=1)
-        canonical_points[:, group_indices] = sorted_subgroup
+    # 1. Generate Canonical Points
+    for group in p_groups:
+        g_idx = np.atleast_1d(group)
+        canonical_points[:, g_idx] = np.sort(p_part[:, g_idx], axis=1)
 
-    for group_indices in q_groups:
-        sorted_subgroup = np.sort(q_part[:, group_indices], axis=1)
-        canonical_points[:, p + group_indices] = sorted_subgroup
+    for group in q_groups:
+        g_idx = np.atleast_1d(group)
+        canonical_points[:, p + g_idx] = np.sort(q_part[:, g_idx], axis=1)
 
-    _, unique_indices = np.unique(canonical_points, axis=0, return_index=True)
+    # 2. NEW: Generate Canonical Shard Encodings
+    # Matrix multiplication: (N points, D dims) @ (D dims, M hyperplanes) -> (N, M)
+    # This evaluates every canonical point against every hyperplane simultaneously.
+    hyperplane_evals = np.dot(canonical_points, A.T) + b
+
+    # Create a boolean signature matrix (True if > 0, False otherwise)
+    # This represents the universal canonical cone for this symmetry class!
+    canonical_signatures = hyperplane_evals > 0
+
+    # 3. Find unique cones based on the algebraic signature, NOT the point
+    _, unique_indices = np.unique(canonical_signatures, axis=0, return_index=True)
+
     return {encodings[int(i)]: points[int(i)] for i in unique_indices}
 
 
@@ -100,6 +143,15 @@ def __is_candidate_closer(candidate: np.ndarray, current: np.ndarray) -> bool:
 
     if candidate_norm != current_norm:
         return candidate_norm < current_norm
+
+    # Permutation-invariant tie-breaker (sort ascending)
+    cand_sorted = tuple(np.sort(candidate).tolist())
+    curr_sorted = tuple(np.sort(current).tolist())
+
+    if cand_sorted != curr_sorted:
+        return cand_sorted < curr_sorted
+
+    # Raw lexicographical tie-breaker for identical multisets
     return tuple(candidate.tolist()) < tuple(current.tolist())
 
 
@@ -193,12 +245,29 @@ def dynamic_compute_block(fixed_prefix, D, S, A, b):
                 if (not should_replace) and (point_norm == current_norm):
                     # Deterministic tie-break: keep lexicographically smallest point.
                     current_point = unique_mapping[sig_tuple]
+                    
+                    # Permutation-invariant tie-breaker
+                    cand_sorted = np.sort(block[i, :])
+                    curr_sorted = np.sort(current_point)
+                    invariant_diff = False
+                    
                     for d in range(D):
-                        if block[i, d] < current_point[d]:
+                        if cand_sorted[d] < curr_sorted[d]:
                             should_replace = True
+                            invariant_diff = True
                             break
-                        if block[i, d] > current_point[d]:
+                        if cand_sorted[d] > curr_sorted[d]:
+                            invariant_diff = True
                             break
+                            
+                    # Raw lexicographical fallback if multisets are identical
+                    if not invariant_diff:
+                        for d in range(D):
+                            if block[i, d] < current_point[d]:
+                                should_replace = True
+                                break
+                            if block[i, d] > current_point[d]:
+                                break
 
                 if should_replace:
                     unique_mapping[sig_tuple] = block[i, :].copy()
@@ -317,9 +386,15 @@ def compute_mapping(D: int, S: int, A: np.ndarray, b: np.ndarray, prefix_dims: i
     num_cores = mp.cpu_count()
     Logger(f"Launching {len(tasks)} jobs across {num_cores} cores...").log()
 
+    if filter_func:
+        filter_with_matrices = partial(filter_func, A=A, b=b)
+    else:
+        filter_with_matrices = None
+
     results = []
     with create_pool() as pool:
-        iterator = pool.imap_unordered(partial(__worker_wrapper_adaptor, filter_func), tasks)
+        # Pass the updated filter
+        iterator = pool.imap_unordered(partial(__worker_wrapper_adaptor, filter_with_matrices), tasks)
 
         for r in SmartTQDM(iterator, total=len(tasks), desc="Computing shard encodings", **sys_config.TQDM_CONFIG):
             results.append(r)
@@ -331,5 +406,5 @@ def compute_mapping(D: int, S: int, A: np.ndarray, b: np.ndarray, prefix_dims: i
                 global_mapping[sig] = point
 
     if filter_func:
-        global_mapping = filter_func(global_mapping)
+        global_mapping = filter_with_matrices(global_mapping)
     return global_mapping

@@ -6,11 +6,11 @@ from dreamer import log
 
 # Because of pickling format we need to define these functions here
 def trajectory_compute_func(d):
-    return max(10 ** d, 10)
+    return max(10 ** (d + 1) * 2, 10)
 
 
 def trajectory_compute_func_analysis(d):
-    return max(10 ** (d - 2), 10)
+    return max(10 ** (d - 1), 10)
 
 
 if __name__ == '__main__':
@@ -35,7 +35,8 @@ if __name__ == '__main__':
         search={
             # number of trajectories to be auto-generated in search if needed by the module
             'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func,
-            'DEFAULT_USES_INV_T': False
+            'DEFAULT_USES_INV_T': False,
+            'MAX_TRAJECTORY_LENGTH': 40
         },
         logging={
             'GENERATE_LOGS': True
@@ -46,5 +47,5 @@ if __name__ == '__main__':
         function_sources=[pFq(log(2), 2, 1, -1)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
-        searcher=search.GeneticSearchMod
+        searcher=search.SearcherModV1
     ).run(constants=[log(2)])

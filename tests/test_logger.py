@@ -1,5 +1,6 @@
 import os
 
+from dreamer.configs.system import sys_config
 from dreamer.configs.logging import logging_config
 from dreamer.utils import logger as logger_mod
 from dreamer.utils.logger import Logger
@@ -196,5 +197,37 @@ def test_enabled_from_start_uses_overwrite_mode(tmp_path):
     content = log_path.read_text(encoding="utf-8")
     assert "fresh-line" in content
     assert "old-content" not in content
+
+
+def test_start_run_writes_system_status_section_with_configs(tmp_path):
+    log_path = tmp_path / "status.log"
+
+    logging_config.GENERATE_LOGS = True
+    logging_config.LOG_FILENAME = str(log_path)
+    original_buffer = sys_config.LOGGING_BUFFER_SIZE
+    sys_config.LOGGING_BUFFER_SIZE = 321
+    _reset_logger_runtime_state()
+
+    try:
+        Logger.start_run()
+    finally:
+        sys_config.LOGGING_BUFFER_SIZE = original_buffer
+
+    assert log_path.exists()
+    content = log_path.read_text(encoding="utf-8")
+
+    assert "SYSTEM STATUS" in content
+    assert "cores_available=" in content
+    assert "os=" in content
+    assert "architecture=" in content
+    assert "configurations:" in content
+    assert "[system]" in content
+    assert "[database]" in content
+    assert "[extraction]" in content
+    assert "[analysis]" in content
+    assert "[search]" in content
+    assert "[logging]" in content
+    assert "LOGGING_BUFFER_SIZE = 321" in content
+    assert "Registered constants to search for" in content
 
 

@@ -38,7 +38,7 @@ class _DummyPool:
 
     def imap_unordered(self, func, tasks, chunksize=1):
         del chunksize
-        return _DummyIterator([func(*task) for task in tasks])
+        return _DummyIterator([func(task) for task in tasks])
 
 
 class TestShardMaps:

@@ -67,7 +67,7 @@ class Analyzer(AnalyzerScheme):
                     ).log()
                 else:
                     cmf_msg = f'{repr(space.cmf)}'\
-                        if type(space.cmf) is not CMF else '<raw cmf>'
+                        if type(space.cmf) is not CMF else space.cmf_name
                     Logger(
                         f'Identified {identified * 100:.2f}% of trajectories as containing "{self.const.name}"'
                         f'\n    > Best delta:\t {best_delta:.4f}'

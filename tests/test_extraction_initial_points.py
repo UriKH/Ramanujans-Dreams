@@ -67,10 +67,8 @@ class _DummyPool:
         del chunksize
         results = []
         for task in tasks:
-            if isinstance(task, tuple):
-                results.append(func(*task))
-            else:
-                results.append(func(task))
+            # compute_mapping uses an adaptor that expects one packed task argument.
+            results.append(func(task))
         return _DummyIterator(results)
 
 

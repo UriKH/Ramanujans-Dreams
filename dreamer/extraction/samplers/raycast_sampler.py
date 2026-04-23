@@ -192,30 +192,30 @@ class RaycastPipelineSampler(Sampler):
                 Logger.Levels.debug
             ).log()
 
-        def finalize_rays(raw_rays, target_rays):
+        def finalize_rays(raw_rays, target_rays, max_norm):
+            if len(raw_rays) == 0:
+                return np.empty((0, self.d_orig), dtype=np.int64)
+
             lengths = np.linalg.norm(raw_rays, axis=1)
-            sorted_indices = np.argsort(lengths)
-            best_rays = raw_rays[sorted_indices][:target_rays]
+            within_limit = lengths <= max_norm
+            if not np.any(within_limit):
+                return np.empty((0, self.d_orig), dtype=np.int64)
+
+            filtered_rays = raw_rays[within_limit]
+            filtered_lengths = lengths[within_limit]
+            sorted_indices = np.argsort(filtered_lengths)
+            best_rays = filtered_rays[sorted_indices][:target_rays]
             np.random.shuffle(best_rays)
             final_rays = best_rays
             return final_rays
 
         # max_radius = math.sqrt(pow(search_config.MAX_TRAJECTORY_COORD, 2) * d_flat) + 1
-        max_radius = search_config.MAX_TRAJECTORY_COORD
         raw_rays = np.array([])
 
         raddai = []
         expansions = []
 
         while len(final_rays) < target_rays:
-            if current_R_max >= max_radius:
-                final_rays = finalize_rays(raw_rays, len(raw_rays))
-                Logger(
-                    f"[Pipeline] Could not achieve quota, found {len(final_rays)}/{target_rays}",
-                    Logger.Levels.debug
-                ).log()
-                break
-
             raw_rays = sampler.harvest(
                 target_rays=guide_rays_to_shoot,
                 R_max=current_R_max,
@@ -224,7 +224,7 @@ class RaycastPipelineSampler(Sampler):
 
             if len(raw_rays) >= target_rays:
                 Logger(f"[Pipeline] Quota exceeded ({len(raw_rays)})!", Logger.Levels.debug).log()
-                final_rays = finalize_rays(raw_rays, target_rays)
+                final_rays = finalize_rays(raw_rays, target_rays, search_config.MAX_TRAJECTORY_LENGTH)
                 break
             else:
                 if len(raw_rays) == 0:
