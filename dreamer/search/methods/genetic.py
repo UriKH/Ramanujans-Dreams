@@ -1,9 +1,9 @@
 import random
-import numpy as np
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, cast
 from numba import njit
 
+from dreamer.utils.rand import *
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.utils.ui.tqdm_config import SmartTQDM
