@@ -30,7 +30,10 @@ def test_filter_symmetrical_cones_deduplicates_points():
         (2,): np.array([1, 3, 4]),
         (3,): np.array([2, 5, 6]),
     }
-    filtered = initial_points.filter_symmetrical_cones(mapping, p=2, q=1, shift=[0, 0, 0])
+    # Separate [1,3,4] and [2,5,6] by signature so symmetry-dedup keeps exactly two cones.
+    A = np.array([[1, 1, 1]], dtype=np.int64)
+    b = np.array([-9], dtype=np.int64)
+    filtered = initial_points.filter_symmetrical_cones(mapping, p=2, q=1, shift=[0, 0, 0], A=A, b=b)
 
     assert len(filtered) == 2
 
@@ -38,7 +41,14 @@ def test_filter_symmetrical_cones_deduplicates_points():
 def test_filter_symmetrical_cones_validates_dimensions():
     """Assumption: p+q must equal shift dimension; failure mode: incorrect symmetry partitioning."""
     with pytest.raises(ValueError, match=r"p \+ q must be the dimension"):
-        initial_points.filter_symmetrical_cones({(1,): np.array([1, 2])}, p=1, q=2, shift=[0, 0])
+        initial_points.filter_symmetrical_cones(
+            {(1,): np.array([1, 2])},
+            p=1,
+            q=2,
+            shift=[0, 0],
+            A=np.zeros((1, 2), dtype=np.int64),
+            b=np.zeros(1, dtype=np.int64),
+        )
 
 
 class _DummyIterator:

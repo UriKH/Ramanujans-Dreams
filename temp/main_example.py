@@ -1,0 +1,52 @@
+from dreamer import System, config
+from dreamer import analysis, search, extraction
+from dreamer.loading import pFq
+from dreamer import log
+
+
+# Because of pickling format we need to define these functions here
+def trajectory_compute_func(d):
+    return max(10 ** d, 10)
+
+
+def trajectory_compute_func_analysis(d):
+    return max(10 ** (d - 1), 10)
+
+
+if __name__ == '__main__':
+    config.configure(
+        system={
+            'EXPORT_CMFS': './CMFs',                                # export CMF as objects to directory: ./CMFs
+            'EXPORT_ANALYSIS_PRIORITIES': './analysis priorities',  # export shards found in analysis into: ./analysis priorities
+            'EXPORT_SEARCH_RESULTS': './search results',            # export the search results into: ./search results
+            'PATH_TO_SEARCHABLES': './spaces',                       # export all shard to this directory: ./spaces
+            'EXPORT_SEARCH_RESULTS_FORMAT': 'json'
+        },
+        analysis={
+            # ignore shards with less than 0.1% identified trajectories as converge to the constant
+            'IDENTIFY_THRESHOLD': 1e-3,
+            # number of trajectories to be auto-generated in analysis
+            'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func_analysis
+        },
+        extraction={
+            'INIT_POINT_MAX_COORD': 10,
+            # In this case this indicates usage of pFq symmetries utilization to reduce the number of shards
+            'IGNORE_DUPLICATE_SEARCHABLES': True
+        },
+        search={
+            # number of trajectories to be auto-generated in search if needed by the module
+            'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func,
+            'DEFAULT_USES_INV_T': False,
+            'MAX_TRAJECTORY_LENGTH': 40
+        },
+        logging={
+            'GENERATE_LOGS': True
+        }
+    )
+
+    System(
+        function_sources=[pFq(log(2), 2, 1, -1)],
+        extractor=extraction.extractor.ShardExtractorMod,
+        analyzers=[analysis.AnalyzerModV1],
+        searcher=search.SearcherModV1
+    ).run(constants=[log(2)])

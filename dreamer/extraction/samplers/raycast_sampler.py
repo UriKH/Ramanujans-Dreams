@@ -214,6 +214,7 @@ class RaycastPipelineSampler(Sampler):
 
         raddai = []
         expansions = []
+        safety_radius = 1_000
 
         while len(final_rays) < target_rays:
             raw_rays = sampler.harvest(
@@ -221,6 +222,15 @@ class RaycastPipelineSampler(Sampler):
                 R_max=current_R_max,
                 max_per_ray=dynamic_max_per_ray
             )
+
+            if current_R_max > safety_radius:
+                Logger(
+                    f"⚠ WARNING: Search radius {current_R_max:.2f} exceeded search radius {safety_radius}."
+                    f" Stopping expansion.",
+                    Logger.Levels.warning
+                ).log()
+                final_rays = finalize_rays(raw_rays, target_rays, search_config.MAX_TRAJECTORY_LENGTH)
+                break
 
             if len(raw_rays) >= target_rays:
                 Logger(f"[Pipeline] Quota exceeded ({len(raw_rays)})!", Logger.Levels.debug).log()

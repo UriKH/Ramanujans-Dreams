@@ -45,7 +45,8 @@ class SearcherModV1(SearcherModScheme):
             exist_ok=True
         )
 
-        with Exporter.export_stream(dir_path, exists_ok=True, clean_exists=True, fmt=Formats.PICKLE) as write_chunk:
+        fmt = Formats(sys_config.EXPORT_SEARCH_RESULTS_FORMAT)
+        with Exporter.export_stream(dir_path, exists_ok=True, clean_exists=True, fmt=fmt) as write_chunk:
             for shard in SmartTQDM(
                     self.searchables, desc='Searching in shards: ', **sys_config.TQDM_CONFIG
             ):

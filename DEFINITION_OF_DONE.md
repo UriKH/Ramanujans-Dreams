@@ -46,9 +46,11 @@ A code development task produces new or modified Python code: a function, a modu
   - Tests cover: normal operation, edge cases, and at least one known-answer verification.
   - Tests are runnable via `pytest`.
   - All test functions and classes are well-documented, including assumptions and failure mode rationale per test.
+  - Run the full suite (`pytest tests/ -v`) before declaring the task complete.
   - After running tests, update `tests/TEST_AUDIT_REPORT.md` with three explicit sections:
     1. **Touched Modules (Detailed Review):** coverage status, challenge rubric scores, and regression evidence for modules changed in this task.
     2. **Non-Touched Modules (Repository-Wide Summary):** concise status/risk scan for modules not changed in this task, with follow-up actions if applicable.
+  - After every full-suite run, update `GLOBAL_TEST_REPORT.md` with current collection totals, pass/fail counts, failing-test details, warning status and uncovered cases.
 - [ ] **Coverage evidence** attached:
   - `pytest tests/ -v --cov=dreamer --cov-branch --cov-report=term-missing` is run.
   - PR includes line + branch coverage for touched modules/files.
@@ -88,6 +90,7 @@ A code development task produces new or modified Python code: a function, a modu
 ### Not Done If
 
 - Any test fails.
+- `GLOBAL_TEST_REPORT.md` is missing or stale relative to the latest full-suite run.
 - New public functions lack tests.
 - Code uses Python `float` for mathematical computations.
 - No guardrails on public API inputs.
@@ -146,11 +149,13 @@ A paper writing task produces or edits LaTeX content for a research paper.
 - [ ] **Root cause identified** and explained.
 - [ ] **Fix implemented** with a regression test that would have caught the bug.
 - [ ] **No other tests broken** by the fix.
+- [ ] **Full-suite verification completed**: run `pytest tests/ -v`, attempt to fix any failing tests, and update `GLOBAL_TEST_REPORT.md` with the latest status.
 
 ### Not Done If
 
 - The root cause is not understood (a "fix" that works by coincidence is not done).
 - No regression test is added.
+- Full-suite tests were not run, or failures were left unresolved without attempted fixes and documentation.
 
 ---
 
@@ -193,5 +198,5 @@ commits alone are never sufficient.
 2. **State the bottom line first.** The most important result goes in the first sentence of any deliverable.
 3. **Include reproducibility information.** Python version, package versions, commands to run.
 4. **Flag uncertainties.** If something is conjectured but not proven, say so explicitly.
-5. **Update tests.** If your change could break existing tests, run the full suite and fix any failures.
+5. **Always run all tests and keep reports current.** Run the full suite (`pytest tests/ -v`) for every task before declaring done, update `GLOBAL_TEST_REPORT.md` with the current results, and if any test fails, attempt to fix and rerun until green.
 6. **Deliver as a PR.** See section 6 above — local-only work is not done.

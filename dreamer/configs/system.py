@@ -53,6 +53,10 @@ class SystemConfig(Configurable):
         default='search_results.tempdir',
         metadata={"description": "Directory used by search stage to save discovered results and metadata."},
     )
+    EXPORT_SEARCH_RESULTS_FORMAT: str = field(
+        default='pkl',
+        metadata={"description": "Format to save the discovered results and metadata ('pkl' or 'json')."},
+    )
     PATH_TO_SEARCHABLES: str = field(
         default='searchables.tempdir',
         metadata={"description": "Default import directory for precomputed searchable shards."},

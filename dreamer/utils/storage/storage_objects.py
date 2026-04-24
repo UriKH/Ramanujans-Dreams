@@ -90,6 +90,62 @@ class DataManager(UserDict[SearchVector, SearchData]):
         """
         return list(self.values())
 
+    def to_json_obj(self) -> Dict:
+        """
+        Convert the DataManager to a JSON-serializable dictionary.
+        """
+        data_list = []
+        for sv, sd in self.items():
+            errs = {str(k): str(v) for k, v in sd.errors.items()} if sd.errors else {}
+            item = {
+                "sv": {
+                    "start": {str(k): int(v) for k, v in sv.start.items()},
+                    "trajectory": {str(k): int(v) for k, v in sv.trajectory.items()}
+                },
+                "limit": float(sd.limit) if sd.limit is not None else None,
+                "delta": (float(sd.delta) if isinstance(sd.delta, (int, float)) else str(sd.delta)) if sd.delta is not None else None,
+                "eigen_values": {str(k): float(v) if isinstance(v, (int, float)) else str(v) for k, v in sd.eigen_values.items()} if sd.eigen_values else {},
+                "gcd_slope": float(sd.gcd_slope) if sd.gcd_slope is not None else None,
+                "initial_values": [[str(cell) for cell in row] for row in sd.initial_values.tolist()] if sd.initial_values is not None else None,
+                "LIReC_identify": bool(sd.LIReC_identify),
+                "errors": errs
+            }
+            data_list.append(item)
+
+        return {
+            "__class__": "DataManager",
+            "use_LIReC": bool(self.use_LIReC),
+            "data": data_list
+        }
+
+    @classmethod
+    def from_json_obj(cls, obj: Dict) -> "DataManager":
+        use_LIReC = obj.get("use_LIReC", False)
+        manager = cls(use_LIReC=use_LIReC)
+        for item in obj.get("data", []):
+            start = Position(item["sv"]["start"])
+            trajectory = Position(item["sv"]["trajectory"])
+            sv = SearchVector(start, trajectory)
+
+            init_vals = None
+            if item.get("initial_values") is not None:
+                import sympy as sp
+                from ramanujantools import Matrix
+                init_vals = Matrix([[sp.sympify(c) for c in row] for row in item["initial_values"]])
+
+            sd = SearchData(
+                sv=sv,
+                limit=item.get("limit"),
+                delta=item.get("delta"),
+                eigen_values=item.get("eigen_values", {}),
+                gcd_slope=item.get("gcd_slope"),
+                initial_values=init_vals,
+                LIReC_identify=item.get("LIReC_identify", False),
+                errors={k: Exception(v) for k, v in item.get("errors", {}).items()}
+            )
+            manager[sv] = sd
+        return manager
+
     def as_df(self) -> pd.DataFrame:
         """
         Convert the data into a dataframe

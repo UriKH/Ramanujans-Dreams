@@ -38,7 +38,7 @@ class GeneticSearchMod(SearcherModScheme):
     @CatchErrorInModule(with_trace=sys_config.MODULE_ERROR_SHOW_TRACE, fatal=True)
     def execute(self) -> None:
         """
-        Run GA search for each searchable and export results as pickled DataManager chunks.
+        Run GA search for each searchable and export results as serialized DataManager chunks.
         :return: None.
         """
         if not self.searchables:
@@ -50,7 +50,9 @@ class GeneticSearchMod(SearcherModScheme):
             exist_ok=True,
         )
 
-        with Exporter.export_stream(dir_path, exists_ok=True, clean_exists=True, fmt=Formats.PICKLE) as write_chunk:
+        fmt = Formats(sys_config.EXPORT_SEARCH_RESULTS_FORMAT)
+
+        with Exporter.export_stream(dir_path, exists_ok=True, clean_exists=True, fmt=fmt) as write_chunk:
             for space in SmartTQDM(
                 self.searchables,
                 desc="Optimizing trajectories via GA: ",

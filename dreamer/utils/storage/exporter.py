@@ -49,7 +49,10 @@ class Exporter:
                         pkl.dump(data, f)
                 case Formats.JSON:
                     with open(path, "w") as f:
-                        json.dump(data, f)
+                        if hasattr(data, "to_json_obj"):
+                            json.dump(data.to_json_obj(), f, indent=4)
+                        else:
+                            json.dump(data, f, indent=4)
         else:
             # cleanup if needed
             if os.path.isdir(root) and not exists_ok:

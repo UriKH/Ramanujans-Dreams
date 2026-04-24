@@ -28,7 +28,11 @@ class Importer:
         match path.split('.')[-1]:
             case Formats.JSON.value:
                 with open(path, 'r') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    if isinstance(data, dict) and data.get("__class__") == "DataManager":
+                        from dreamer.utils.storage.storage_objects import DataManager
+                        return DataManager.from_json_obj(data)
+                    return data
             case Formats.PICKLE.value:
                 with open(path, 'rb') as f:
                     return pkl.load(f)
