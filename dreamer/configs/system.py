@@ -61,6 +61,14 @@ class SystemConfig(Configurable):
         default='searchables.tempdir',
         metadata={"description": "Default import directory for precomputed searchable shards."},
     )
+    EXPORT_SEARCHABLES_FORMAT: str = field(
+        default='pkl',
+        metadata={"description": "Format used to export/import extracted searchables ('pkl' or 'json')."},
+    )
+    EXPORT_ANALYSIS_PRIORITIES_FORMAT: str = field(
+        default='pkl',
+        metadata={"description": "Format used to export/import analysis priorities ('pkl' or 'json')."},
+    )
 
 
 sys_config: SystemConfig = SystemConfig()

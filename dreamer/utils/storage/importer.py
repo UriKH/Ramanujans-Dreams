@@ -29,15 +29,28 @@ class Importer:
             case Formats.JSON.value:
                 with open(path, 'r') as f:
                     data = json.load(f)
-                    if isinstance(data, dict) and data.get("__class__") == "DataManager":
-                        from dreamer.utils.storage.storage_objects import DataManager
-                        return DataManager.from_json_obj(data)
-                    return data
+                    return cls._json_restore(data)
             case Formats.PICKLE.value:
                 with open(path, 'rb') as f:
                     return pkl.load(f)
             case _:
                 raise ValueError(f"File {path} has unsupported format")
+
+    @classmethod
+    def _json_restore(cls, data):
+        """Recursively rebuild supported objects from JSON payloads."""
+        if isinstance(data, list):
+            return [cls._json_restore(v) for v in data]
+        if isinstance(data, dict):
+            class_name = data.get("__class__")
+            if class_name == "DataManager":
+                from dreamer.utils.storage.storage_objects import DataManager
+                return DataManager.from_json_obj(data)
+            if class_name == "Shard":
+                from dreamer.extraction.shard import Shard
+                return Shard.from_json_obj(data)
+            return {k: cls._json_restore(v) for k, v in data.items()}
+        return data
 
     @classmethod
     def import_stream(cls, path):

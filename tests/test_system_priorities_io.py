@@ -6,9 +6,13 @@ import pickle
 from pathlib import Path
 from typing import Dict, List, cast
 
+import sympy as sp
 from ramanujantools import Position
+from ramanujantools.cmf import pFq as rt_pFq
 
 from dreamer import pi
+from dreamer.extraction.hyperplanes import Hyperplane
+from dreamer.extraction.shard import Shard
 from dreamer.system import system as system_mod
 from dreamer.system.system import System
 from dreamer.utils.schemes.searchable import Searchable
@@ -72,6 +76,16 @@ def _write_cmf_input(file_path: Path, cmf_name: str) -> None:
     data = [CMFData(cmf=_DummyCMF(), shift=Position({}), cmf_name=cmf_name)]
     with file_path.open("wb") as f:
         pickle.dump(data, f)
+
+
+def _build_json_shard(cmf_name: str) -> Shard:
+    """Build a concrete shard fixture used by JSON import/export system tests."""
+    cmf = rt_pFq(1, 1, sp.Integer(1))
+    symbols = list(cmf.matrices.keys())
+    shift = Position({symbols[0]: sp.Integer(0), symbols[1]: sp.Integer(0)})
+    hps = [Hyperplane(symbols[0], symbols), Hyperplane(symbols[1], symbols)]
+    interior = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+    return Shard(cmf, pi, hps, [1, 1], shift, interior, cmf_name=cmf_name)
 
 
 def test_system_imports_priorities_when_analyzers_missing_and_filters_by_cmf(monkeypatch, tmp_path):
@@ -208,5 +222,85 @@ def test_system_imports_searchables_only_from_relevant_constant_and_cmf(monkeypa
     assert pi in captured
     assert len(captured[pi]) == 1
     assert captured[pi][0].tag == "wanted"
+
+
+def test_system_exports_priorities_as_constant_and_cmf_json(monkeypatch, tmp_path):
+    """Verify priority export respects JSON format config and keeps importable Shard payloads."""
+    priorities_root = tmp_path / "priorities"
+    searchables_root = tmp_path / "searchables"
+    searchables_root.mkdir()
+
+    monkeypatch.setattr(system_mod.sys_config, "PATH_TO_SEARCHABLES", str(searchables_root))
+    monkeypatch.setattr(system_mod.sys_config, "EXPORT_ANALYSIS_PRIORITIES", str(priorities_root))
+    monkeypatch.setattr(system_mod.sys_config, "EXPORT_ANALYSIS_PRIORITIES_FORMAT", Formats.JSON.value)
+
+    shard_a = _build_json_shard("cmfA")
+    shard_b = _build_json_shard("cmfB")
+
+    system = System(
+        function_sources=[],
+        extractor=None,
+        analyzers=[],
+        searcher=cast(type[SearcherModScheme], _DummySearcher),
+    )
+    monkeypatch.setattr(system, "_System__analysis_stage", lambda *_args, **_kwargs: {pi: [shard_a, shard_b]})
+    monkeypatch.setattr(system, "_System__search_stage", lambda *_args, **_kwargs: None)
+
+    system.run(constants=[pi])
+
+    const_dir = priorities_root / pi.name
+    assert (const_dir / "cmfA.json").is_file()
+    assert (const_dir / "cmfB.json").is_file()
+    loaded = Importer.imprt(str(const_dir / "cmfA.json"))
+    assert isinstance(loaded, list)
+    assert isinstance(loaded[0], Shard)
+
+
+def test_system_imports_searchables_from_json_when_configured(monkeypatch, tmp_path):
+    """Boundary/regression: JSON searchable imports should honor cmf relevance filters."""
+    searchables_root = tmp_path / "searchables"
+    priorities_root = tmp_path / "priorities"
+    (searchables_root / pi.name / "wanted_cmf").mkdir(parents=True)
+    (searchables_root / pi.name / "other_cmf").mkdir(parents=True)
+
+    Exporter.export(
+        str(searchables_root / pi.name / "wanted_cmf"),
+        "chunk_0000000000",
+        data=[_build_json_shard("wanted_cmf")],
+        fmt=Formats.JSON,
+    )
+    Exporter.export(
+        str(searchables_root / pi.name / "other_cmf"),
+        "chunk_0000000000",
+        data=[_build_json_shard("other_cmf")],
+        fmt=Formats.JSON,
+    )
+
+    cmf_input = tmp_path / "cmf_inputs" / pi.name / "cmf_input.pkl"
+    _write_cmf_input(cmf_input, "wanted_cmf")
+
+    monkeypatch.setattr(system_mod.sys_config, "PATH_TO_SEARCHABLES", str(searchables_root))
+    monkeypatch.setattr(system_mod.sys_config, "EXPORT_ANALYSIS_PRIORITIES", str(priorities_root))
+    monkeypatch.setattr(system_mod.sys_config, "EXPORT_SEARCHABLES_FORMAT", Formats.JSON.value)
+
+    captured = {}
+
+    def _capture_analysis(cmf_data, *_args, **_kwargs):
+        captured.update(cmf_data)
+        return {}
+
+    system = System(
+        function_sources=[str(cmf_input)],
+        extractor=None,
+        analyzers=["placeholder"],
+        searcher=cast(type[SearcherModScheme], _DummySearcher),
+    )
+    monkeypatch.setattr(system, "_System__analysis_stage", _capture_analysis)
+
+    system.run(constants=[pi])
+
+    assert pi in captured
+    assert len(captured[pi]) == 1
+    assert captured[pi][0].cmf_name == "wanted_cmf"
 
 

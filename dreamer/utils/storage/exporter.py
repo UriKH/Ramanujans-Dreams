@@ -7,6 +7,21 @@ import shutil
 from contextlib import contextmanager
 
 
+def _json_ready(data: Any) -> Any:
+    """Recursively convert supported objects to JSON-serializable payloads."""
+    if hasattr(data, "to_json"):
+        return data.to_json()
+    if hasattr(data, "to_json_obj"):
+        return data.to_json_obj()
+    if isinstance(data, dict):
+        return {str(k): _json_ready(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [_json_ready(v) for v in data]
+    if isinstance(data, tuple):
+        return [_json_ready(v) for v in data]
+    return data
+
+
 class Exporter:
     """
     A utility class for exporting data into files as pickle or JSON
@@ -49,10 +64,7 @@ class Exporter:
                         pkl.dump(data, f)
                 case Formats.JSON:
                     with open(path, "w") as f:
-                        if hasattr(data, "to_json_obj"):
-                            json.dump(data.to_json_obj(), f, indent=4)
-                        else:
-                            json.dump(data, f, indent=4)
+                        json.dump(_json_ready(data), f, indent=4)
         else:
             # cleanup if needed
             if os.path.isdir(root) and not exists_ok:

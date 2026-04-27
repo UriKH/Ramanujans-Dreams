@@ -329,16 +329,16 @@ if __name__ == "__main__":
     SHARDS_FILE_pi = "../examples/spaces/pi/zz_pi__0_0_0__pi"  # File containing the list of Shard objects
 
 
-    # shards_list = load_shards(SHARDS_FILE_log)
-    # df_list = load_data_managers(DATA_FOLDER_log)
-    # df_list = [df_list[2], df_list[1]]
-    # pairs = match_data_to_shards(df_list, shards_list)
-    # generate_shard_atlas(pairs)
-
-    shards_list = load_shards(SHARDS_FILE_pi)
-    for shard in shards_list:
-        print(shard.start_coord)
-    df_list = load_data_managers(DATA_FOLDER_pi)
-    df_list = [df_list[0], df_list[-1]]
+    shards_list = load_shards(SHARDS_FILE_log)
+    df_list = load_data_managers(DATA_FOLDER_log)
+    df_list = [df_list[2], df_list[1]]
     pairs = match_data_to_shards(df_list, shards_list)
     generate_shard_atlas(pairs)
+
+    # shards_list = load_shards(SHARDS_FILE_pi)
+    # for shard in shards_list:
+    #     print(shard.start_coord)
+    # df_list = load_data_managers(DATA_FOLDER_pi)
+    # df_list = [df_list[0], df_list[-1]]
+    # pairs = match_data_to_shards(df_list, shards_list)
+    # generate_shard_atlas(pairs)

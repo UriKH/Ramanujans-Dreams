@@ -200,7 +200,7 @@ class GeneticSearchMethod(SearchMethod):
         self.space = cast(Shard, self.space)
 
         if self.data_manager is None:
-            self.data_manager = DataManager(use_LIReC=self.use_LIReC)
+            self.data_manager = DataManager(use_LIReC=self.use_LIReC, searchable_space=self.space)
 
         self.sampling_orchestrator = ShardSamplingOrchestrator(self.space)
         self.canonical_keys = sorted(self.space.symbols, key=str)
@@ -487,7 +487,7 @@ class GeneticSearchMethod(SearchMethod):
         initial_trajectories = self._sample_valid_trajectories(count=self.pop_size, template_pos=template)
         if len(initial_trajectories) == 0:
             Logger("No valid trajectories could be sampled. Continue...", Logger.Levels.warning).log()
-            return DataManager(self.use_LIReC)
+            return DataManager(self.use_LIReC, searchable_space=self.space)
 
         population: List[Dict[str, Any]] = [
             {"trajectory": traj, "delta": None, "sd": None} for traj in initial_trajectories

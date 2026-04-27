@@ -6,7 +6,7 @@ from dreamer import log
 
 # Because of pickling format we need to define these functions here
 def trajectory_compute_func(d):
-    return max(10 ** d, 10)
+    return max(10 ** (d + 1), 10)
 
 
 def trajectory_compute_func_analysis(d):
@@ -16,11 +16,14 @@ def trajectory_compute_func_analysis(d):
 if __name__ == '__main__':
     config.configure(
         system={
-            'EXPORT_CMFS': './CMFs',                                # export CMF as objects to directory: ./CMFs
-            'EXPORT_ANALYSIS_PRIORITIES': './analysis priorities',  # export shards found in analysis into: ./analysis priorities
-            'EXPORT_SEARCH_RESULTS': './search results',            # export the search results into: ./search results
-            'PATH_TO_SEARCHABLES': './spaces',                       # export all shard to this directory: ./spaces
-            'EXPORT_SEARCH_RESULTS_FORMAT': 'json'
+            'EXPORT_CMFS': './CMFs',  # export CMF as objects to directory: ./CMFs
+            'EXPORT_ANALYSIS_PRIORITIES': './analysis priorities',
+            # export shards found in analysis into: ./analysis priorities
+            'EXPORT_SEARCH_RESULTS': './search results',  # export the search results into: ./search results
+            'PATH_TO_SEARCHABLES': './spaces',  # export all shard to this directory: ./spaces
+            # 'EXPORT_ANALYSIS_PRIORITIES_FORMAT': 'json',
+            # 'EXPORT_SEARCHABLES_FORMAT': 'json',
+            # 'EXPORT_SEARCH_RESULTS_FORMAT': 'json'
         },
         analysis={
             # ignore shards with less than 0.1% identified trajectories as converge to the constant
@@ -46,7 +49,7 @@ if __name__ == '__main__':
 
     System(
         function_sources=[pFq(log(2), 2, 1, -1)],
-        extractor=extraction.extractor.ShardExtractorMod,
-        analyzers=[analysis.AnalyzerModV1],
+        # extractor=extraction.extractor.ShardExtractorMod,
+        # analyzers=[analysis.AnalyzerModV1],
         searcher=search.SearcherModV1
     ).run(constants=[log(2)])

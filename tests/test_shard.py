@@ -7,6 +7,7 @@ from ramanujantools import Position
 from ramanujantools.cmf import pFq as rt_pFq
 from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.extraction.shard import Shard
+from dreamer.utils.storage import Exporter, Importer, Formats
 
 
 # ---------------------------------------------------------------------------
@@ -286,3 +287,22 @@ class TestGenerateMatrices:
         # as_below_vector representation of `x - y < 0`
         assert np.array_equal(A[1], np.array([1, -1]))
         assert b[1] == 0
+
+
+class TestShardJsonSerialization:
+
+    def test_shard_json_roundtrip_via_exporter_importer(self, simple_cmf, const_e, symbols, tmp_path):
+        """Shard JSON export should be importable back into a Shard instance with equivalent geometry."""
+        s0, s1 = symbols
+        hps = [Hyperplane(s0, symbols), Hyperplane(s1, symbols), Hyperplane(s0 + s1 - 10, symbols)]
+        inside = _point(symbols, [3, 3])
+        shard = _build_shard(simple_cmf, const_e, hps, _point(symbols, [0, 0]), inside)
+
+        Exporter.export(str(tmp_path), "one_shard", data=shard, fmt=Formats.JSON)
+        loaded = Importer.imprt(str(tmp_path / "one_shard.json"))
+
+        assert isinstance(loaded, Shard)
+        assert loaded.cmf_name == shard.cmf_name
+        assert loaded.const.name == shard.const.name
+        assert loaded.in_space(inside)
+

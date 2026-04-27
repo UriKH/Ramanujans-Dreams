@@ -36,7 +36,7 @@ class SerialSearcher(SearchMethod):
         :param use_LIReC: Use LIReC to identify constants within the searchable.
         """
         super().__init__(space, constant, use_LIReC, data_manager, share_data)
-        self.data_manager = data_manager if data_manager else DataManager(use_LIReC)
+        self.data_manager = data_manager if data_manager else DataManager(use_LIReC, searchable_space=self.space)
         self.parallel = search_config.PARALLEL_SEARCH
 
     def search(self,

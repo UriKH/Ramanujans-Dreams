@@ -1,41 +1,49 @@
 # Test Audit Report (2026-04-24)
 
-Bottom line: `tests/test_extraction_initial_points.py` was updated to match the current `filter_symmetrical_cones(..., A, b)` contract, the remaining two failures were resolved, and both the full suite and coverage run are green (`168 passed`, `1 warning`).
+Bottom line: DataManager now carries its searchable space context, a new `JSONable` contract was introduced, and Shard/DataManager JSON export-import paths were implemented and validated; full suite and policy coverage runs are green (`173 passed`, `1 warning`).
 
 ## Touched Modules (Detailed Review)
 
 | Touched module | Changes made | Coverage evidence | Challenge rubric (/5) | Regression evidence |
 |---|---|---|---:|---|
-| `tests/test_extraction_initial_points.py` | Updated symmetry-filter tests to pass explicit `A`/`b` arguments required by `filter_symmetrical_cones`, while preserving the intended deduplication and dimension-validation assertions. | Included in targeted run (`8 passed`) and full suite + coverage run (`168 passed`). `dreamer/extraction/utils/initial_points.py` is now `87%` line coverage (`135` stmts, `12` missed). | 4 | `test_filter_symmetrical_cones_deduplicates_points` now fails if signature-based deduplication contract drifts; `test_filter_symmetrical_cones_validates_dimensions` still traps the `p + q` dimension guardrail with the current call signature. |
+| `dreamer/utils/schemes/jsonable.py` | Added abstract `JSONable` attribute class enforcing `to_json` implementation. | Covered by `tests/test_storage_objects.py::test_jsonable_requires_to_json_implementation`. | 3 | Instantiation fails for subclass without `to_json`, trapping contract drift. |
+| `dreamer/utils/storage/storage_objects.py` | Extended `DataManager` with `searchable_space`; added `to_json`/`from_json_obj` support for nested JSONable payloads and backward-compatible `to_json_obj`. | Covered by `tests/test_storage_objects.py::test_data_manager_json_roundtrip_preserves_searchable_space_and_entries`; included in full suite + coverage run. | 4 | Roundtrip test fails if searchable context or entries are dropped during JSON serialization. |
+| `dreamer/extraction/shard.py` | Implemented `JSONable` for `Shard` via `to_json`/`from_json_obj` + `to_json_obj` alias for exporter compatibility. | Covered by `tests/test_shard.py::TestShardJsonSerialization::test_shard_json_roundtrip_via_exporter_importer`; module now `89%` line coverage (`76` stmts, `7` missed). | 4 | Test fails if JSON export/import no longer restores a functional Shard instance. |
+| `dreamer/utils/storage/exporter.py` | Added recursive JSON conversion helper so nested objects/lists/dicts of JSONable payloads export correctly. | Exercised through Shard/DataManager JSON export tests and system JSON export tests. | 4 | JSON priority export tests fail if list-of-Shard payloads are not JSON-converted recursively. |
+| `dreamer/utils/storage/importer.py` | Added recursive JSON restoration for `DataManager` and `Shard` payloads. | Exercised through Shard roundtrip and system JSON import tests; module now `68%` line coverage (`49` stmts, `13` missed). | 4 | CMF-filtered JSON searchable import test fails if nested payload restoration regresses. |
+| `dreamer/configs/system.py` | Added configurable formats: `EXPORT_SEARCHABLES_FORMAT` and `EXPORT_ANALYSIS_PRIORITIES_FORMAT`. | Indirectly validated by system JSON export/import tests that set these fields. | 3 | JSON system tests fail if config-driven format routing is removed. |
+| `dreamer/extraction/extractor.py` + `dreamer/system/system.py` | Switched searchable/priorities export-import paths from pickle-only to config-driven `Formats(...)`. | Validated by `tests/test_system_priorities_io.py` JSON + pickle scenarios (`5/5` passing). | 4 | Both JSON and pickle path tests fail on extension/format mismatches. |
+| `dreamer/search/methods/genetic.py` + `dreamer/search/methods/hedgehog_scan.py` | Ensure internally created DataManagers include `searchable_space=self.space`. | Covered by full suite regression paths in `tests/test_search_genetic.py` and related module tests. | 3 | Search module behavior would regress if DataManager construction signature drifted. |
+| `tests/test_storage_objects.py`, `tests/test_shard.py`, `tests/test_system_priorities_io.py` | Added targeted tests for JSONable contract, DataManager searchable-space roundtrip, Shard JSON roundtrip, and system-level JSON export/import configuration paths. | Targeted run: `36 passed`; full suite + coverage run: `173 passed`. | 5 | New tests directly trap the new feature surface and config-driven IO behavior. |
 
 Challenge rubric breakdown (this task):
-- Failure-path coverage: yes (dimension mismatch path explicitly asserted).
-- Boundary stress: yes (`p + q` vs. `len(shift)` boundary is directly tested).
-- Known-answer / invariant: yes (symmetry dedup keeps one representative per canonical cone/signature class).
-- Stochastic robustness: not applicable (deterministic inputs only).
-- Regression trap: yes (tests fail if required `A`/`b` call contract or dedup behavior drifts again).
+- Failure-path coverage: yes (`JSONable` abstract-contract failure path explicitly asserted).
+- Boundary stress: yes (CMF-filtered import against mixed wanted/other CMF directories for JSON path).
+- Known-answer / invariant: yes (DataManager/Shard JSON roundtrip invariants on identity-critical fields).
+- Stochastic robustness: not applicable (deterministic serialization/IO).
+- Regression trap: yes (new tests fail if JSON routing, restoration, or DataManager context persistence drifts).
 
 ## Non-Touched Modules (Repository-Wide Summary)
 
 | Area | Status from latest run | Risk / follow-up |
 |---|---|---|
-| `tests/test_extraction_sampler_pipeline.py` and sampler runtime modules | All sampler-pipeline tests are now green (`9/9`) in full-suite and coverage runs. | Low for this cycle; keep config monkeypatch targets synchronized with runtime config names. |
-| Remaining non-touched runtime/test modules | Full repository suite and coverage run passed with no failures (`168 passed`, `1 warning`). | Low immediate regression risk; primary remaining concern is coverage debt in low-covered modules. |
+| Existing extraction/search tests outside touched files | All pre-existing tests remain green under the new JSON/config changes. | Low immediate regression risk. |
+| Remaining runtime modules not directly touched | Full suite and coverage command passed (`173 passed`, `1 warning`). | Moderate ongoing risk is still coverage debt in low-covered modules. |
 
 ## Executed Test Evidence
 
 Commands executed in this cycle:
 
 ```bash
-python -m pytest -q tests/test_extraction_initial_points.py
+python -m pytest -q tests/test_storage_objects.py tests/test_shard.py tests/test_system_priorities_io.py tests/test_search_genetic.py
 python -m pytest tests/ -v
 python -m pytest tests/ -v --cov=dreamer --cov-branch --cov-report=term-missing
 ```
 
 Observed outcomes:
-- Targeted run: `8 passed`, `1 warning`.
-- Full suite run: `168 passed`, `1 warning`.
-- Full suite + coverage run: `168 passed`, `1 warning`.
+- Targeted regression run: `36 passed`, `1 warning`.
+- Full suite run: `173 passed`, `1 warning`.
+- Full suite + coverage run: `173 passed`, `1 warning`.
 
 ## Coverage Command Output Snapshot
 
@@ -43,12 +51,13 @@ Required command status:
 - `pytest tests/ -v --cov=dreamer --cov-branch --cov-report=term-missing` -> **executed successfully**.
 
 Coverage highlights from this run:
-- `dreamer/extraction/utils/initial_points.py`: `87%` line coverage (`135` stmts, `12` missed), branch partials present.
-- `dreamer/extraction/samplers/raycast_sampler.py`: `72%` line coverage (`139` stmts, `35` missed), branch partials present.
-- Overall project coverage: `55%` line coverage.
+- `dreamer/extraction/shard.py`: `89%` line coverage (`76` stmts, `7` missed), branch partials present.
+- `dreamer/utils/storage/storage_objects.py`: `66%` line coverage (`99` stmts, `25` missed), branch partials present.
+- `dreamer/utils/storage/importer.py`: `68%` line coverage (`49` stmts, `13` missed), branch partials present.
+- Overall project coverage: `56%` line coverage.
 
 ## Notes / Remaining Risks
 
-1. Workspace remains in a pre-existing dirty state; this report evaluates the files touched in this task plus repository-wide test outcomes.
-2. The LIReC SQLAlchemy deprecation warning persists and is unrelated to this fix.
-3. Coverage policy thresholds remain below target in critical paths (`dreamer/extraction`, `dreamer/search`) despite the now-green suite.
+1. Workspace remains in a pre-existing dirty state; this report evaluates touched files plus repository-wide test outcomes.
+2. The LIReC SQLAlchemy deprecation warning persists and is unrelated to this feature set.
+3. Coverage policy thresholds remain below target globally and in critical paths (`dreamer/extraction`, `dreamer/search`) despite green tests.

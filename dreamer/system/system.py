@@ -138,13 +138,14 @@ class System:
                 const_path = os.path.join(path, const.name)
                 os.makedirs(const_path, exist_ok=True)
                 grouped = self.__group_searchables_by_cmf_name(l)
+                priorities_fmt = Formats(sys_config.EXPORT_ANALYSIS_PRIORITIES_FORMAT)
                 for cmf_name, spaces in grouped.items():
                     Exporter.export(
                         root=const_path,
                         f_name=self.__safe_fs_name(cmf_name),
                         exists_ok=True,
                         clean_exists=False,
-                        fmt=Formats.PICKLE,
+                        fmt=priorities_fmt,
                         data=spaces,
                     )
                 Logger(
@@ -302,6 +303,7 @@ class System:
                     const_shards.extend(self.__iter_searchables(imported))
             else:
                 allowed_safe = {self.__safe_fs_name(name) for name in allowed_cmf_names}
+                searchables_ext = f'.{Formats(sys_config.EXPORT_SEARCHABLES_FORMAT).value}'
                 for entry in sorted(os.listdir(const_dir)):
                     entry_path = os.path.join(const_dir, entry)
                     entry_stem = os.path.splitext(entry)[0]
@@ -312,7 +314,7 @@ class System:
                     if os.path.isdir(entry_path):
                         for imported in Importer.import_stream(entry_path):
                             const_shards.extend(self.__iter_searchables(imported))
-                    elif os.path.isfile(entry_path) and entry_path.endswith(f'.{Formats.PICKLE.value}'):
+                    elif os.path.isfile(entry_path) and entry_path.endswith(searchables_ext):
                         const_shards.extend(self.__iter_searchables(Importer.imprt(entry_path)))
 
             if const_shards:
@@ -344,10 +346,11 @@ class System:
             allowed_cmf_names = relevant_cmf_names.get(const.name)
             allowed_safe = {self.__safe_fs_name(name) for name in allowed_cmf_names} if allowed_cmf_names else set()
             spaces: List[Searchable] = []
+            priorities_ext = f'.{Formats(sys_config.EXPORT_ANALYSIS_PRIORITIES_FORMAT).value}'
 
             for f_name in sorted(os.listdir(const_path)):
                 file_path = os.path.join(const_path, f_name)
-                if not os.path.isfile(file_path) or not f_name.endswith(f'.{Formats.PICKLE.value}'):
+                if not os.path.isfile(file_path) or not f_name.endswith(priorities_ext):
                     continue
 
                 cmf_stem = os.path.splitext(f_name)[0]

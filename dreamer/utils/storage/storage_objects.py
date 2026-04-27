@@ -2,7 +2,35 @@ from dataclasses import dataclass, field
 from ramanujantools import Matrix, Position
 import pandas as pd
 from collections import UserDict
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+from dreamer.utils.schemes.jsonable import JSONable
+
+
+def _serialize_jsonable(value: Any) -> Any:
+    """Serialize nested JSONable payloads for JSON export."""
+    if isinstance(value, JSONable):
+        return value.to_json()
+    if isinstance(value, dict):
+        return {str(k): _serialize_jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_serialize_jsonable(v) for v in value]
+    if isinstance(value, tuple):
+        return [_serialize_jsonable(v) for v in value]
+    return value
+
+
+def _deserialize_jsonable(value: Any) -> Any:
+    """Deserialize nested JSON payloads into known runtime objects when possible."""
+    if isinstance(value, dict):
+        class_name = value.get("__class__")
+        if class_name == "Shard":
+            from dreamer.extraction.shard import Shard
+            return Shard.from_json_obj(value)
+        return {k: _deserialize_jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_deserialize_jsonable(v) for v in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -39,17 +67,19 @@ class SearchData:
     # def
 
 
-class DataManager(UserDict[SearchVector, SearchData]):
+class DataManager(UserDict[SearchVector, SearchData], JSONable):
     """
     DataManager represents a set of results found in a specific search in a CMF
     """
 
-    def __init__(self, use_LIReC: bool):
+    def __init__(self, use_LIReC: bool, searchable_space: Optional[Any] = None):
         """
         :param use_LIReC: If true, LIReC will be used to identify constants within the searchable spaces.
+        :param searchable_space: The searchable object whose trajectories are evaluated by this manager.
         """
         super().__init__()
         self.use_LIReC = use_LIReC
+        self.searchable_space = searchable_space
 
     @property
     def identified_percentage(self) -> float:
@@ -90,7 +120,7 @@ class DataManager(UserDict[SearchVector, SearchData]):
         """
         return list(self.values())
 
-    def to_json_obj(self) -> Dict:
+    def to_json(self) -> Dict:
         """
         Convert the DataManager to a JSON-serializable dictionary.
         """
@@ -115,13 +145,19 @@ class DataManager(UserDict[SearchVector, SearchData]):
         return {
             "__class__": "DataManager",
             "use_LIReC": bool(self.use_LIReC),
+            "searchable_space": _serialize_jsonable(self.searchable_space),
             "data": data_list
         }
+
+    def to_json_obj(self) -> Dict:
+        """Backward-compatible alias used by existing exporter paths."""
+        return self.to_json()
 
     @classmethod
     def from_json_obj(cls, obj: Dict) -> "DataManager":
         use_LIReC = obj.get("use_LIReC", False)
-        manager = cls(use_LIReC=use_LIReC)
+        searchable_space = _deserialize_jsonable(obj.get("searchable_space"))
+        manager = cls(use_LIReC=use_LIReC, searchable_space=searchable_space)
         for item in obj.get("data", []):
             start = Position(item["sv"]["start"])
             trajectory = Position(item["sv"]["trajectory"])
