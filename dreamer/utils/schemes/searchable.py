@@ -137,8 +137,8 @@ class Searchable(ABC):
         p, q = None, None
         values = [item for item in walk_col]
         with Logger.simple_timer('constant heavy evalf'):
-            pi_30000 = constant.evalf(30000)
-            pi_300 = constant.evalf(300)
+            high_res_constant = constant.evalf(search_config.CONSTANT_NO_DIGITS_HIGH_RES)
+            low_res_constant = constant.evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES)
         cache_hit = False
         values_vec = sp.Matrix(values)
         estimated = None
@@ -152,7 +152,7 @@ class Searchable(ABC):
                 v2 = sp.Matrix(v2).T
                 numerator = v1.dot(values_vec)
                 denom = v2.dot(values_vec)
-                err = sp.Abs(sp.Abs(sp.Rational(numerator, denom)) - pi_300)
+                err = sp.Abs(sp.Abs(sp.Rational(numerator, denom)) - low_res_constant)
                 return sp.N(err, 25) < search_config.CACHE_ACCEPTANCE_THRESHOLD
 
             matched = self.cache.find(matcher)
@@ -171,7 +171,7 @@ class Searchable(ABC):
 
             try:
                 with Logger.simple_timer('LIReC identify'):
-                    res = db.identify([pi_300] + walk_col[1:])
+                    res = db.identify([low_res_constant] + walk_col[1:])
             except Exception as e:
                 Logger(f'LIReC failed with: "{e}"', Logger.Levels.exception).log()
                 return None, None, None
@@ -194,7 +194,7 @@ class Searchable(ABC):
 
                 # check convergence to constant
                 estimated = estimated_expr.subs({sym: v for sym, v in zip(ext_syms, list(values_vec))})
-                err = sp.Abs(estimated - pi_30000)
+                err = sp.Abs(estimated - high_res_constant)
                 if sp.N(err, 15) > search_config.IDENTIFY_CHECK_THRESHOLD:
                     return None, None, None
 
@@ -222,7 +222,7 @@ class Searchable(ABC):
                 numerator = p.dot(values_vec)
                 denom = q.dot(values_vec)
                 estimated = sp.Abs(sp.Rational(numerator, denom))
-                err = sp.Abs(estimated - pi_30000)
+                err = sp.Abs(estimated - high_res_constant)
 
             # check abnormal denominator and compute delta
             denom = sp.denom(estimated)

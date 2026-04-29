@@ -60,6 +60,19 @@ class Shard(Searchable, JSONable):
             interior_point, cmf_data.use_inv_t, cmf_data.cmf_name
         )
 
+    @classmethod
+    def from_matrices(cls, cmf: CMF,
+                 constant: Constant,
+                 A: np.ndarray, b: np.ndarray,
+                 shift: Position,
+                 interior_point: Optional[Position] = None,
+                 use_inv_t: Optional[bool] = None,
+                 cmf_name: str = 'UnknownCMF'):
+        shard = cls(cmf, constant, [], [], shift, interior_point, use_inv_t, cmf_name)  # Create an uninitialized instance
+        shard.A = A
+        shard.b = b
+        shard.is_whole_space = False
+        return shard
 
     def in_space(self, point: Position) -> bool:
         """

@@ -18,35 +18,31 @@ def load_shards(filepath):
     print(f"Loaded {len(shards_list_l[0])} shards.")
     return shards_list_l[0]
 
-
 def get_rotation_matrix(vec1, vec2):
-    """ Mathematically calculates the pure rotation matrix that aligns vec1 to vec2. """
-    a = vec1 / np.linalg.norm(vec1)
-    b = vec2 / np.linalg.norm(vec2)
+    """ Aligns vec1 to vec2 using Rodrigues' rotation formula. """
+    a, b = (vec1 / np.linalg.norm(vec1)), (vec2 / np.linalg.norm(vec2))
     c = np.dot(a, b)
-
-    # Perfectly aligned
-    if c > 0.999999:
-        return np.eye(3)
-
-    # True 180-degree rotation (det=1) instead of inversion (det=-1)
+    if c > 0.999999: return np.eye(3)
     if c < -0.999999:
-        # Find any orthogonal axis to rotate 180 degrees around
+        # True 180-degree rotation around an orthogonal axis (preserving right-hand rule)
         ortho = np.array([1.0, 0.0, 0.0]) if abs(a[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
         axis = np.cross(a, ortho)
-        axis = axis / np.linalg.norm(axis)
-        # 180 degree rotation matrix around 'axis'
+        axis /= np.linalg.norm(axis)
         return 2 * np.outer(axis, axis) - np.eye(3)
-
     v = np.cross(a, b)
     s = np.linalg.norm(v)
-    kmat = np.array([
-        [0, -v[2], v[1]],
-        [v[2], 0, -v[0]],
-        [-v[1], v[0], 0]
-    ])
-    return np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s ** 2))
+    kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    return np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s**2))
 
+#def get_rotation_matrix(vec1, vec2):
+#     """ Aligns vec1 to vec2 using Rodrigues' rotation formula. """
+#     a, b = (vec1 / np.linalg.norm(vec1)), (vec2 / np.linalg.norm(vec2))
+#     v = np.cross(a, b)
+#     c = np.dot(a, b)
+#     s = np.linalg.norm(v)
+#     if s < 1e-8: return np.eye(3) if c > 0 else -np.eye(3)
+#     kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+#     return np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s**2))
 
 def load_data_managers(folder_path):
     path = Path(folder_path)
@@ -88,84 +84,122 @@ def match_data_to_shards(dfs, shards):
 
 def plot_hyperplanes_on_sphere(ax, shard, cam_elev, cam_azim):
     try:
-        A = shard.A
-        print(f'cones: {shard.A} x < {shard.b}')
-        A = np.array(A, dtype=float)
+        A = np.array(shard.A, dtype=float)
     except Exception as e:
         print(f"Could not extract hyperplanes: {e}")
         return
 
-    elev_rad = np.radians(cam_elev)
-    azim_rad = np.radians(cam_azim)
-    cam_vec = np.array([
-        np.cos(elev_rad) * np.cos(azim_rad),
-        np.cos(elev_rad) * np.sin(azim_rad),
-        np.sin(elev_rad)
-    ])
-
+    elev_rad, azim_rad = np.radians(cam_elev), np.radians(cam_azim)
+    cam_vec = np.array([np.cos(elev_rad) * np.cos(azim_rad), np.cos(elev_rad) * np.sin(azim_rad), np.sin(elev_rad)])
     theta = np.linspace(0, 2 * np.pi, 300)
 
     for v in A:
-        n = np.zeros(3)
+        n = np.zeros(3);
         n[:len(v)] = v[:3]
         norm_n = np.linalg.norm(n)
         if norm_n < 1e-8: continue
-
         N = n / norm_n
-        R = 1.0
-
-        if abs(N[0]) > 0.1 or abs(N[1]) > 0.1:
-            U = np.array([-N[1], N[0], 0.0])
-        else:
-            U = np.array([0.0, -N[2], N[1]])
-        U = U / np.linalg.norm(U)
+        U = np.array([-N[1], N[0], 0.0]) if abs(N[0]) > 0.1 or abs(N[1]) > 0.1 else np.array([0.0, -N[2], N[1]])
+        U /= np.linalg.norm(U)
         V = np.cross(N, U)
-
-        circle_x = R * np.cos(theta) * U[0] + R * np.sin(theta) * V[0]
-        circle_y = R * np.cos(theta) * U[1] + R * np.sin(theta) * V[1]
-        circle_z = R * np.cos(theta) * U[2] + R * np.sin(theta) * V[2]
-
-        circle_x *= 1.001
-        circle_y *= 1.001
-        circle_z *= 1.001
+        circle_x, circle_y, circle_z = (1.001 * (np.cos(theta) * U[i] + np.sin(theta) * V[i]) for i in range(3))
 
         pts = np.vstack([circle_x, circle_y, circle_z]).T
-        dots = pts.dot(cam_vec)
-        mask = dots < -0.1
-
-        circle_x[mask] = np.nan
-        circle_y[mask] = np.nan
-        circle_z[mask] = np.nan
-
+        mask = pts.dot(cam_vec) < -0.1
+        circle_x[mask], circle_y[mask], circle_z[mask] = np.nan, np.nan, np.nan
         ax.plot(circle_x, circle_y, circle_z, color='black', linewidth=1.5, alpha=0.85, zorder=5)
+# def plot_hyperplanes_on_sphere(ax, shard, cam_elev, cam_azim):
+#     try:
+#         A = shard.A
+#         print(f'cones: {shard.A} x < {shard.b}')
+#         A = np.array(A, dtype=float)
+#     except Exception as e:
+#         print(f"Could not extract hyperplanes: {e}")
+#         return
+#
+#     elev_rad = np.radians(cam_elev)
+#     azim_rad = np.radians(cam_azim)
+#     cam_vec = np.array([
+#         np.cos(elev_rad) * np.cos(azim_rad),
+#         np.cos(elev_rad) * np.sin(azim_rad),
+#         np.sin(elev_rad)
+#     ])
+#
+#     theta = np.linspace(0, 2 * np.pi, 300)
+#
+#     for v in A:
+#         n = np.zeros(3)
+#         n[:len(v)] = v[:3]
+#         norm_n = np.linalg.norm(n)
+#         if norm_n < 1e-8: continue
+#
+#         N = n / norm_n
+#         R = 1.0
+#
+#         if abs(N[0]) > 0.1 or abs(N[1]) > 0.1:
+#             U = np.array([-N[1], N[0], 0.0])
+#         else:
+#             U = np.array([0.0, -N[2], N[1]])
+#         U = U / np.linalg.norm(U)
+#         V = np.cross(N, U)
+#
+#         circle_x = R * np.cos(theta) * U[0] + R * np.sin(theta) * V[0]
+#         circle_y = R * np.cos(theta) * U[1] + R * np.sin(theta) * V[1]
+#         circle_z = R * np.cos(theta) * U[2] + R * np.sin(theta) * V[2]
+#
+#         circle_x *= 1.001
+#         circle_y *= 1.001
+#         circle_z *= 1.001
+#
+#         pts = np.vstack([circle_x, circle_y, circle_z]).T
+#         dots = pts.dot(cam_vec)
+#         mask = dots < -0.1
+#
+#         circle_x[mask] = np.nan
+#         circle_y[mask] = np.nan
+#         circle_z[mask] = np.nan
+#
+#         ax.plot(circle_x, circle_y, circle_z, color='black', linewidth=1.5, alpha=0.85, zorder=5)
 
+
+# def draw_sphere_horizon(ax, cam_elev, cam_azim):
+#     elev_rad = np.radians(cam_elev)
+#     azim_rad = np.radians(cam_azim)
+#     cam_vec = np.array([
+#         np.cos(elev_rad) * np.cos(azim_rad),
+#         np.cos(elev_rad) * np.sin(azim_rad),
+#         np.sin(elev_rad)
+#     ])
+#
+#     if abs(cam_vec[0]) > 0.1 or abs(cam_vec[1]) > 0.1:
+#         u = np.array([-cam_vec[1], cam_vec[0], 0])
+#     else:
+#         u = np.array([0, -cam_vec[2], cam_vec[1]])
+#     u = u / np.linalg.norm(u)
+#     v = np.cross(cam_vec, u)
+#
+#     theta = np.linspace(0, 2 * np.pi, 200)
+#     circle_x = np.cos(theta) * u[0] + np.sin(theta) * v[0]
+#     circle_y = np.cos(theta) * u[1] + np.sin(theta) * v[1]
+#     circle_z = np.cos(theta) * u[2] + np.sin(theta) * v[2]
+#
+#     ax.plot(circle_x * 1.001, circle_y * 1.001, circle_z * 1.001,
+#             color='black', linewidth=1.5, alpha=0.8, zorder=2)
 
 def draw_sphere_horizon(ax, cam_elev, cam_azim):
-    elev_rad = np.radians(cam_elev)
-    azim_rad = np.radians(cam_azim)
-    cam_vec = np.array([
-        np.cos(elev_rad) * np.cos(azim_rad),
-        np.cos(elev_rad) * np.sin(azim_rad),
-        np.sin(elev_rad)
-    ])
-
-    if abs(cam_vec[0]) > 0.1 or abs(cam_vec[1]) > 0.1:
-        u = np.array([-cam_vec[1], cam_vec[0], 0])
-    else:
-        u = np.array([0, -cam_vec[2], cam_vec[1]])
-    u = u / np.linalg.norm(u)
+    elev_rad, azim_rad = np.radians(cam_elev), np.radians(cam_azim)
+    cam_vec = np.array([np.cos(elev_rad) * np.cos(azim_rad), np.cos(elev_rad) * np.sin(azim_rad), np.sin(elev_rad)])
+    u = np.array([-cam_vec[1], cam_vec[0], 0]) if abs(cam_vec[0]) > 0.1 or abs(cam_vec[1]) > 0.1 else np.array([0, -cam_vec[2], cam_vec[1]])
+    u /= np.linalg.norm(u)
     v = np.cross(cam_vec, u)
-
     theta = np.linspace(0, 2 * np.pi, 200)
-    circle_x = np.cos(theta) * u[0] + np.sin(theta) * v[0]
-    circle_y = np.cos(theta) * u[1] + np.sin(theta) * v[1]
-    circle_z = np.cos(theta) * u[2] + np.sin(theta) * v[2]
-
-    ax.plot(circle_x * 1.001, circle_y * 1.001, circle_z * 1.001,
+    ax.plot(1.001*(np.cos(theta)*u[0]+np.sin(theta)*v[0]), 1.001*(np.cos(theta)*u[1]+np.sin(theta)*v[1]), 1.001*(np.cos(theta)*u[2]+np.sin(theta)*v[2]),
             color='black', linewidth=1.5, alpha=0.8, zorder=2)
 
 
-def generate_shard_atlas(matched_pairs):
+from tqdm import tqdm
+
+def generate_shard_atlas1(matched_pairs):
     n_shards = len(matched_pairs)
     if n_shards == 0:
         return
@@ -175,7 +209,7 @@ def generate_shard_atlas(matched_pairs):
 
     plt.style.use('seaborn-v0_8-paper')
     # Reduced vertical height since horizontal colorbar is gone
-    fig = plt.figure(figsize=(4.0 * cols + 1.5, 4.5), dpi=300)
+    fig = plt.figure(figsize=(3.5 * cols + 1.5, 4.5), dpi=300)
 
     all_deltas = np.concatenate([df['delta'].dropna().values for _, df in matched_pairs])
     true_min = np.nanmin(all_deltas)
@@ -270,8 +304,8 @@ def generate_shard_atlas(matched_pairs):
         sphere_y = np.outer(np.sin(u), np.sin(v))
         sphere_z = np.outer(np.ones(np.size(u)), np.cos(v))
 
-        ax.plot_surface(sphere_x, sphere_y, sphere_z, color='whitesmoke', alpha=0.1, edgecolor='none')
-        ax.plot_wireframe(sphere_x, sphere_y, sphere_z, color='gray', alpha=0.1, linewidth=0.3)
+        ax.plot_surface(sphere_x, sphere_y, sphere_z, color='white', alpha=0, edgecolor='none')
+        # ax.plot_wireframe(sphere_x, sphere_y, sphere_z, color='gray', alpha=0.1, linewidth=0.5) # 0.3
         draw_sphere_horizon(ax, best_elev, best_azim)
 
         colors = cmap(norm(grid_delta))
@@ -322,6 +356,95 @@ def generate_shard_atlas(matched_pairs):
     plt.show()
 
 
+def generate_shard_atlas2(matched_pairs):
+    n_shards = len(matched_pairs)
+
+    # ── Figure: spheres slightly shorter than colorbar ────────────────────
+    fig = plt.figure(figsize=(4.2 * n_shards + 1.5, 4.2), dpi=300)
+
+    all_deltas = np.concatenate([df['delta'].dropna().values for _, df in matched_pairs])
+    norm = plt.Normalize(vmin=np.floor(np.nanmin(all_deltas) / 0.2) * 0.2,
+                         vmax=np.ceil(np.nanmax(all_deltas) / 0.2) * 0.2)
+    cmap = plt.get_cmap('coolwarm')
+
+    for idx, (shard, df) in tqdm(enumerate(matched_pairs)):
+        ax = fig.add_subplot(1, n_shards, idx + 1, projection='3d')
+        ax.set_proj_type('persp')
+
+        ax.set_box_aspect((1, 1, 1), zoom=1.32)
+
+        # 1. Trajectory Extraction
+        trajectories = np.array([[float(next((v for k, v in row['sv'].trajectory.items() if str(k) == str(sym)), 0.0))
+                                  for sym in shard.symbols] for _, row in df.iterrows()])
+        unit_trajectories = trajectories / np.linalg.norm(trajectories, axis=1, keepdims=True)
+
+        # 2. Local Equator Interpolation (Resolution Upgrade)
+        best_idx = np.nanargmax(df['delta'].values)
+        v_best = unit_trajectories[best_idx, :3]
+        R_to_eq = get_rotation_matrix(v_best, np.array([1.0, 0.0, 0.0]))
+        rotated_pts = unit_trajectories[:, :3] @ R_to_eq.T
+
+        dt, dp = np.arctan2(rotated_pts[:, 1], rotated_pts[:, 0]), np.arccos(np.clip(rotated_pts[:, 2], -1, 1))
+        grid_theta, grid_phi = np.mgrid[np.min(dt) - 0.1:np.max(dt) + 0.1:400j, np.min(dp) - 0.1:np.max(dp) + 0.1:400j]
+
+        grid_delta = griddata((dt, dp), df['delta'].values, (grid_theta, grid_phi), method='linear')
+        grid_delta = np.where(np.isnan(grid_delta),
+                              griddata((dt, dp), df['delta'].values, (grid_theta, grid_phi), method='nearest'),
+                              grid_delta)
+
+        # 3. Restore to Upright Global Sphere
+        gx, gy, gz = np.cos(grid_theta) * np.sin(grid_phi), np.sin(grid_theta) * np.sin(grid_phi), np.cos(grid_phi)
+        grid_pts_orig = np.c_[gx.ravel(), gy.ravel(), gz.ravel()] @ R_to_eq
+
+        # 4. Math Boundary Trimming
+        A_float = np.array(shard.A, dtype=float)
+        A_norm = A_float / np.linalg.norm(A_float, axis=1, keepdims=True)
+        grid_delta.ravel()[np.any(grid_pts_orig[:, :A_norm.shape[1]] @ A_norm.T > 1e-4, axis=1)] = np.nan
+        grid_delta.ravel()[cKDTree(unit_trajectories[:, :3]).query(grid_pts_orig)[0] > 0.18] = np.nan
+
+        # 5. Rendering
+        colors = cmap(norm(grid_delta))
+        colors[np.isnan(grid_delta), 3] = 0.0
+        sx, sy, sz = (grid_pts_orig[:, i].reshape(400, 400) for i in range(3))
+        ax.plot_surface(sx, sy, sz, facecolors=colors, shade=False, antialiased=True, rcount=400, ccount=400, zorder=5)
+
+        # 6. Static grid via plot_surface — poles fixed at z=±1, equator at z=0.
+        #    World z is always "up" regardless of camera. 10° spacing.
+        u_wf = np.linspace(0, 2 * np.pi, 37)  # 36 meridians → every 10°
+        v_wf = np.linspace(0, np.pi, 19)  # 18 parallels  → every 10°
+        ax.plot_surface(
+            np.outer(np.cos(u_wf), np.sin(v_wf)),
+            np.outer(np.sin(u_wf), np.sin(v_wf)),
+            np.outer(np.ones_like(u_wf), np.cos(v_wf)),
+            color='white', alpha=0.0,
+            edgecolor='gray', linewidth=0.35, shade=False, zorder=1
+        )
+
+        elev, azim = np.degrees(np.arcsin(v_best[2])), np.degrees(np.arctan2(v_best[1], v_best[0]))
+        draw_sphere_horizon(ax, elev, azim)
+        plot_hyperplanes_on_sphere(ax, shard, elev, azim)
+
+        ax.view_init(elev=elev, azim=azim)
+        ax.axis('off')
+
+    # ── Layout: slightly negative wspace compensates for the large empty
+    #    padding that matplotlib adds around 3D subplot boxes; gives ~1 cm
+    #    visual gap between the sphere outlines. ────────────────────────────
+    plt.subplots_adjust(left=0.01, right=0.85, top=0.97, bottom=0.03, wspace=-0.15)
+
+    cbar_ax = fig.add_axes([0.87, 0.12, 0.018, 0.76])  # [left, bottom, width, height]
+    cbar = fig.colorbar(plt.cm.ScalarMappable(cmap=cmap, norm=norm), cax=cbar_ax)
+
+    vmin_b = np.floor(np.nanmin(all_deltas) / 0.2) * 0.2
+    vmax_b = np.ceil(np.nanmax(all_deltas) / 0.2) * 0.2
+    ticks = np.arange(vmin_b, vmax_b + 0.01, 0.2)
+    cbar.set_ticks(ticks)
+    cbar.ax.set_yticklabels([f"{t:.1f}" for t in ticks], fontsize=13)
+    cbar.set_label(r'Irrationality Measure ($\delta$)', fontsize=16, labelpad=15)
+
+    plt.show()
+
+
 if __name__ == "__main__":
     DATA_FOLDER_log = "../examples/search results/log-2/pFq_2_1_-1__0_0_0__log-2"  # Folder with your DataManager .pickle files
     SHARDS_FILE_log = "../examples/spaces/log-2/pFq_2_1_-1__0_0_0__log-2"  # File containing the list of Shard objects
@@ -333,12 +456,12 @@ if __name__ == "__main__":
     df_list = load_data_managers(DATA_FOLDER_log)
     df_list = [df_list[2], df_list[1]]
     pairs = match_data_to_shards(df_list, shards_list)
-    generate_shard_atlas(pairs)
+    generate_shard_atlas2(pairs)
 
-    # shards_list = load_shards(SHARDS_FILE_pi)
-    # for shard in shards_list:
-    #     print(shard.start_coord)
-    # df_list = load_data_managers(DATA_FOLDER_pi)
-    # df_list = [df_list[0], df_list[-1]]
-    # pairs = match_data_to_shards(df_list, shards_list)
-    # generate_shard_atlas(pairs)
+    shards_list = load_shards(SHARDS_FILE_pi)
+    for shard in shards_list:
+        print(shard.start_coord)
+    df_list = load_data_managers(DATA_FOLDER_pi)
+    df_list = [df_list[0], df_list[-1]]
+    pairs = match_data_to_shards(df_list, shards_list)
+    generate_shard_atlas2(pairs)

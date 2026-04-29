@@ -19,16 +19,19 @@ class RaycastPipelineSampler(Sampler):
         conditioner = HyperSpaceConditioner(self.A_prime, max_beta=10, defect_tolerance=5.0)
         self.Z_reduced, self.B_reduced, _ = conditioner.process()
         self.d_flat = int(self.Z_reduced.shape[1])
-        self.fraction = float(self._estimate_cone_fraction(self.B_reduced, self.d_flat))
+        self.fraction = float(self._estimate_cone_fraction(
+            self.B_reduced, self.d_flat,
+            samples=min(500_000, max(10_000, 10 ** self.d_flat)))
+        )
         Logger(
-            f"Shard Estimated Volume: {self.fraction * 100:.6f}%",
+            f"Shard Estimated Volume: {self.fraction * 100:.6f}% in {self.d_flat}D sampling space.",
             Logger.Levels.debug
         ).log()
 
         super().__init__(self.d_flat)
 
     @staticmethod
-    def _estimate_cone_fraction(B: np.ndarray, d_flat: int, samples: int = 100_000) -> float:
+    def _estimate_cone_fraction(B: np.ndarray, d_flat: int, samples: int = 500_000) -> float:
         """
         Gaussian Measure Dart Throw.
         :param B: Bounds matrix
@@ -214,7 +217,6 @@ class RaycastPipelineSampler(Sampler):
 
         raddai = []
         expansions = []
-        safety_radius = 1_000
 
         while len(final_rays) < target_rays:
             raw_rays = sampler.harvest(
@@ -223,9 +225,10 @@ class RaycastPipelineSampler(Sampler):
                 max_per_ray=dynamic_max_per_ray
             )
 
-            if current_R_max > safety_radius:
+            if current_R_max > search_config.MAX_SEARCH_RADIUS:
                 Logger(
-                    f"⚠ WARNING: Search radius {current_R_max:.2f} exceeded search radius {safety_radius}."
+                    f"⚠ WARNING: Search radius {current_R_max:.2f} "
+                    f"exceeded search radius {search_config.MAX_SEARCH_RADIUS}."
                     f" Stopping expansion.",
                     Logger.Levels.warning
                 ).log()

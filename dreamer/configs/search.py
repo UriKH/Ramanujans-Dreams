@@ -10,7 +10,7 @@ def traj_from_dim(dim: int) -> int:
 
 
 def depth_from_len(traj_len, dim) -> int:
-    return min(round(1500 / max(traj_len / math.sqrt(dim), 1)), 1500)
+    return min(round(1500 / max(traj_len / math.sqrt(dim), 1)), 1500) # TODO: normalize by trajectory. walk 1000 instead
 
 def ga_generations(dim: int) -> int:
     return 15 + 4 * dim
@@ -121,6 +121,21 @@ class SearchConfig(Configurable):
     MAX_TRAJECTORY_LENGTH: int = field(
         default=100,
         metadata={"description": "Upper bound for absolute trajectory coordinate values during search."},
+    )
+
+    MAX_SEARCH_RADIUS: int = field(
+        default=10_000,
+        metadata={"description": "Upper bound for search radius used to sample trajectories."},
+    )
+
+    CONSTANT_NO_DIGITS_HIGH_RES: int = field(
+        default=50_000,
+        metadata={"description": "Number of digits to use for high-resolution constant values."},
+    )
+
+    CONSTANT_NO_DIGITS_LOW_RES: int = field(
+        default=600,
+        metadata={"description": "Number of digits to use for low-resolution constant values."},
     )
 
 
