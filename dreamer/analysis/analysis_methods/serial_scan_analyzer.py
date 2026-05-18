@@ -72,6 +72,7 @@ class Analyzer(AnalyzerScheme):
                         f'Identified {identified * 100:.2f}% of trajectories as containing "{self.const.name}"'
                         f'\n    > Best delta:\t {best_delta:.4f}'
                         f'\n    > Trajectory:\t {best_trajectory}'
+                        f'\n    > Limit:\t {dm[best_trajectory].limit}'
                         f'\n    > CMF:\t\t {cmf_msg}'
                         f'\n    > p,q vectors:\t{dm[best_trajectory].initial_values.tolist()}',
                         Logger.Levels.info

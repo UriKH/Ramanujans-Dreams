@@ -9,11 +9,7 @@ from contextlib import contextmanager
 from typing import Callable, Dict, Tuple, Optional
 from dreamer.configs.logging import logging_config
 
-# ==========================================
-# CONFIGURE PYTHON STANDARD LOGGING BACKEND
-# ==========================================
 
-# New definitions
 MESSAGE_LEVEL = 25
 INFORM_LEVEL = 26
 logging.addLevelName(MESSAGE_LEVEL, "MESSAGE")
@@ -51,10 +47,6 @@ class ColorConsoleFormatter(logging.Formatter):
         message = super().format(record)
         return f"{color}{prefix}{message}{self.WHITE}"
 
-
-# ==========================================
-# LOGGER INTERFACE
-# ==========================================
 
 class Logger:
     """
@@ -312,10 +304,6 @@ class Logger:
         for label, (n, s) in cls.timer_mapping.items():
             cls(f"{label}: {n} runs, avg time: {s / n:.6f} seconds", cls.Levels.debug).log()
 
-
-# ==========================================
-# 3. CONFIGURE PYTHON STANDARD LOGGING BACKEND
-# ==========================================
 
 class DynamicPrintHandler(logging.Handler):
     """
