@@ -46,18 +46,6 @@ class AnalysisConfig(Configurable):
         default=True,
         metadata={"description": "Use LIReC constant-identification routines instead of fallback heuristics."},
     )
-    ANALYZE_LIMIT: bool = field(
-        default=False,
-        metadata={"description": "Compute and store explicit limit estimates during analysis."},
-    )
-    ANALYZE_EIGEN_VALUES: bool = field(
-        default=False,
-        metadata={"description": "Compute trajectory matrix eigenvalues for each sampled search vector."},
-    )
-    ANALYZE_GCD_SLOPE: bool = field(
-        default=False,
-        metadata={"description": "Compute gcd-slope diagnostics for sampled trajectory values."},
-    )
 
 
 analysis_config: AnalysisConfig = AnalysisConfig()

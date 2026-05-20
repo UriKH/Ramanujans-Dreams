@@ -33,8 +33,51 @@ class Importer:
             case Formats.PICKLE.value:
                 with open(path, 'rb') as f:
                     return pkl.load(f)
+            case Formats.JSONL.value:
+                return cls._read_jsonl(path, merge=False)
             case _:
                 raise ValueError(f"File {path} has unsupported format")
+
+    @classmethod
+    def _read_jsonl(cls, path: str, merge: bool = False) -> list:
+        """Read a JSON-Lines file into a list of dicts, skipping blank/malformed lines.
+
+        When *merge* is ``True``, records sharing the same ``trajectory_id``
+        are merged into a single logical record (later lines win for conflicting
+        keys; ``extended_metrics`` is deep-merged).  Records without a
+        ``trajectory_id`` key are appended unchanged after merged records.
+
+        DTO reconstruction is left to the caller (e.g. via ``TrajectoryDTO.from_dict``)
+        because a JSONL file may mix records from different DTO classes.
+        """
+        records = []
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        if not merge:
+            return records
+
+        merged: dict = {}
+        unkeyed: list = []
+        for r in records:
+            tid = r.get("trajectory_id")
+            if tid is None:
+                unkeyed.append(r)
+                continue
+            if tid not in merged:
+                merged[tid] = r
+            else:
+                existing_metrics = dict(merged[tid].get("extended_metrics") or {})
+                new_metrics = dict(r.get("extended_metrics") or {})
+                merged[tid].update(r)
+                merged[tid]["extended_metrics"] = {**existing_metrics, **new_metrics}
+        return list(merged.values()) + unkeyed
 
     @classmethod
     def _json_restore(cls, data):

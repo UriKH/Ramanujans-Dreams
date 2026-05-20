@@ -1,15 +1,132 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import warnings
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import sympy as sp
 from sympy.abc import n
 
 from ramanujantools import LinearRecurrence, Matrix, Limit
 
+if TYPE_CHECKING:
+    from dreamer.utils.storage.dtos import TrajectoryDTO
 
-# TODO: add delta computation to this.
+
+# ---------------------------------------------------------------------------
+# Module-level helpers — stable IDs and position conversion
+# ---------------------------------------------------------------------------
+
+def _stable_id(*parts: str, length: int = 16) -> str:
+    """SHA-256 of pipe-joined parts, truncated to ``length`` hex chars.
+
+    Deterministic across runs and processes (unlike Python's built-in ``hash``).
+    """
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:length]
+
+
+def _position_to_tuple(pos) -> tuple:
+    """Convert a ramanujantools.Position (dict-like, may hold sympy Integers)
+    to a plain tuple of JSON-serializable ints (or str fallback).
+    """
+    out = []
+    for v in pos.values():
+        try:
+            out.append(int(v))
+        except (TypeError, ValueError):
+            out.append(str(v))
+    return tuple(out)
+
+
+def _serialize_inequalities(shard) -> str:
+    """Canonical string representation of the shard's ``Ax < b`` system.
+
+    Converts each matrix/vector entry to a plain Python ``int`` before
+    serialising — the numpy arrays may hold SymPy objects (e.g. ``NegativeOne``)
+    that are not JSON-serialisable on their own.  The resulting JSON string is
+    stable across Python sessions and independent of ``Shard.__str__``.
+    Whole-space shards (``shard.A is None``) produce a fixed placeholder.
+
+    Rows are sorted lexicographically (each row is [a1, ..., ak, b]) so that
+    the canonical string is independent of the order in which the extractor
+    enumerates hyperplanes between runs.
+    """
+    if shard.is_whole_space or shard.A is None or shard.b is None:
+        return "whole_space"
+    rows = sorted(
+        [int(x) for x in row] + [int(shard.b[i])]
+        for i, row in enumerate(shard.A.tolist())
+    )
+    return json.dumps(rows)
+
+
+def derive_cmf_and_shard_ids(shard) -> tuple[str, str, str]:
+    """Return ``(cmf_id, shard_id, shard_encoding_str)`` for *shard*.
+
+    * ``cmf_id`` — the CMF name (unique per CMF in the current system).
+    * ``shard_id`` — stable SHA-256 of ``(cmf_name, shard_encoding_str)``.
+    * ``shard_encoding_str`` — canonical ``Ax < b`` string, also used as
+      part of trajectory ids so the two levels stay consistent.
+    """
+    cmf_id = shard.cmf_name
+    shard_encoding_str = _serialize_inequalities(shard)
+    shard_id = _stable_id(cmf_id, shard_encoding_str)
+    return cmf_id, shard_id, shard_encoding_str
+
+
+# ---------------------------------------------------------------------------
+# DTO factory
+# ---------------------------------------------------------------------------
+
+def build_trajectory_dto(
+    handler: "TrajectoryAttributesHandler",
+    *,
+    cmf_id: str,
+    shard_id: str,
+    cmf_name: str,
+    shard_encoding_str: str,
+    start,
+    direction,
+) -> "TrajectoryDTO":
+    """Build a ``TrajectoryDTO`` carrying Tier-1 attributes from a handler.
+
+    The ``trajectory_id`` is deterministic: SHA-256 of
+    ``(cmf_name, shard_encoding_str, start_tuple, direction_tuple)``.
+
+    ``extended_metrics`` is left empty; background workers compute the
+    asynchronous (Tier-2) attributes after the DTO is enqueued.
+
+    Parameters
+    ----------
+    handler:
+        A ``TrajectoryAttributesHandler`` constructed from the trajectory.
+    cmf_id, shard_id:
+        Identifiers for the parent CMF and shard.
+    cmf_name, shard_encoding_str:
+        Used together to build the deterministic trajectory id.
+    start, direction:
+        The ``ramanujantools.Position`` objects for this trajectory.
+    """
+    from dreamer.utils.storage.dtos import TrajectoryDTO  # lazy import avoids circular dep
+
+    start_t = _position_to_tuple(start)
+    dir_t = _position_to_tuple(direction)
+    trajectory_id = _stable_id(cmf_name, shard_encoding_str, str(start_t), str(dir_t))
+    return TrajectoryDTO(
+        trajectory_id=trajectory_id,
+        cmf_id=cmf_id,
+        shard_id=shard_id,
+        start_point=start_t,
+        direction=dir_t,
+        recurrence_relation=handler.formula_str(),
+        recurrence_order=handler.order(),
+        limit_value=float(handler.limit()),
+        delta_estimate=float(handler.delta()),
+        p_vector=handler.p_vector(),
+        q_vector=handler.q_vector(),
+    )
+
 
 class TrajectoryAttributesHandler:
     """
@@ -425,6 +542,35 @@ class TrajectoryAttributesHandler:
             elif r < 0.80: return "polynomial"
             else:          return "exponential"
         return self._get(f"conv_class_{max_depth}", compute)
+
+    # ==================================================================
+    #  PENDING IMPLEMENTATIONS  (stubs — user will fill in later)
+    # ==================================================================
+
+    def p_vector(self) -> tuple:
+        """Numerator projection vector p such that lim = p·walk / q·walk.
+
+        TODO: implement using the LIReC / rational-identification logic
+        currently in ``Searchable.compute_trajectory_data``.
+        Returns an empty tuple until then; the DTO pipeline remains functional.
+        """
+        return ()
+
+    def q_vector(self) -> tuple:
+        """Denominator projection vector q (see ``p_vector``).
+
+        TODO: implement alongside ``p_vector``.
+        """
+        return ()
+
+    def identified(self) -> bool:
+        """Whether this trajectory's limit was recognised as the target constant.
+
+        TODO: implement via LIReC or a direct comparison to the constant value.
+        Returns ``True`` for now so that the analysis percentage filter treats
+        every trajectory as identified until real logic is added.
+        """
+        return True
 
     # ==================================================================
     #  ASYMPTOTICS  (Birkhoff-Trjitzinsky)

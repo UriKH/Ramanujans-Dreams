@@ -434,34 +434,62 @@ class System:
         for data in priorities.values():
             self.searcher(data, sys_config.USE_LIReC).execute()
 
-        # Print best delta for each constant
+        # Print best delta for each constant by scanning the JSONL outputs
         for const in priorities.keys():
-            best_delta = -sp.oo
-            best_sv = None
-            dir_path = os.path.join(sys_config.EXPORT_SEARCH_RESULTS, const.name)
-
-            # TODO: we first need to read inside the directories
-            stream_gen = Importer.import_stream(dir_path)
-            for dm in stream_gen:
-                delta, sv = dm.best_delta
-                if delta is None:
-                    continue
-                if best_delta < delta:
-                    best_delta, best_sv = delta, sv
-
-            if best_sv is None:
-                # Should not happen
-                Logger('No best delta found').log()
-            else:
+            best_record = self.__best_trajectory_record(const)
+            if best_record is None:
                 Logger(
-                    f'Best delta for "{const.name}" found by the searcher is {best_delta}\n'
-                    f'* Trajectory: {best_sv.trajectory} \n* Start: {best_sv.start}',
-                    Logger.Levels.info
+                    f'No trajectory results found for "{const.name}"',
+                    Logger.Levels.warning,
                 ).log()
+                continue
+
+            Logger(
+                f'Best delta for "{const.name}" is {best_record["delta_estimate"]:.6f}\n'
+                f'* Trajectory id: {best_record["trajectory_id"]}\n'
+                f'* Start:         {tuple(best_record["start_point"])}\n'
+                f'* Direction:     {tuple(best_record["direction"])}',
+                Logger.Levels.info,
+            ).log()
 
         # delete temp directory
         if sys_config.EXPORT_SEARCH_RESULTS.split('.')[-1] == sys_config.DEFAULT_DIR_SUFFIX:
-            os.rmdir(sys_config.EXPORT_SEARCH_RESULTS)
+            if os.path.isdir(sys_config.EXPORT_SEARCH_RESULTS):
+                # rmdir only succeeds if empty; if results were written we leave them.
+                try:
+                    os.rmdir(sys_config.EXPORT_SEARCH_RESULTS)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def __best_trajectory_record(const: Constant) -> Optional[dict]:
+        """Scan the per-constant JSONL outputs and return the record with the
+        largest ``delta_estimate``.
+
+        Returns ``None`` when no JSONL file is found or no record carries a
+        finite delta.  Skips malformed lines silently (consistent with
+        ``Importer._read_jsonl``).
+        """
+        dir_path = os.path.join(sys_config.EXPORT_SEARCH_RESULTS, const.name)
+        if not os.path.isdir(dir_path):
+            return None
+
+        jsonl_ext = '.' + Formats.JSONL.value
+        best_delta = -sp.oo
+        best_record: Optional[dict] = None
+
+        for fname in sorted(os.listdir(dir_path)):
+            if not fname.endswith(jsonl_ext):
+                continue
+            records = Importer.imprt(os.path.join(dir_path, fname))
+            for record in records:
+                delta = record.get("delta_estimate")
+                if delta is None:
+                    continue
+                if delta > best_delta:
+                    best_delta = delta
+                    best_record = record
+        return best_record
 
     @staticmethod
     def __compact_analysis_results(dicts: List[Dict[Constant, List[Searchable]]]) -> Dict[Constant, List[Searchable]]:

@@ -8,7 +8,7 @@ from dreamer.extraction.shard import Shard
 
 import mpmath as mp
 from functools import partial
-from typing import Optional, Callable, List, cast
+from typing import Optional, Callable, List, Tuple, cast
 from ramanujantools import Position
 
 
@@ -110,3 +110,36 @@ class SerialSearcher(SearchMethod):
                 )
                 self.data_manager[sd.sv] = sd
         return self.data_manager
+
+    def sample_pairs(
+        self,
+        starts: Optional[Position | List[Position]] = None,
+        trajectory_generator: Callable[[int], int] = search_config.NUM_TRAJECTORIES_FROM_DIM,
+    ) -> List[Tuple[Position, Position]]:
+        """Return ``(trajectory, start)`` pairs for the shard — no computation.
+
+        Module-level code calls this to loop over pairs and construct
+        ``TrajectoryAttributesHandler`` objects.  The existing ``search()``
+        method is untouched; this is the sampling-only entry point for the
+        new DTO pipeline.
+
+        Parameters
+        ----------
+        starts:
+            Starting point(s) inside the shard.  Defaults to
+            ``self.space.get_interior_point()``.
+        trajectory_generator:
+            Callable mapping shard dimension → number of sampled trajectories.
+
+        Raises
+        ------
+        ValueError
+            If no valid start point can be determined.
+        """
+        if starts is None:
+            starts = self.space.get_interior_point()
+        if starts is None:
+            raise ValueError("sample_pairs requires at least one valid start point")
+        starts_list: List[Position] = starts if isinstance(starts, list) else [starts]
+        trajectories = ShardSamplingOrchestrator(self.space).sample_trajectories(trajectory_generator)
+        return [(t, s) for s in starts_list for t in trajectories]

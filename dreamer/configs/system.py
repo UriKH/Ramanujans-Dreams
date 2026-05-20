@@ -57,6 +57,14 @@ class SystemConfig(Configurable):
         default='pkl',
         metadata={"description": "Format to save the discovered results and metadata ('pkl' or 'json')."},
     )
+    EXPORT_ANALYSIS_RESULTS: str = field(
+        default='analysis_results.tempdir',
+        metadata={"description": "Directory for the JSONL shard-analysis audit trail written by AnalyzerModV1."},
+    )
+    NUM_BACKGROUND_WORKERS: int = field(
+        default=4,
+        metadata={"description": "Number of background worker processes that compute Tier-2 trajectory attributes during search."},
+    )
     PATH_TO_SEARCHABLES: str = field(
         default='searchables.tempdir',
         metadata={"description": "Default import directory for precomputed searchable shards."},
