@@ -114,12 +114,12 @@ class ShardDTO:
 @dataclass(frozen=True)
 class TrajectoryDTO:
     """
-    A single trajectory through a shard, with its Tier-2 base attributes.
+    A single trajectory through a shard, with its Tier-1 base attributes.
 
-    ``extended_metrics`` is populated asynchronously by background workers
-    (Tier-3 and Tier-4 attributes).  Even though the dataclass is frozen,
-    the dict itself is mutable — workers can do ``dto.extended_metrics[k] = v``
-    without breaking the frozen contract.
+    ``extended_metrics`` is populated asynchronously by Tier-2 background
+    workers (and later by the Tier-3 post-process stage).  Even though the
+    dataclass is frozen, the dict itself is mutable — workers can do
+    ``dto.extended_metrics[k] = v`` without breaking the frozen contract.
     """
     trajectory_id: str
     cmf_id: str
@@ -129,15 +129,19 @@ class TrajectoryDTO:
     start_point: Tuple[int | str, ...]
     direction: Tuple[int | str, ...]
 
-    # Tier-2 base attributes
+    # Tier-1 base attributes — always present in any DTO record.
     recurrence_relation: str
     recurrence_order: int
     limit_value: float
     delta_estimate: float
     p_vector: Tuple[int | str, ...]
     q_vector: Tuple[int | str, ...]
+    # ``identified`` defaults True for backward compatibility with records
+    # written before this field was added; the analyzer populates it from
+    # ``handler.identified()``.
+    identified: bool = True
 
-    # Open extension field for Tier-3/4 attributes added by background workers
+    # Open extension field for Tier-2+ attributes added by background workers
     extended_metrics: Dict[str, Any] = field(default_factory=dict, hash=False)
 
     def to_json_line(self) -> str:
@@ -158,5 +162,6 @@ class TrajectoryDTO:
             delta_estimate=d["delta_estimate"],
             p_vector=tuple(d.get("p_vector", ())),
             q_vector=tuple(d.get("q_vector", ())),
+            identified=bool(d.get("identified", True)),
             extended_metrics=d.get("extended_metrics", {}),
         )

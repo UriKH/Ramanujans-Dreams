@@ -125,6 +125,7 @@ def build_trajectory_dto(
         delta_estimate=float(handler.delta()),
         p_vector=handler.p_vector(),
         q_vector=handler.q_vector(),
+        identified=bool(handler.identified()),
     )
 
 

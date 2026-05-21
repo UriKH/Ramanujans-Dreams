@@ -940,20 +940,15 @@ class TestMergeOnRead:
     # ------------------------------------------------------------------
 
     def test_worker_skips_already_present_t2_attr(self, monkeypatch):
-        """Worker must not overwrite attributes already in extended_metrics."""
+        """``compute_tier2_for_item`` must not overwrite already-present attrs."""
         from dreamer.configs import config
+        from dreamer.utils.multi_processing import compute_tier2_for_item
 
-        # Configure a non-empty TIER2_ATTRIBUTES so the worker has something
-        # to look for; the test verifies it does NOT recompute pre-populated
-        # entries.
         monkeypatch.setattr(
             config.search,
             "TIER2_ATTRIBUTES",
             ("eigenvalues", "spectral_gap", "gcd_slope", "convergence_class"),
         )
-
-        task_q: mp.Queue = mp.Queue()
-        result_q: mp.Queue = mp.Queue()
 
         patch = {
             "trajectory_id": "existing_t1",
@@ -964,46 +959,92 @@ class TestMergeOnRead:
                 "convergence_class": "linear",
             },
         }
-        task_q.put((None, patch))  # traj_matrix=None — nothing to compute
-        task_q.put(None)           # sentinel
+        out = compute_tier2_for_item((None, patch))
 
-        from dreamer.utils.multi_processing import background_attribute_worker
-        p = mp.Process(
-            target=background_attribute_worker,
-            args=(0, task_q, result_q, config.export_configurations()),
-        )
-        p.start()
-        p.join(timeout=15)
-
-        out = result_q.get_nowait()
         assert out["trajectory_id"] == "existing_t1"
         # Pre-computed values must not be replaced by error entries.
         assert out["extended_metrics"]["eigenvalues"] == ["pre-computed"]
         assert "eigenvalues_error" not in out["extended_metrics"]
 
+    def test_worker_full_dto_input_is_passthrough_when_nothing_missing(
+        self, minimal_handler, symbols, monkeypatch,
+    ):
+        """Full DTO input with no missing TIER2 attrs is returned unchanged."""
+        from dreamer.configs import config
+        from dreamer.utils.multi_processing import compute_tier2_for_item
+
+        # No attrs requested → nothing to compute → DTO untouched.
+        monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ())
+
+        start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        dto = build_trajectory_dto(
+            minimal_handler,
+            cmf_id="c", shard_id="s", cmf_name="c",
+            shard_encoding_str="enc", start=start, direction=direction,
+        )
+
+        out = compute_tier2_for_item((None, dto))
+        assert out is dto, "Worker must return the same DTO object unchanged"
+        assert out.extended_metrics == {}
+
+    def test_worker_with_none_traj_matrix_does_not_crash(self, monkeypatch):
+        """When traj_matrix=None and attrs are missing, the worker is a no-op.
+
+        The producer passes ``None`` to short-circuit work; the worker must
+        forward the patch unchanged without raising.
+        """
+        from dreamer.configs import config
+        from dreamer.utils.multi_processing import compute_tier2_for_item
+
+        monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ("eigenvalues",))
+
+        patch = {"trajectory_id": "t1", "extended_metrics": {}}
+        out = compute_tier2_for_item((None, patch))
+        # No computation happened; extended_metrics stays empty.
+        assert out["extended_metrics"] == {}
+
+    def test_tier3_worker_direct_call(self, simple_shard, monkeypatch):
+        """``compute_tier3_for_item`` computes registered attrs into a patch dict."""
+        from dreamer.configs import config
+        from dreamer.post_process.tier3_post_process_mod import compute_tier3_for_item
+
+        monkeypatch.setattr(config.post_process, "TIER3_ATTRIBUTES", ("kamidelta",))
+
+        # Build a real handler from simple_shard so the worker has something
+        # symbolic to walk through.
+        from dreamer.search.methods.hedgehog_scan import SerialSearcher
+        pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs()
+        if not pairs:
+            pytest.skip("No trajectory pairs available")
+        traj_p, start_p = pairs[0]
+        handler = TrajectoryAttributesHandler.from_cmf(simple_shard.cmf, traj_p, start_p)
+
+        patch = {"trajectory_id": "t1", "extended_metrics": {}}
+        out = compute_tier3_for_item((handler.trajectory_matrix(), patch))
+
+        assert out is patch  # same dict, mutated in place
+        # kamidelta either computed successfully or recorded as an error;
+        # either path is acceptable — what matters is that one of them is present.
+        assert (
+            "kamidelta" in out["extended_metrics"]
+            or "kamidelta_error" in out["extended_metrics"]
+        )
+
     # ------------------------------------------------------------------
     # Writer: handles plain patch dicts
     # ------------------------------------------------------------------
 
-    def test_writer_handles_patch_dict(self, tmp_path):
-        """dedicated_file_writer must write a plain dict as a valid JSON line."""
-        from dreamer.configs import config
-        from dreamer.utils.multi_processing import dedicated_file_writer
+    def test_write_jsonl_line_writes_patch_dict(self, tmp_path):
+        """``write_jsonl_line`` must serialise a dict patch as a JSON line."""
+        from dreamer.utils.multi_processing import write_jsonl_line
 
-        output_path = str(tmp_path / "out.jsonl")
-        result_q: mp.Queue = mp.Queue()
+        output_path = tmp_path / "out.jsonl"
         patch = {"trajectory_id": "p1", "extended_metrics": {"spectral_gap": 0.7}}
-        result_q.put(patch)
-        result_q.put(None)  # sentinel
+        with open(output_path, "a") as fout:
+            write_jsonl_line(patch, fout)
 
-        p = mp.Process(
-            target=dedicated_file_writer,
-            args=(result_q, output_path, config.export_configurations()),
-        )
-        p.start()
-        p.join(timeout=15)
-
-        lines = [ln for ln in open(output_path).read().splitlines() if ln.strip()]
+        lines = [ln for ln in output_path.read_text().splitlines() if ln.strip()]
         assert len(lines) == 1
         record = json.loads(lines[0])
         assert record["trajectory_id"] == "p1"
@@ -1014,11 +1055,15 @@ class TestMergeOnRead:
     # ------------------------------------------------------------------
 
     def _collecting_sink(self):
-        """Return ``(sink, items)`` where *items* is a list each sink call appends to."""
+        """Return ``(sink, items)`` where *items* is a list each sink call appends to.
+
+        The producer now invokes ``sink(item)`` with a single argument (the
+        same item shape ``worker_pool``'s ``push`` accepts).
+        """
         items: list = []
 
-        def sink(traj_matrix, payload):
-            items.append((traj_matrix, payload))
+        def sink(item):
+            items.append(item)
 
         return sink, items
 
@@ -1330,10 +1375,9 @@ class TestDirectWritePath:
             return original_process(*args, **kwargs)
 
         monkeypatch.setattr("multiprocessing.Process", spy_process)
-        # SearcherModV1 references ``mp.Process`` via ``import multiprocessing as mp``;
-        # patch the local binding too.
+        # ``worker_pool`` creates Process via ``mp.Process`` in multi_processing.py.
         monkeypatch.setattr(
-            "dreamer.search.searchers.hedgehog_scan_mod.mp.Process",
+            "dreamer.utils.multi_processing.mp.Process",
             spy_process,
         )
 
@@ -1388,34 +1432,86 @@ class TestAnalyzerDedup:
         )
         assert set(load_seen_shards(str(path))) == {"s1"}
 
-    def test_analyzer_reuses_cached_shard_record(
-        self, simple_shard, tmp_path, monkeypatch,
-    ):
-        """Re-running the analyzer with a populated cache must skip computation.
-
-        We seed the per-constant JSONL with a record for *simple_shard*'s
-        shard_id, then assert that the analyzer doesn't build any handlers
-        for that shard.
+    def test_analyzer_always_samples_pairs(self, simple_shard, tmp_path, monkeypatch):
+        """The analyzer must call ``sample_pairs`` even when every trajectory
+        is already on file — different runs may sample differently and
+        the per-trajectory dedup happens after sampling.
         """
         from dreamer.analysis.analyzers.serial_scan.analyzer_mod import AnalyzerModV1
         from dreamer.configs.system import sys_config
+        from dreamer.configs.analysis import analysis_config
+        from dreamer.search.methods.hedgehog_scan import SerialSearcher
 
-        monkeypatch.setattr(sys_config, "EXPORT_ANALYSIS_RESULTS", str(tmp_path))
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
 
-        # Seed the cache.
-        _cmf_id, shard_id, _enc = derive_cmf_and_shard_ids(simple_shard)
-        shards_dir = tmp_path / "shards"
-        shards_dir.mkdir()
-        cached_record = {
-            "shard_id": shard_id,
-            "cmf_id": simple_shard.cmf_name,
-            "best_delta": 4.2,
-            "identified_pct": 1.0,
-            "found_constants": [e.name],
-        }
-        (shards_dir / f"{e.name}.jsonl").write_text(json.dumps(cached_record) + "\n")
+        # Seed every sampled trajectory as fully cached so no walks happen
+        # — but sampling itself must still occur.
+        _cmf_id, shard_id, enc_str = derive_cmf_and_shard_ids(simple_shard)
+        pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs(
+            trajectory_generator=analysis_config.NUM_TRAJECTORIES_FROM_DIM,
+        )
+        shard_dir = tmp_path / e.name
+        shard_dir.mkdir(parents=True)
+        jsonl_path = shard_dir / f"{simple_shard.cmf_name}__{shard_id}.jsonl"
+        with open(jsonl_path, "w") as fout:
+            for traj_p, start_p in pairs:
+                start_t = tuple(int(v) for v in start_p.values())
+                dir_t = tuple(int(v) for v in traj_p.values())
+                tid = _stable_id(simple_shard.cmf_name, enc_str, str(start_t), str(dir_t))
+                fout.write(json.dumps({
+                    "trajectory_id": tid,
+                    "delta_estimate": 1.0,
+                    "identified": True,
+                }) + "\n")
 
-        # Spy on handler construction — must be zero on a cache hit.
+        sample_calls = [0]
+        original_sample = SerialSearcher.sample_pairs
+
+        def counting_sample(self_, *args, **kwargs):
+            sample_calls[0] += 1
+            return original_sample(self_, *args, **kwargs)
+
+        monkeypatch.setattr(SerialSearcher, "sample_pairs", counting_sample)
+
+        AnalyzerModV1({e: [simple_shard]}).execute()
+
+        assert sample_calls[0] >= 1, (
+            "Analyzer must always call sample_pairs, even with a populated cache"
+        )
+
+    def test_analyzer_skips_walks_for_cached_trajectories(
+        self, simple_shard, tmp_path, monkeypatch,
+    ):
+        """When every sampled trajectory is on file with delta + identified,
+        no handler is constructed (no trajectory walk happens).
+        """
+        from dreamer.analysis.analyzers.serial_scan.analyzer_mod import AnalyzerModV1
+        from dreamer.configs.system import sys_config
+        from dreamer.configs.analysis import analysis_config
+        from dreamer.search.methods.hedgehog_scan import SerialSearcher
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
+
+        _cmf_id, shard_id, enc_str = derive_cmf_and_shard_ids(simple_shard)
+        pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs(
+            trajectory_generator=analysis_config.NUM_TRAJECTORIES_FROM_DIM,
+        )
+        shard_dir = tmp_path / e.name
+        shard_dir.mkdir(parents=True)
+        jsonl_path = shard_dir / f"{simple_shard.cmf_name}__{shard_id}.jsonl"
+        with open(jsonl_path, "w") as fout:
+            for traj_p, start_p in pairs:
+                start_t = tuple(int(v) for v in start_p.values())
+                dir_t = tuple(int(v) for v in traj_p.values())
+                tid = _stable_id(simple_shard.cmf_name, enc_str, str(start_t), str(dir_t))
+                fout.write(json.dumps({
+                    "trajectory_id": tid,
+                    "delta_estimate": 2.5,
+                    "identified": True,
+                }) + "\n")
+
         calls = [0]
         original = TrajectoryAttributesHandler.from_cmf
 
@@ -1425,76 +1521,408 @@ class TestAnalyzerDedup:
 
         monkeypatch.setattr(TrajectoryAttributesHandler, "from_cmf", counting)
 
-        analyzer = AnalyzerModV1({e: [simple_shard]})
-        # Loosen the threshold so the cached shard always lands in the result.
-        from dreamer.configs.analysis import analysis_config
-        monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
-
-        result = analyzer.execute()
+        result = AnalyzerModV1({e: [simple_shard]}).execute()
 
         assert calls[0] == 0, (
-            f"Cached shard should not trigger handler construction, got {calls[0]}"
+            f"All trajectories cached → zero handler builds expected, got {calls[0]}"
         )
+        # And the cached best_delta is used in ranking.
         assert simple_shard in result[e]
 
-    def test_analyzer_does_not_compute_recurrence_relation_or_order(
+    def test_analyzer_walks_uncached_trajectories(
         self, simple_shard, tmp_path, monkeypatch,
     ):
-        """Recurrence relation/order are Tier-1 *search* outputs only.
-
-        The analyzer must touch neither ``handler.formula_str()`` nor
-        ``handler.order()`` — keeping its per-trajectory cost limited to
-        ``delta()`` + ``identified()``.
-        """
+        """A trajectory missing from the JSONL must trigger a fresh handler build."""
         from dreamer.analysis.analyzers.serial_scan.analyzer_mod import AnalyzerModV1
         from dreamer.configs.system import sys_config
         from dreamer.configs.analysis import analysis_config
 
-        monkeypatch.setattr(sys_config, "EXPORT_ANALYSIS_RESULTS", str(tmp_path))
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
         monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
 
-        calls = {"formula_str": 0, "order": 0}
-        original_formula = TrajectoryAttributesHandler.formula_str
-        original_order = TrajectoryAttributesHandler.order
+        calls = [0]
+        original = TrajectoryAttributesHandler.from_cmf
 
-        def counting_formula(self_):
-            calls["formula_str"] += 1
-            return original_formula(self_)
+        def counting(*args, **kwargs):
+            calls[0] += 1
+            return original(*args, **kwargs)
 
-        def counting_order(self_):
-            calls["order"] += 1
-            return original_order(self_)
+        monkeypatch.setattr(TrajectoryAttributesHandler, "from_cmf", counting)
 
-        monkeypatch.setattr(TrajectoryAttributesHandler, "formula_str", counting_formula)
-        monkeypatch.setattr(TrajectoryAttributesHandler, "order", counting_order)
+        AnalyzerModV1({e: [simple_shard]}).execute()
+        # No cache → every sampled pair must produce one handler build.
+        assert calls[0] > 0, "Uncached run must build handlers for new trajectories"
+
+    def test_analyzer_writes_per_trajectory_records(
+        self, simple_shard, tmp_path, monkeypatch,
+    ):
+        """Output is per-trajectory at ``EXPORT_SEARCH_RESULTS/<const>/<cmf>__<shard_id>.jsonl``."""
+        from dreamer.analysis.analyzers.serial_scan.analyzer_mod import AnalyzerModV1
+        from dreamer.configs.system import sys_config
+        from dreamer.configs.analysis import analysis_config
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
 
         AnalyzerModV1({e: [simple_shard]}).execute()
 
-        assert calls["formula_str"] == 0, (
-            f"Analyzer must not invoke formula_str(), got {calls['formula_str']} call(s)"
+        _cmf_id, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
+        jsonl_path = (
+            tmp_path / e.name / f"{simple_shard.cmf_name}__{shard_id}.jsonl"
         )
-        assert calls["order"] == 0, (
-            f"Analyzer must not invoke order(), got {calls['order']} call(s)"
+        assert jsonl_path.exists(), (
+            "Analyzer must write to the shared per-shard JSONL location"
         )
+        lines = [ln for ln in jsonl_path.read_text().splitlines() if ln.strip()]
+        assert len(lines) > 0
 
-    def test_analyzer_writes_record_for_new_shard(
+        # Every line must be a valid TrajectoryDTO-shaped record.
+        for line in lines:
+            record = json.loads(line)
+            assert "trajectory_id" in record
+            assert "delta_estimate" in record
+            assert "identified" in record
+            assert "shard_id" in record
+            assert record["shard_id"] == shard_id
+
+    def test_analyzer_partial_cache_only_walks_missing(
         self, simple_shard, tmp_path, monkeypatch,
     ):
-        """A shard not in the cache must result in a fresh JSONL record."""
+        """When only some trajectories are cached, only the uncached ones get walked."""
         from dreamer.analysis.analyzers.serial_scan.analyzer_mod import AnalyzerModV1
         from dreamer.configs.system import sys_config
         from dreamer.configs.analysis import analysis_config
+        from dreamer.search.methods.hedgehog_scan import SerialSearcher
 
-        monkeypatch.setattr(sys_config, "EXPORT_ANALYSIS_RESULTS", str(tmp_path))
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
         monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
 
-        analyzer = AnalyzerModV1({e: [simple_shard]})
-        analyzer.execute()
+        _cmf_id, shard_id, enc_str = derive_cmf_and_shard_ids(simple_shard)
+        pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs(
+            trajectory_generator=analysis_config.NUM_TRAJECTORIES_FROM_DIM,
+        )
+        if len(pairs) < 2:
+            pytest.skip("Need >=2 sampled pairs to exercise partial-cache path")
 
-        jsonl_path = tmp_path / "shards" / f"{e.name}.jsonl"
-        assert jsonl_path.exists()
-        lines = [ln for ln in jsonl_path.read_text().splitlines() if ln.strip()]
-        assert len(lines) == 1
-        record = json.loads(lines[0])
-        assert "shard_id" in record
-        assert "best_delta" in record
+        # Cache exactly the first pair.
+        cached_pair, *_ = pairs
+        traj_p, start_p = cached_pair
+        start_t = tuple(int(v) for v in start_p.values())
+        dir_t = tuple(int(v) for v in traj_p.values())
+        tid = _stable_id(simple_shard.cmf_name, enc_str, str(start_t), str(dir_t))
+
+        shard_dir = tmp_path / e.name
+        shard_dir.mkdir(parents=True)
+        jsonl_path = shard_dir / f"{simple_shard.cmf_name}__{shard_id}.jsonl"
+        with open(jsonl_path, "w") as fout:
+            fout.write(json.dumps({
+                "trajectory_id": tid,
+                "delta_estimate": 1.0,
+                "identified": True,
+            }) + "\n")
+
+        calls = [0]
+        original = TrajectoryAttributesHandler.from_cmf
+
+        def counting(*args, **kwargs):
+            calls[0] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(TrajectoryAttributesHandler, "from_cmf", counting)
+
+        AnalyzerModV1({e: [simple_shard]}).execute()
+
+        expected_walks = len(pairs) - 1
+        assert calls[0] == expected_walks, (
+            f"Expected exactly {expected_walks} handler builds (one per uncached pair), "
+            f"got {calls[0]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 15. worker_pool generic abstraction
+# ---------------------------------------------------------------------------
+
+# Module-level worker/writer fns so multiprocessing can pickle them.
+
+def _double_worker(item):
+    """Worker for tests: returns ``(label, value*2)``."""
+    label, value = item
+    return (label, value * 2)
+
+
+def _id_worker(item):
+    return item
+
+
+def _write_repr(item, fout):
+    fout.write(repr(item) + "\n")
+
+
+class TestWorkerPool:
+    """Generic queue/process abstraction must run both direct and MPMC modes."""
+
+    def test_direct_mode_no_subprocess(self, tmp_path, monkeypatch):
+        """``worker_fn=None`` runs producer → writer on the main thread."""
+        from dreamer.configs import config
+        from dreamer.utils.multi_processing import worker_pool
+
+        process_calls = [0]
+
+        def spy_process(*args, **kwargs):
+            process_calls[0] += 1
+            raise AssertionError("Direct mode must not spawn subprocesses")
+
+        monkeypatch.setattr("dreamer.utils.multi_processing.mp.Process", spy_process)
+
+        output = tmp_path / "out.txt"
+        with worker_pool(
+            num_workers=4,
+            worker_fn=None,
+            writer_fn=_write_repr,
+            output_path=str(output),
+            config_overrides=config.export_configurations(),
+        ) as push:
+            push(("a", 1))
+            push(("b", 2))
+
+        assert process_calls[0] == 0
+        lines = output.read_text().strip().splitlines()
+        assert lines == ["('a', 1)", "('b', 2)"]
+
+    def test_parallel_false_runs_worker_fn_inline(self, tmp_path, monkeypatch):
+        """``parallel=False`` applies the worker_fn on the main thread.
+
+        Crucial for the Search direct-write path: the producer pushes
+        ``(traj_matrix, payload)`` tuples that the worker must unwrap
+        before they reach the writer — and this still has to happen
+        when no subprocess is created.
+        """
+        from dreamer.configs import config
+        from dreamer.utils.multi_processing import worker_pool
+
+        def spy_no_process(*args, **kwargs):
+            raise AssertionError("parallel=False must not spawn subprocesses")
+
+        monkeypatch.setattr(
+            "dreamer.utils.multi_processing.mp.Process", spy_no_process,
+        )
+
+        output = tmp_path / "out.txt"
+        with worker_pool(
+            num_workers=4,
+            worker_fn=_double_worker,
+            writer_fn=_write_repr,
+            output_path=str(output),
+            config_overrides=config.export_configurations(),
+            parallel=False,
+        ) as push:
+            push(("x", 1))
+            push(("x", 2))
+
+        lines = output.read_text().strip().splitlines()
+        assert lines == ["('x', 2)", "('x', 4)"]
+
+    def test_mpmc_mode_applies_worker_fn(self, tmp_path):
+        """MPMC mode pipes every item through ``worker_fn`` before writing."""
+        from dreamer.configs import config
+        from dreamer.utils.multi_processing import worker_pool
+
+        output = tmp_path / "out.txt"
+        with worker_pool(
+            num_workers=2,
+            worker_fn=_double_worker,
+            writer_fn=_write_repr,
+            output_path=str(output),
+            config_overrides=config.export_configurations(),
+        ) as push:
+            for i in range(5):
+                push(("x", i))
+
+        lines = output.read_text().strip().splitlines()
+        # Order across workers is not guaranteed — compare as a set.
+        assert set(lines) == {
+            "('x', 0)", "('x', 2)", "('x', 4)", "('x', 6)", "('x', 8)",
+        }
+
+    def test_mpmc_subprocesses_cleaned_up_even_if_producer_raises(self, tmp_path):
+        """The finally-block must drain queues and join workers + writer."""
+        from dreamer.configs import config
+        from dreamer.utils.multi_processing import worker_pool
+
+        output = tmp_path / "out.txt"
+        with pytest.raises(RuntimeError, match="producer-side"):
+            with worker_pool(
+                num_workers=2,
+                worker_fn=_id_worker,
+                writer_fn=_write_repr,
+                output_path=str(output),
+                config_overrides=config.export_configurations(),
+            ) as push:
+                push(("x", 1))
+                raise RuntimeError("producer-side failure")
+        # Reaching this line proves all subprocesses joined (the with-block
+        # would hang on __exit__ otherwise).
+
+    def test_empty_producer_writes_no_lines(self, tmp_path):
+        """No ``push`` calls → output file is created but empty."""
+        from dreamer.configs import config
+        from dreamer.utils.multi_processing import worker_pool
+
+        output = tmp_path / "empty.txt"
+        with worker_pool(
+            num_workers=2,
+            worker_fn=_id_worker,
+            writer_fn=_write_repr,
+            output_path=str(output),
+            config_overrides=config.export_configurations(),
+        ) as _push:
+            pass  # nothing pushed
+
+        # The writer opens the file in append mode, so it exists even with no input.
+        assert output.exists()
+        assert output.read_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# 16. Tier-3 post-process stage
+# ---------------------------------------------------------------------------
+
+class TestTier3PostProcess:
+    """Tier-3 stage runs after Search, patches existing JSONL files."""
+
+    def test_short_circuit_when_no_tier3_attrs_configured(
+        self, simple_shard, tmp_path, monkeypatch,
+    ):
+        """Empty ``TIER3_ATTRIBUTES`` → execute returns immediately, no file touched."""
+        from dreamer.post_process.tier3_post_process_mod import Tier3PostProcessModV1
+        from dreamer.configs.system import sys_config
+        from dreamer.configs import config
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        monkeypatch.setattr(config.post_process, "TIER3_ATTRIBUTES", ())
+
+        # Seed a JSONL the stage would otherwise process — assert it's untouched.
+        const_dir = tmp_path / e.name
+        const_dir.mkdir()
+        jsonl = const_dir / "anything.jsonl"
+        seeded = json.dumps({
+            "trajectory_id": "t1",
+            "cmf_id": simple_shard.cmf_name,
+            "extended_metrics": {},
+        }) + "\n"
+        jsonl.write_text(seeded)
+
+        Tier3PostProcessModV1({e: [simple_shard]}).execute()
+        assert jsonl.read_text() == seeded
+
+    def test_skips_fully_covered_trajectory_without_worker(
+        self, simple_shard, tmp_path, monkeypatch,
+    ):
+        """Trajectories that already have every TIER3 attr present must not spawn workers."""
+        from dreamer.post_process.tier3_post_process_mod import Tier3PostProcessModV1
+        from dreamer.configs.system import sys_config
+        from dreamer.configs import config
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        monkeypatch.setattr(
+            config.post_process,
+            "TIER3_ATTRIBUTES",
+            ("asymptotics",),
+        )
+
+        cmf_id, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
+        const_dir = tmp_path / e.name
+        const_dir.mkdir()
+        jsonl = const_dir / f"{simple_shard.cmf_name}__{shard_id}.jsonl"
+        # All trajectories already carry the only configured Tier-3 attr.
+        jsonl.write_text(
+            json.dumps({
+                "trajectory_id": "t1",
+                "cmf_id": cmf_id,
+                "start_point": [1, 1],
+                "direction": [1, 1],
+                "extended_metrics": {"asymptotics": ["pre-computed"]},
+            }) + "\n"
+        )
+
+        # Spy on subprocess spawn — we must not even enter the worker_pool MPMC path.
+        process_calls = [0]
+        original = mp.Process
+        def counting_process(*args, **kwargs):
+            process_calls[0] += 1
+            return original(*args, **kwargs)
+        monkeypatch.setattr("dreamer.utils.multi_processing.mp.Process", counting_process)
+
+        Tier3PostProcessModV1({e: [simple_shard]}).execute()
+
+        assert process_calls[0] == 0, (
+            "Fully-covered shard must short-circuit before spawning workers"
+        )
+        # Original file unchanged — no patches appended.
+        assert json.loads(jsonl.read_text().strip())["extended_metrics"] == {
+            "asymptotics": ["pre-computed"],
+        }
+
+    def test_appends_patch_for_missing_tier3_attr(
+        self, simple_shard, tmp_path, monkeypatch,
+    ):
+        """A trajectory missing a Tier-3 attr must receive an appended patch line."""
+        from dreamer.post_process.tier3_post_process_mod import Tier3PostProcessModV1
+        from dreamer.configs.system import sys_config
+        from dreamer.configs import config
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        # ``kamidelta`` is registered and cheap-ish on the trivial 1F1 shard;
+        # falling back to a registry error is acceptable — the patch line itself
+        # is what's under test.
+        monkeypatch.setattr(
+            config.post_process,
+            "TIER3_ATTRIBUTES",
+            ("kamidelta",),
+        )
+
+        cmf_id, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
+        const_dir = tmp_path / e.name
+        const_dir.mkdir()
+        jsonl = const_dir / f"{simple_shard.cmf_name}__{shard_id}.jsonl"
+        base_record = {
+            "trajectory_id": "t-needs-tier3",
+            "cmf_id": cmf_id,
+            "start_point": [1, 1],
+            "direction": [1, 1],
+            "extended_metrics": {},
+        }
+        jsonl.write_text(json.dumps(base_record) + "\n")
+
+        Tier3PostProcessModV1({e: [simple_shard]}).execute()
+
+        lines = [ln for ln in jsonl.read_text().splitlines() if ln.strip()]
+        assert len(lines) >= 2, "Expected at least one patch appended"
+        # The last line should be the patch.
+        patch = json.loads(lines[-1])
+        assert patch["trajectory_id"] == "t-needs-tier3"
+        assert "extended_metrics" in patch
+        # Either kamidelta computed, or it errored — either is fine; what matters
+        # is that the patch line exists and carries the trajectory id.
+        em = patch["extended_metrics"]
+        assert "kamidelta" in em or "kamidelta_error" in em
+
+    def test_cmf_lookup_built_from_priorities(self, simple_shard):
+        """Searchables in priorities feed the in-memory CMF lookup."""
+        from dreamer.post_process.tier3_post_process_mod import Tier3PostProcessModV1
+
+        mod = Tier3PostProcessModV1({e: [simple_shard]})
+        assert simple_shard.cmf_name in mod._cmf_lookup
+        # Same object — the searchable's CMF is reused, not re-loaded.
+        assert mod._cmf_lookup[simple_shard.cmf_name] is simple_shard.cmf
+
+    def test_cmf_lookup_falls_back_to_disk(self, tmp_path, monkeypatch):
+        """Empty priorities → look in sys_config.EXPORT_CMFS instead."""
+        from dreamer.post_process.tier3_post_process_mod import Tier3PostProcessModV1
+        from dreamer.configs.system import sys_config
+
+        # Empty path → empty lookup, no crash.
+        monkeypatch.setattr(sys_config, "EXPORT_CMFS", str(tmp_path))
+        mod = Tier3PostProcessModV1({})
+        assert mod._cmf_lookup == {}

@@ -12,6 +12,7 @@ from dreamer.utils.schemes.analysis_scheme import AnalyzerModScheme
 from dreamer.utils.schemes.db_scheme import DBModScheme
 from dreamer.loading.funcs.formatter import Formatter
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
+from dreamer.utils.schemes.post_process_scheme import PostProcessModScheme
 from dreamer.utils.schemes.extraction_scheme import ExtractionModScheme
 from dreamer.utils.storage import Exporter, Importer, Formats
 from dreamer.utils.types import CMFData
@@ -33,7 +34,8 @@ class System:
                  function_sources: List[DBModScheme | str | Formatter],
                  extractor: Optional[Type[ExtractionModScheme]] = None,
                  analyzers: Optional[List[Type[AnalyzerModScheme] | partial[AnalyzerModScheme] | str | Searchable]] = None,
-                 searcher: Type[SearcherModScheme] | partial[SearcherModScheme]):
+                 searcher: Type[SearcherModScheme] | partial[SearcherModScheme],
+                 post_processor: Optional[Type[PostProcessModScheme] | partial[PostProcessModScheme]] = None):
         """
         Constructing a system runnable instance for a given combination of modules.
         :param function_sources: A list of DBModScheme instances used as sources.
@@ -42,6 +44,8 @@ class System:
         :param analyzers: Optional list of AnalyzerModScheme types used for prioritization + preparation before search.
             If omitted, priorities are loaded from sys_config.EXPORT_ANALYSIS_PRIORITIES.
         :param searcher: A SearcherModScheme type used to deepen the search done by the analyzers
+        :param post_processor: Optional ``PostProcessModScheme`` type that runs after Search to
+            compute expensive Tier-3 attributes.  When omitted, no post-process stage runs.
         """
         if not isinstance(function_sources, list):
             raise ValueError('Inspiration Functions must be contained in a list')
@@ -50,6 +54,7 @@ class System:
         self.extractor = extractor
         self.analyzers = analyzers or []
         self.searcher = searcher
+        self.post_processor = post_processor
         self._analysis_constants: List[Constant] = []
         self._analysis_relevant_cmf_names: Dict[str, Optional[Set[str]]] = {}
 
@@ -166,6 +171,15 @@ class System:
         if len(filtered_priorities) == 0:
             filtered_priorities = priorities
         self.__search_stage(filtered_priorities)
+
+        # =======================================================
+        # POST-PROCESS STAGE - expensive Tier-3 attributes
+        # =======================================================
+        # Only runs when both a post-processor is wired and TIER3_ATTRIBUTES
+        # is non-empty.  The module itself short-circuits on the config check,
+        # but we also skip the call when no post-processor was supplied.
+        if self.post_processor is not None:
+            self.post_processor(filtered_priorities).execute()
 
     def __loading_stage(self, constants: List[Constant]) -> Dict[Constant, List[CMFData]]:
         """

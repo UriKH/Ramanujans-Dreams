@@ -6,7 +6,7 @@ from dreamer import log
 
 # Because of pickling format we need to define these functions here
 def trajectory_compute_func(d):
-    return max(10 ** (d + 1) * 2, 10)
+    return max(10 ** (d), 10)
 
 
 def trajectory_compute_func_analysis(d):

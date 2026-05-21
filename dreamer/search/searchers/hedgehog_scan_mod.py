@@ -7,31 +7,25 @@ handler-based pipeline:
   Producer (main thread)
     For each (trajectory, start) pair:
       1. Compute ``trajectory_id`` from (cmf_name, encoding, start, direction)
-         — this is cheap; no symbolic work, no trajectory walk.
+         — cheap; no symbolic work, no trajectory walk.
       2. If the id is already in the JSONL and every configured Tier-2
-         attribute is present, *skip immediately* — no handler, no walk.
-      3. Otherwise build the handler, Tier-1 DTO (or patch dict for partial
-         coverage), and hand it to the sink.
+         attribute is present, skip immediately — no handler, no walk.
+      3. Otherwise build the handler and either a patch dict (partial
+         coverage) or a full Tier-1 DTO (new trajectory), and call
+         ``push(item)``.
 
-  Sink — depends on ``search_config.TIER2_ATTRIBUTES``:
-    * **empty** → main thread writes the DTO directly to the JSONL.
-      No worker or writer subprocesses are created — they would be pure
-      overhead since no Tier-2 work is required.
-    * **non-empty** → records are pushed onto a bounded task queue consumed
-      by ``NUM_BACKGROUND_WORKERS`` worker processes that compute the
-      missing Tier-2 attributes, then forwarded to a dedicated writer
-      process that owns the JSONL file (the sole writer eliminates
-      file-lock races).
-
-A ``try/finally`` guarantees shutdown sentinels are sent even if the
-producer raises, so worker and writer processes never hang.
+  push(item) — provided by the generic ``worker_pool`` context manager:
+    * ``TIER2_ATTRIBUTES`` empty (default) → ``push`` is a synchronous
+      writer; the JSONL is written from the main thread, no subprocesses
+      created.
+    * ``TIER2_ATTRIBUTES`` non-empty → ``push`` enqueues to a worker pool
+      that runs ``compute_tier2_for_item`` in background subprocesses and
+      a dedicated writer subprocess that appends to the JSONL.
 
 Output files are written to:
     ``sys_config.EXPORT_SEARCH_RESULTS / <constant_name> / <cmf>__<shard_id>.jsonl``
 """
 
-import json
-import multiprocessing as mp
 import os
 from typing import Callable, List
 
@@ -51,9 +45,10 @@ from dreamer.utils.storage.trajectory_attributes import (
     derive_cmf_and_shard_ids,
 )
 from dreamer.utils.multi_processing import (
-    background_attribute_worker,
-    dedicated_file_writer,
+    compute_tier2_for_item,
     load_seen_trajectories,
+    worker_pool,
+    write_jsonl_line,
 )
 
 search_config = config.search
@@ -63,10 +58,9 @@ class SearcherModV1(SearcherModScheme):
     """Search module — deep trajectory search with optional asynchronous Tier-2
     attribute computation.
 
-    When ``search_config.TIER2_ATTRIBUTES`` is non-empty, an MPMC pipeline
-    per shard runs ``NUM_BACKGROUND_WORKERS`` worker processes and a
-    dedicated writer.  When empty (the default), the main thread writes
-    Tier-1 records directly to the JSONL — no subprocesses are spawned.
+    All process/queue management lives in :func:`worker_pool`; the searcher
+    only supplies the per-shard producer.  When ``TIER2_ATTRIBUTES`` is
+    empty no subprocesses are spawned (direct-write fallback).
     """
 
     def __init__(self, shards: List[Shard], use_LIReC: bool):
@@ -78,7 +72,7 @@ class SearcherModV1(SearcherModScheme):
             shards,
             use_LIReC,
             description='Search module — deep search with Tier-1 DTO output',
-            version='1.2.0',
+            version='1.3.0',
         )
 
     @CatchErrorInModule(with_trace=sys_config.MODULE_ERROR_SHOW_TRACE, fatal=True)
@@ -116,114 +110,34 @@ class SearcherModV1(SearcherModScheme):
     ) -> None:
         """Run the search for a single shard.
 
-        Chooses between the direct-write path (no Tier-2 work configured)
-        and the full MPMC pipeline.
+        The ``worker_pool`` context manager chooses MPMC vs direct-write
+        based on whether ``TIER2_ATTRIBUTES`` is non-empty.
         """
         cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
         output_path = os.path.join(dir_path, f"{shard.cmf_name}__{shard_id}.jsonl")
         seen_trajectories = load_seen_trajectories(output_path)
 
-        if search_config.TIER2_ATTRIBUTES:
-            self._run_shard_mpmc(
-                shard, shard_id, shard_encoding_str, cmf_id,
-                output_path, seen_trajectories, num_workers, config_overrides,
-            )
-        else:
-            self._run_shard_direct(
-                shard, shard_id, shard_encoding_str, cmf_id,
-                output_path, seen_trajectories,
-            )
-
-    # -- direct-write path (no Tier-2 attributes configured) ----------
-
-    def _run_shard_direct(
-        self,
-        shard: Shard,
-        shard_id: str,
-        shard_encoding_str: str,
-        cmf_id: str,
-        output_path: str,
-        seen_trajectories: dict,
-    ) -> None:
-        """Main thread writes DTOs straight to the JSONL.
-
-        Used when ``TIER2_ATTRIBUTES`` is empty so no async work is needed.
-        Avoids the per-shard cost of spawning worker and writer subprocesses.
-        """
-        with open(output_path, "a") as fout:
-            def sink(_traj_matrix, payload) -> None:
-                line = (
-                    json.dumps(payload) if isinstance(payload, dict)
-                    else payload.to_json_line()
-                )
-                fout.write(line + "\n")
-                fout.flush()
-
+        # ``compute_tier2_for_item`` unpacks the ``(traj_matrix, payload)`` tuple
+        # the producer pushes and is a fast no-op when no Tier-2 attrs are
+        # configured.  We still want it on the main thread in that case so the
+        # writer sees the unwrapped payload — so the only thing that depends on
+        # ``TIER2_ATTRIBUTES`` is whether to spawn subprocesses at all.
+        with worker_pool(
+            num_workers=num_workers,
+            worker_fn=compute_tier2_for_item,
+            writer_fn=write_jsonl_line,
+            output_path=output_path,
+            config_overrides=config_overrides,
+            parallel=bool(search_config.TIER2_ATTRIBUTES),
+        ) as push:
             self._produce(
                 shard=shard,
                 cmf_id=cmf_id,
                 shard_id=shard_id,
                 shard_encoding_str=shard_encoding_str,
-                sink=sink,
+                sink=push,
                 seen_trajectories=seen_trajectories,
             )
-
-    # -- MPMC pipeline path (Tier-2 attributes configured) ------------
-
-    def _run_shard_mpmc(
-        self,
-        shard: Shard,
-        shard_id: str,
-        shard_encoding_str: str,
-        cmf_id: str,
-        output_path: str,
-        seen_trajectories: dict,
-        num_workers: int,
-        config_overrides: dict,
-    ) -> None:
-        """Full MPMC pipeline: producer → task queue → workers → writer."""
-        # Bounded task queue prevents producers outrunning consumers (RAM safety).
-        # Size is large enough that the producer rarely stalls waiting for workers.
-        task_queue: mp.Queue = mp.Queue(maxsize=max(32, 4 * num_workers))
-        results_queue: mp.Queue = mp.Queue()
-
-        workers = [
-            mp.Process(
-                target=background_attribute_worker,
-                args=(i, task_queue, results_queue, config_overrides),
-            )
-            for i in range(num_workers)
-        ]
-        writer = mp.Process(
-            target=dedicated_file_writer,
-            args=(results_queue, output_path, config_overrides),
-        )
-
-        for w in workers:
-            w.start()
-        writer.start()
-
-        try:
-            def sink(traj_matrix, payload) -> None:
-                task_queue.put((traj_matrix, payload))
-
-            self._produce(
-                shard=shard,
-                cmf_id=cmf_id,
-                shard_id=shard_id,
-                shard_encoding_str=shard_encoding_str,
-                sink=sink,
-                seen_trajectories=seen_trajectories,
-            )
-        finally:
-            # Send one sentinel per worker, then signal the writer.
-            # Guaranteed even if the producer raised — prevents hanging processes.
-            for _ in workers:
-                task_queue.put(None)
-            for w in workers:
-                w.join()
-            results_queue.put(None)
-            writer.join()
 
     # ------------------------------------------------------------------
     # Producer
@@ -238,7 +152,7 @@ class SearcherModV1(SearcherModScheme):
         sink: Callable,
         seen_trajectories: dict,
     ) -> None:
-        """Iterate over trajectory pairs, hand work to *sink*.
+        """Iterate over trajectory pairs and hand work to *sink*.
 
         Three cases per trajectory:
 
@@ -303,7 +217,7 @@ class SearcherModV1(SearcherModScheme):
                     "trajectory_id": trajectory_id,
                     "extended_metrics": {},
                 }
-                sink(handler.trajectory_matrix(), patch)
+                sink((handler.trajectory_matrix(), patch))
                 seen_trajectories[trajectory_id] = {
                     "extended_metrics": dict.fromkeys(existing_keys | missing),
                 }
@@ -335,4 +249,4 @@ class SearcherModV1(SearcherModScheme):
             seen_trajectories[trajectory_id] = {
                 "extended_metrics": dict.fromkeys(desired),
             }
-            sink(handler.trajectory_matrix(), dto)
+            sink((handler.trajectory_matrix(), dto))

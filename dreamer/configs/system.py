@@ -59,7 +59,14 @@ class SystemConfig(Configurable):
     )
     EXPORT_ANALYSIS_RESULTS: str = field(
         default='analysis_results.tempdir',
-        metadata={"description": "Directory for the JSONL shard-analysis audit trail written by AnalyzerModV1."},
+        metadata={
+            "description": (
+                "Legacy directory for the analyzer's shard-level audit trail. "
+                "Unused since the analyzer was switched to per-trajectory dedup "
+                "and writes directly to EXPORT_SEARCH_RESULTS. Retained for "
+                "backward compatibility / ad-hoc tools."
+            )
+        },
     )
     NUM_BACKGROUND_WORKERS: int = field(
         default=4,
