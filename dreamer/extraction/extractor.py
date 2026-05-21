@@ -10,6 +10,7 @@ from dreamer.utils.constants.constant import Constant
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.storage.exporter import Exporter
 from dreamer.utils.storage.formats import Formats
+from dreamer.utils.storage.atlas_writer import update_cmf_hyperplanes, write_shard_records
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.configs import config
 from dreamer.utils.types import CMFData
@@ -70,6 +71,25 @@ class ShardExtractorMod(ExtractionModScheme):
                     shards = extractor.extract(call_number=i + 1)
                     all_shards[const] += shards
                     export_stream(shards, cmd_data.cmf_name)
+
+                    # DB-ready ShardDTO records alongside the pickle export.
+                    # Written idempotently per (const, cmf) so reruns don't
+                    # grow the file.  Also backfills the CmfDTO row written
+                    # by the loading stage with the hyperplanes we just
+                    # computed.
+                    if sys_config.EXPORT_CMFS:
+                        write_shard_records(
+                            sys_config.EXPORT_CMFS,
+                            const,
+                            cmd_data.cmf_name,
+                            shards,
+                        )
+                        update_cmf_hyperplanes(
+                            sys_config.EXPORT_CMFS,
+                            const,
+                            cmd_data.cmf_name,
+                            extractor.hyperplanes,
+                        )
         return all_shards
 
 
@@ -85,6 +105,10 @@ class ShardExtractor(ExtractionScheme):
         :param cmf_data: CMF to extract shards from, more data for extraction and later usage
         """
         super().__init__(const, cmf_data)
+        # Populated by extract(); read by ShardExtractorMod.execute() so it
+        # can backfill the CmfDTO row with the hyperplanes used to derive
+        # the shards.
+        self.hyperplanes: Set[Hyperplane] = set()
         # self.pool = create_pool() if extraction_config.PARALLELIZE else None
 
     @property
@@ -137,6 +161,7 @@ class ShardExtractor(ExtractionScheme):
         """
         # compute hyperplanes and prepare sample point
         hps = self._extract_cmf_hps()
+        self.hyperplanes = hps
 
         if not hps:
             return [Shard.from_cmf_data(self.cmf_data, self.const, [], [])]

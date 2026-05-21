@@ -15,6 +15,7 @@ from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.schemes.post_process_scheme import PostProcessModScheme
 from dreamer.utils.schemes.extraction_scheme import ExtractionModScheme
 from dreamer.utils.storage import Exporter, Importer, Formats
+from dreamer.utils.storage.atlas_writer import write_cmf_records
 from dreamer.utils.types import CMFData
 from dreamer.utils.logger import Logger
 from dreamer.utils.constants.constant import Constant
@@ -89,6 +90,10 @@ class System:
                         data=[data],
                         fmt=Formats.PICKLE
                     )
+                # DB-ready DTO records, written idempotently alongside the
+                # runtime pickle dump.  Future Atlas migrations will read
+                # these JSONL files directly.
+                write_cmf_records(path, const, l)
                 Logger(
                     f'CMFs for {const.name} exported to {const_path}', Logger.Levels.info
                 ).log()

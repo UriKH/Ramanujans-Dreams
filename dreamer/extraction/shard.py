@@ -43,6 +43,11 @@ class Shard(Searchable, JSONable):
         super().__init__(cmf, constant, shift, use_inv_t_value, cmf_name)
         self.symbols = list(cmf.matrices.keys())
         self.A, self.b = None, None
+        # Sign vector relative to the parent CMF's hyperplane list:
+        # +1 = shard is above hp_i, -1 = below.  Paired one-to-one with
+        # ``cmf.hyperplanes`` so the DTO can carry a compact combinatorial
+        # label for the shard (DB-friendly; readers don't need ``A, b``).
+        self.encoding: Tuple[int, ...] = tuple(int(v) for v in encoding) if encoding else ()
 
         if hyperplanes:
             # Work in shifted coordinates, then translate tested points back by `shift`.

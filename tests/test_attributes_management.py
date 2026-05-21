@@ -1067,17 +1067,35 @@ class TestMergeOnRead:
 
         return sink, items
 
+    @staticmethod
+    def _freeze_sample_pairs(monkeypatch, shard, **kw):
+        """Sample once and pin ``sample_pairs`` to return that exact list.
+
+        The Sampling Orchestrator is non-deterministic, so calling
+        ``sample_pairs`` twice (once to build the test's seen-trajectories
+        map, once inside ``_produce`` / analyzer) can yield different pairs
+        and break the test invariants.  Pinning the method removes the
+        non-determinism for the duration of the test.
+        """
+        from dreamer.search.methods.hedgehog_scan import SerialSearcher
+
+        pairs = SerialSearcher(shard, e, use_LIReC=False).sample_pairs(**kw)
+        monkeypatch.setattr(
+            SerialSearcher, "sample_pairs",
+            lambda self, **_kw: list(pairs),
+        )
+        return pairs
+
     def test_producer_skips_fully_covered_trajectory(self, simple_shard, monkeypatch):
         """If all desired attrs are present, the producer must invoke sink zero times."""
         from dreamer.search.searchers.hedgehog_scan_mod import SearcherModV1
-        from dreamer.search.methods.hedgehog_scan import SerialSearcher
         from dreamer.configs import config
 
         # Force a non-empty TIER2_ATTRIBUTES so "fully covered" is a non-trivial
         # property — otherwise everything is trivially covered.
         monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ("eigenvalues",))
 
-        pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs()
+        pairs = self._freeze_sample_pairs(monkeypatch, simple_shard)
         if not pairs:
             pytest.skip("No trajectory pairs available for this shard")
 
@@ -1118,13 +1136,12 @@ class TestMergeOnRead:
         on re-runs.
         """
         from dreamer.search.searchers.hedgehog_scan_mod import SearcherModV1
-        from dreamer.search.methods.hedgehog_scan import SerialSearcher
         from dreamer.configs import config
 
         # Empty TIER2_ATTRIBUTES → every seen trajectory is "fully covered".
         monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ())
 
-        pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs()
+        pairs = self._freeze_sample_pairs(monkeypatch, simple_shard)
         if not pairs:
             pytest.skip("No trajectory pairs available for this shard")
 
@@ -1249,12 +1266,11 @@ class TestMergeOnRead:
         the worker *without* triggering the linear-recurrence symbolic work.
         """
         from dreamer.search.searchers.hedgehog_scan_mod import SearcherModV1
-        from dreamer.search.methods.hedgehog_scan import SerialSearcher
         from dreamer.configs import config
 
         monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ("eigenvalues",))
 
-        pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs()
+        pairs = self._freeze_sample_pairs(monkeypatch, simple_shard)
         if not pairs:
             pytest.skip("No trajectory pairs available for this shard")
 
@@ -1304,7 +1320,6 @@ class TestMergeOnRead:
     def test_producer_emits_patch_for_missing_tier2_attr(self, simple_shard, monkeypatch):
         """Trajectories with a missing Tier-2 attr must produce patch dicts, not full DTOs."""
         from dreamer.search.searchers.hedgehog_scan_mod import SearcherModV1
-        from dreamer.search.methods.hedgehog_scan import SerialSearcher
         from dreamer.configs import config
 
         # Configure two Tier-2 attributes; mark only the first as already present
@@ -1312,7 +1327,7 @@ class TestMergeOnRead:
         configured = ("eigenvalues", "spectral_gap")
         monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", configured)
 
-        pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs()
+        pairs = self._freeze_sample_pairs(monkeypatch, simple_shard)
         if not pairs:
             pytest.skip("No trajectory pairs available for this shard")
 
@@ -1598,8 +1613,16 @@ class TestAnalyzerDedup:
         monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
 
         _cmf_id, shard_id, enc_str = derive_cmf_and_shard_ids(simple_shard)
+
+        # Pin sample_pairs so the analyzer's internal call returns the same
+        # list the test caches against — sampling is non-deterministic
+        # otherwise (see TestMergeOnRead._freeze_sample_pairs).
         pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs(
             trajectory_generator=analysis_config.NUM_TRAJECTORIES_FROM_DIM,
+        )
+        monkeypatch.setattr(
+            SerialSearcher, "sample_pairs",
+            lambda self, **_kw: list(pairs),
         )
         if len(pairs) < 2:
             pytest.skip("Need >=2 sampled pairs to exercise partial-cache path")
@@ -1926,3 +1949,241 @@ class TestTier3PostProcess:
         monkeypatch.setattr(sys_config, "EXPORT_CMFS", str(tmp_path))
         mod = Tier3PostProcessModV1({})
         assert mod._cmf_lookup == {}
+
+
+# ---------------------------------------------------------------------------
+# Atlas writer (CmfDTO / CmfFamilyDTO / ShardDTO JSONL storage)
+# ---------------------------------------------------------------------------
+
+class TestAtlasWriter:
+    """Tests for ``atlas_writer.py`` — the DB-ready DTO storage layer.
+
+    Covers the loading-stage CMF/family writer and the extraction-stage
+    shard writer, including idempotent rerun behaviour (skip-if-present).
+    """
+
+    def test_build_cmf_family_dto(self, simple_cmf):
+        from dreamer.utils.storage.atlas_writer import build_cmf_family_dto
+
+        dto = build_cmf_family_dto(simple_cmf)
+        assert isinstance(dto, CmfFamilyDTO)
+        assert dto.family_id == "1F1"
+        assert dto.global_family_id == "pFq"
+        assert dto.dimensions == len(simple_cmf.matrices)
+        assert dto.matrix_definitions  # non-empty
+        # Round-trip
+        assert CmfFamilyDTO.from_dict(json.loads(dto.to_json_line())) == dto
+
+    def test_build_cmf_dto(self, simple_cmf, zero_shift):
+        from dreamer.utils.storage.atlas_writer import build_cmf_dto
+        from dreamer.utils.types import CMFData
+
+        data = CMFData(cmf=simple_cmf, shift=zero_shift, cmf_name="test_cmf")
+        dto = build_cmf_dto(data, [e])
+        assert isinstance(dto, CmfDTO)
+        assert dto.cmf_id == "test_cmf"
+        assert dto.family_id == "1F1"
+        assert dto.found_constants == [e.name]
+        assert dto.cmf_hyperplanes == []
+        # Shift is zero for all symbols
+        assert all(v == 0 for v in dto.coordinate_shift)
+
+    def test_build_shard_dto_matches_derive_ids(self, simple_shard):
+        from dreamer.utils.storage.atlas_writer import build_shard_dto
+
+        dto = build_shard_dto(simple_shard)
+        expected_cmf_id, expected_shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
+        assert dto.shard_id == expected_shard_id
+        assert dto.cmf_id == expected_cmf_id
+        assert e.name in dto.found_constants
+        # Interior point present (simple_shard fixture passes one in)
+        assert dto.interior_point == (1, 1)
+        # Encoding is the ±1 sign vector the shard was constructed with —
+        # simple_shard uses encoding=[1, 1] (above both hyperplanes).
+        assert dto.shard_encoding == (1, 1)
+
+    def test_build_shard_dto_whole_space(self, whole_space_shard):
+        from dreamer.utils.storage.atlas_writer import build_shard_dto
+
+        dto = build_shard_dto(whole_space_shard)
+        assert dto.shard_encoding == ()
+        assert dto.dimensionality == len(whole_space_shard.symbols)
+
+    def test_append_dtos_jsonl_writes_new(self, tmp_path):
+        from dreamer.utils.storage.atlas_writer import append_dtos_jsonl
+
+        path = str(tmp_path / "cmfs.jsonl")
+        dtos = [
+            CmfDTO(cmf_id="a", family_id="1F1", cmf_hyperplanes=[], coordinate_shift=(0,), found_constants=["e"]),
+            CmfDTO(cmf_id="b", family_id="1F1", cmf_hyperplanes=[], coordinate_shift=(0,), found_constants=["e"]),
+        ]
+        written = append_dtos_jsonl(path, dtos, "cmf_id")
+        assert written == 2
+        lines = [ln for ln in open(path).read().splitlines() if ln.strip()]
+        assert len(lines) == 2
+
+    def test_append_dtos_jsonl_skips_existing(self, tmp_path):
+        """Idempotent rerun — same ids are not re-appended."""
+        from dreamer.utils.storage.atlas_writer import append_dtos_jsonl
+
+        path = str(tmp_path / "cmfs.jsonl")
+        dto = CmfDTO(
+            cmf_id="a", family_id="1F1", cmf_hyperplanes=[],
+            coordinate_shift=(0,), found_constants=["e"],
+        )
+        # First write
+        assert append_dtos_jsonl(path, [dto], "cmf_id") == 1
+        # Second write with same id → 0 new records
+        assert append_dtos_jsonl(path, [dto], "cmf_id") == 0
+        lines = [ln for ln in open(path).read().splitlines() if ln.strip()]
+        assert len(lines) == 1
+
+    def test_append_dtos_jsonl_appends_only_newcomers(self, tmp_path):
+        """Mixed batch — only previously-unseen ids are appended."""
+        from dreamer.utils.storage.atlas_writer import append_dtos_jsonl
+
+        path = str(tmp_path / "cmfs.jsonl")
+        dto_a = CmfDTO(cmf_id="a", family_id="1F1", cmf_hyperplanes=[], coordinate_shift=(0,), found_constants=["e"])
+        dto_b = CmfDTO(cmf_id="b", family_id="1F1", cmf_hyperplanes=[], coordinate_shift=(0,), found_constants=["e"])
+
+        append_dtos_jsonl(path, [dto_a], "cmf_id")
+        # Second call has dto_a (existing) and dto_b (new); only dto_b appended.
+        assert append_dtos_jsonl(path, [dto_a, dto_b], "cmf_id") == 1
+        lines = [ln for ln in open(path).read().splitlines() if ln.strip()]
+        assert len(lines) == 2
+        ids = {json.loads(ln)["cmf_id"] for ln in lines}
+        assert ids == {"a", "b"}
+
+    def test_write_cmf_records_creates_both_files(self, tmp_path, simple_cmf, zero_shift):
+        """Loading-stage helper emits cmfs.jsonl + cmf_families.jsonl."""
+        from dreamer.utils.storage.atlas_writer import write_cmf_records
+        from dreamer.utils.types import CMFData
+
+        data = CMFData(cmf=simple_cmf, shift=zero_shift, cmf_name="test_cmf")
+        write_cmf_records(str(tmp_path), e, [data])
+
+        const_dir = tmp_path / e.name
+        assert (const_dir / "cmfs.jsonl").exists()
+        assert (const_dir / "cmf_families.jsonl").exists()
+
+        cmf_records = [
+            json.loads(ln) for ln in (const_dir / "cmfs.jsonl").read_text().splitlines()
+            if ln.strip()
+        ]
+        family_records = [
+            json.loads(ln) for ln in (const_dir / "cmf_families.jsonl").read_text().splitlines()
+            if ln.strip()
+        ]
+        assert len(cmf_records) == 1
+        assert cmf_records[0]["cmf_id"] == "test_cmf"
+        assert len(family_records) == 1
+        assert family_records[0]["family_id"] == "1F1"
+
+    def test_write_cmf_records_idempotent(self, tmp_path, simple_cmf, zero_shift):
+        """Re-running the loading stage doesn't grow the JSONL files."""
+        from dreamer.utils.storage.atlas_writer import write_cmf_records
+        from dreamer.utils.types import CMFData
+
+        data = CMFData(cmf=simple_cmf, shift=zero_shift, cmf_name="test_cmf")
+        write_cmf_records(str(tmp_path), e, [data])
+        write_cmf_records(str(tmp_path), e, [data])  # rerun
+
+        const_dir = tmp_path / e.name
+        cmf_lines = [ln for ln in (const_dir / "cmfs.jsonl").read_text().splitlines() if ln.strip()]
+        family_lines = [ln for ln in (const_dir / "cmf_families.jsonl").read_text().splitlines() if ln.strip()]
+        assert len(cmf_lines) == 1
+        assert len(family_lines) == 1
+
+    def test_write_shard_records_creates_file(self, tmp_path, simple_shard):
+        """Extraction-stage helper emits ``<cmf>__shards.jsonl``."""
+        from dreamer.utils.storage.atlas_writer import write_shard_records
+
+        written = write_shard_records(
+            str(tmp_path), e, simple_shard.cmf_name, [simple_shard]
+        )
+        assert written == 1
+
+        const_dir = tmp_path / e.name
+        files = list(const_dir.glob("*__shards.jsonl"))
+        assert len(files) == 1
+        records = [json.loads(ln) for ln in files[0].read_text().splitlines() if ln.strip()]
+        assert len(records) == 1
+        assert records[0]["cmf_id"] == simple_shard.cmf_name
+
+    def test_write_shard_records_idempotent(self, tmp_path, simple_shard):
+        """Same shard written twice → file still has one record."""
+        from dreamer.utils.storage.atlas_writer import write_shard_records
+
+        write_shard_records(str(tmp_path), e, simple_shard.cmf_name, [simple_shard])
+        # Second write with same shard → no growth
+        new_written = write_shard_records(
+            str(tmp_path), e, simple_shard.cmf_name, [simple_shard]
+        )
+        assert new_written == 0
+
+        const_dir = tmp_path / e.name
+        files = list(const_dir.glob("*__shards.jsonl"))
+        lines = [ln for ln in files[0].read_text().splitlines() if ln.strip()]
+        assert len(lines) == 1
+
+    def test_shard_dto_round_trip_through_jsonl(self, tmp_path, simple_shard):
+        """ShardDTO survives JSONL serialise → parse → from_dict."""
+        from dreamer.utils.storage.atlas_writer import write_shard_records
+
+        write_shard_records(str(tmp_path), e, simple_shard.cmf_name, [simple_shard])
+        path = next((tmp_path / e.name).glob("*__shards.jsonl"))
+        record = json.loads(path.read_text().splitlines()[0])
+        restored = ShardDTO.from_dict(record)
+        assert restored.shard_id == derive_cmf_and_shard_ids(simple_shard)[1]
+        assert restored.cmf_id == simple_shard.cmf_name
+
+    def test_update_cmf_hyperplanes_populates_existing_record(
+        self, tmp_path, simple_cmf, zero_shift, symbols,
+    ):
+        """After loading writes an empty-hyperplanes CmfDTO, the extraction
+        backfill must populate ``cmf_hyperplanes`` on the same line.
+        """
+        from dreamer.utils.storage.atlas_writer import (
+            write_cmf_records, update_cmf_hyperplanes,
+        )
+        from dreamer.utils.types import CMFData
+
+        data = CMFData(cmf=simple_cmf, shift=zero_shift, cmf_name="cmf_a")
+        write_cmf_records(str(tmp_path), e, [data])
+        path = tmp_path / e.name / "cmfs.jsonl"
+        record_before = json.loads(path.read_text().splitlines()[0])
+        assert record_before["cmf_hyperplanes"] == []
+
+        hps = [Hyperplane(symbols[0], symbols), Hyperplane(symbols[1], symbols)]
+        updated = update_cmf_hyperplanes(str(tmp_path), e, "cmf_a", hps)
+        assert updated is True
+
+        record_after = json.loads(path.read_text().splitlines()[0])
+        assert len(record_after["cmf_hyperplanes"]) == 2
+        # Other fields preserved.
+        assert record_after["cmf_id"] == "cmf_a"
+        assert record_after["family_id"] == record_before["family_id"]
+
+    def test_update_cmf_hyperplanes_no_matching_record(
+        self, tmp_path, simple_cmf, zero_shift, symbols,
+    ):
+        """Unknown cmf_name → no-op, returns False."""
+        from dreamer.utils.storage.atlas_writer import (
+            write_cmf_records, update_cmf_hyperplanes,
+        )
+        from dreamer.utils.types import CMFData
+
+        data = CMFData(cmf=simple_cmf, shift=zero_shift, cmf_name="cmf_a")
+        write_cmf_records(str(tmp_path), e, [data])
+
+        hps = [Hyperplane(symbols[0], symbols)]
+        updated = update_cmf_hyperplanes(str(tmp_path), e, "nope", hps)
+        assert updated is False
+
+    def test_update_cmf_hyperplanes_missing_file(self, tmp_path, symbols):
+        """No cmfs.jsonl yet → returns False, no crash."""
+        from dreamer.utils.storage.atlas_writer import update_cmf_hyperplanes
+
+        hps = [Hyperplane(symbols[0], symbols)]
+        updated = update_cmf_hyperplanes(str(tmp_path), e, "anything", hps)
+        assert updated is False
