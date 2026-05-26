@@ -1,12 +1,12 @@
 from dreamer import System, config
-from dreamer import analysis, search, extraction
+from dreamer import analysis, search, extraction, post_process
 from dreamer.loading import pFq
 from dreamer import log
 
 
 # Because of pickling format we need to define these functions here
 def trajectory_compute_func(d):
-    return max(10 ** (d), 10)
+    return max(10 ** (d - 1), 10)
 
 
 def trajectory_compute_func_analysis(d):
@@ -50,5 +50,6 @@ if __name__ == '__main__':
         function_sources=[pFq(log(2), 2, 1, -1)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
-        searcher=search.SearcherModV1
+        searcher=search.SearcherModV1,
+        post_processor=post_process.Tier3PostProcessModV1,
     ).run(constants=[log(2)])

@@ -48,7 +48,7 @@ from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.schemes.post_process_scheme import PostProcessModScheme
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.storage import Formats, Importer
-from dreamer.utils.storage.attribute_registry import compute_attributes
+from dreamer.utils.storage.attribute_registry import attribute_name, compute_attributes
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
     derive_cmf_and_shard_ids,
@@ -77,7 +77,12 @@ def compute_tier3_for_item(item):
     traj_matrix, patch = item
     attrs_to_compute = config.post_process.TIER3_ATTRIBUTES
     extended_metrics = patch.setdefault("extended_metrics", {})
-    missing = [a for a in attrs_to_compute if a not in extended_metrics]
+    # Specs may be bare strings or ``(name, predicate)`` tuples; filter by
+    # resolved name so predicates still fire inside ``compute_attributes``.
+    missing = [
+        spec for spec in attrs_to_compute
+        if attribute_name(spec) not in extended_metrics
+    ]
 
     if missing and traj_matrix is not None:
         try:
@@ -191,7 +196,7 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         if not merged:
             return
 
-        desired = set(post_process_config.TIER3_ATTRIBUTES)
+        desired = {attribute_name(s) for s in post_process_config.TIER3_ATTRIBUTES}
         # Quickly scan first — if nothing is missing anywhere, skip
         # spawning the worker pool entirely.
         if not any(

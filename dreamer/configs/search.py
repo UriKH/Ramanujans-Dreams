@@ -87,7 +87,10 @@ class SearchConfig(Configurable):
     #   Tier-3 — expensive post-process attributes (asymptotics, kamidelta).  Not
     #            yet implemented; will run as a separate pipeline pass.
     TIER2_ATTRIBUTES: Tuple[str, ...] = field(
-        default=(),
+        default=(
+            "eigenvalues", "eigenvalue_errors", "spectral_gap", "companion_coboundary_rank",
+            "asymptotics", "convergence_class", "kamidelta", "gcd_slope"
+        ),
         metadata={"description": "Background-worker attributes computed asynchronously during search. Empty disables the worker/writer subprocesses entirely."},
     )
 
@@ -151,7 +154,7 @@ class SearchConfig(Configurable):
     )
 
     CONSTANT_NO_DIGITS_LOW_RES: int = field(
-        default=600,
+        default=1000, #600,
         metadata={"description": "Number of digits to use for low-resolution constant values."},
     )
 

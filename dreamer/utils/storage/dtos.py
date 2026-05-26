@@ -141,6 +141,16 @@ class TrajectoryDTO:
     # ``handler.identified()``.
     identified: bool = True
 
+    # Walk-style flag: 1 → ``inv().T`` applied after walking the trajectory
+    # matrix (the dual recurrence); 2 → walked directly.  Persisted so that
+    # downstream tooling can faithfully reconstruct the handler that
+    # produced these p/q vectors.  Defaults to 1 for backward compatibility
+    # with records written before this field existed.
+    walk_type: int = 1
+    # Target constant as a sympy-parseable string (``str(handler.constant())``).
+    # ``None`` for handlers built without a constant (worker-context records).
+    constant: Optional[str] = None
+
     # Open extension field for Tier-2+ attributes added by background workers
     extended_metrics: Dict[str, Any] = field(default_factory=dict, hash=False)
 
@@ -163,5 +173,7 @@ class TrajectoryDTO:
             p_vector=tuple(d.get("p_vector", ())),
             q_vector=tuple(d.get("q_vector", ())),
             identified=bool(d.get("identified", True)),
+            walk_type=int(d.get("walk_type", 1)),
+            constant=d.get("constant"),
             extended_metrics=d.get("extended_metrics", {}),
         )

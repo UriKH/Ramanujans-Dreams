@@ -37,6 +37,7 @@ from dreamer.extraction.shard import Shard
 from dreamer.configs import config
 from dreamer.configs.system import sys_config
 from dreamer.utils.logger import Logger
+from dreamer.utils.storage.attribute_registry import attribute_name
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
     _position_to_tuple,
@@ -182,7 +183,9 @@ class SearcherModV1(SearcherModScheme):
             ).log()
             return
 
-        desired = set(search_config.TIER2_ATTRIBUTES)
+        # Specs may be ``(name, predicate)`` tuples — use just the names
+        # for set arithmetic against the JSONL ``extended_metrics`` keys.
+        desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
 
         for traj, start in pairs:
             # Cheap: derive trajectory_id without symbolic work or any walk.
@@ -213,6 +216,7 @@ class SearcherModV1(SearcherModScheme):
                         f"Handler error — shard {shard_id}, traj={traj}, start={start}: {e}",
                         Logger.Levels.warning,
                     ).log()
+                    raise e # TODO: remove this
                     continue
 
                 patch: dict = {
@@ -246,6 +250,7 @@ class SearcherModV1(SearcherModScheme):
                     f"Handler error — shard {shard_id}, traj={traj}, start={start}: {e}",
                     Logger.Levels.warning,
                 ).log()
+                raise e # TODO: remove this
                 continue
 
             # Track in-flight locally so duplicate (traj, start) pairs within

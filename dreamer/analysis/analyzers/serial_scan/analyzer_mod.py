@@ -226,6 +226,7 @@ class AnalyzerModV1(AnalyzerModScheme):
                             f"traj={traj}, start={start}: {e}",
                             Logger.Levels.warning,
                         ).log()
+                        raise e # TODO: remove this
                         continue
 
                     delta = float(dto.delta_estimate)

@@ -303,7 +303,7 @@ def compute_tier2_for_item(item):
     the writer.
     """
     from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
-    from dreamer.utils.storage.attribute_registry import compute_attributes
+    from dreamer.utils.storage.attribute_registry import compute_attributes, attribute_name
     from dreamer.configs import config
 
     traj_matrix, dto_or_patch = item
@@ -320,7 +320,13 @@ def compute_tier2_for_item(item):
     )
 
     attrs_to_compute = config.search.TIER2_ATTRIBUTES
-    missing = [a for a in attrs_to_compute if a not in extended_metrics]
+    # Specs may be bare strings or ``(name, predicate)`` tuples; filter on
+    # the resolved attribute name so the predicate-skip path still runs
+    # inside ``compute_attributes``.
+    missing = [
+        spec for spec in attrs_to_compute
+        if attribute_name(spec) not in extended_metrics
+    ]
     if missing and traj_matrix is not None:
         try:
             handler = TrajectoryAttributesHandler(traj_matrix)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import warnings
 from typing import List, Optional, TYPE_CHECKING, Tuple
 
@@ -43,6 +44,27 @@ def _position_to_tuple(pos) -> tuple:
         except (TypeError, ValueError):
             out.append(str(v))
     return tuple(out)
+
+
+def _pq_to_jsonsafe(v) -> object:
+    """Return ``v`` as ``int`` when it's an integer (sympy or Python),
+    otherwise as ``str``.  p/q coefficients from LIReC are usually ints
+    but can be ``sympy.Rational`` like ``1/2``; converting fractions to
+    ``int`` would either truncate or raise — strings round-trip cleanly
+    through ``sympify`` if needed downstream.
+    """
+    try:
+        if getattr(v, "is_Integer", False) or isinstance(v, int):
+            return int(v)
+    except Exception:
+        pass
+    return str(v)
+
+
+def _trajectory_norm(trajectory) -> float:
+    """Euclidean norm of a ``Position`` (or any dict-like) used as a
+    trajectory direction — mirrors ``np.linalg.norm`` over its values."""
+    return math.sqrt(sum(float(v) ** 2 for v in trajectory.values()))
 
 
 def _serialize_encoding(shard) -> str:
@@ -123,9 +145,11 @@ def build_trajectory_dto(
         recurrence_order=handler.order(),
         limit_value=float(handler.limit()),
         delta_estimate=float(handler.delta()),
-        p_vector=tuple(handler.p_vector()),
-        q_vector=tuple(handler.q_vector()),
+        p_vector=tuple(_pq_to_jsonsafe(x) for x in handler.p_vector()) if handler.p_vector() else None,
+        q_vector=tuple(_pq_to_jsonsafe(x) for x in handler.q_vector()) if handler.q_vector() else None,
         identified=bool(handler.identified()),
+        walk_type=int(handler.walk_type()),
+        constant=str(handler.constant()) if handler.constant() is not None else None,
     )
 
 
@@ -146,8 +170,8 @@ class TrajectoryAttributesHandler:
         self,
         traj_matrix: Matrix,
         constant: Optional[sp.Expr] = None,
-        walk_depth: int = 200,
-        walk_type: int = 1,
+        walk_depth: int = 1500,
+        walk_type: Optional[int] = None,
         searchable: Optional[Searchable] = None,
     ):
         """
@@ -162,9 +186,11 @@ class TrajectoryAttributesHandler:
             may be ``None`` in worker contexts that only need Tier-2/3 attrs.
         walk_depth : int
             Default number of recurrence steps for walks.
-        walk_type : int
+        walk_type : int, optional
             ``1`` → walk uses ``M.inv().T`` (the dual recurrence);
             ``2`` → walk uses ``M`` directly.
+            When omitted, resolved from ``search.DEFAULT_USES_INV_T``
+            (``True`` → 1, ``False`` → 2).
         searchable : Searchable, optional
             The ``Searchable`` (typically the ``Shard``) this trajectory was
             sampled from.  When provided, its ``cache`` is consulted/updated
@@ -174,10 +200,11 @@ class TrajectoryAttributesHandler:
         self._constant = constant
         self._depth = walk_depth
         self._cache: dict = {}
-        self._walk_type = walk_type # 1 for using inv().T in walk, 2 for direct walk
+        if walk_type is None:
+            walk_type = 1 if search_config.DEFAULT_USES_INV_T else 2
+        self._walk_type = walk_type
         self._searchable = searchable
         self._utility_cache: dict = {}  # separate cache for non-core attributes like p/q vectors
-        self._identified = False
 
     @classmethod
     def from_cmf(
@@ -186,20 +213,25 @@ class TrajectoryAttributesHandler:
         trajectory,
         start_point,
         constant: Optional[sp.Expr] = None,
-        z_value=None,
-        walk_depth: int = 200,
-        walk_type: int = 1,
+        walk_depth: Optional[int] = None,
+        walk_type: Optional[int] = None,
         searchable: Optional[Searchable] = None,
     ) -> "TrajectoryAttributesHandler":
         """Build a handler by computing ``cmf.trajectory_matrix(trajectory, start_point)``.
 
-        ``z_value`` substitutes the free ``z`` symbol when given.  See
-        ``__init__`` for the meaning of ``constant``, ``walk_*`` and
-        ``searchable``.
+        ``walk_depth`` defaults to ``search.DEPTH_FROM_TRAJECTORY_LEN(||traj||, cmf.dim())``
+        — the same per-trajectory depth ``Searchable.calc_delta`` uses.
+        See ``__init__`` for ``constant``, ``walk_type``, ``searchable``.
         """
         tmat = cmf.trajectory_matrix(trajectory, start_point)
-        if z_value is not None:
-            tmat = tmat.subs({sp.Symbol("z"): z_value})
+        if hasattr(tmat, 'applyfunc'):
+            tmat = tmat.applyfunc(sp.cancel)
+        elif hasattr(tmat, 'matrix'):  # If tmat wraps a sympy matrix
+            tmat.matrix = tmat.matrix.applyfunc(sp.cancel)
+        if walk_depth is None:
+            walk_depth = search_config.DEPTH_FROM_TRAJECTORY_LEN(
+                _trajectory_norm(trajectory), cmf.dim(),
+            )
         return cls(tmat, constant, walk_depth, walk_type, searchable)
 
     # ------------------------------------------------------------------
@@ -230,16 +262,50 @@ class TrajectoryAttributesHandler:
     # ==================================================================
 
     def trajectory_matrix(self) -> Matrix:
-        """Walk-ready d×d symbolic trajectory matrix.
+        """Raw d×d symbolic trajectory matrix M(n).
 
-        For ``walk_type=1`` returns ``M(n).inv().T`` (dual recurrence);
-        for ``walk_type=2`` returns ``M(n)`` directly.  Cached.
+        The ``inv().T`` transform for ``walk_type=1`` is applied *after*
+        walking (see :meth:`_walked_matrix`), not to ``M`` itself —
+        ``walk(M.inv().T) ≠ walk(M).inv().T`` in general.  Recurrence-level
+        attributes (linear_recurrence, companion, eigenvalues, kamidelta,
+        gcd_slope) all operate on raw ``M``.
         """
-        return self._get_utility("trajectory_matrix", lambda: self._traj.inv().T if self.walk_type() == 1 else self._traj)
+        return self._traj
 
     def traj_size(self) -> int:
         """Dimension d of the trajectory matrix."""
         return self.trajectory_matrix().shape[0]
+
+    def _walked_matrix(self, depth: int) -> Optional[Matrix]:
+        """Walk M to ``depth``, then apply ``inv().T`` when ``walk_type==1``.
+
+        Returns ``None`` when the walk fails (e.g. ZeroDivisionError on a
+        degenerate trajectory, or singular product when inv() is needed) —
+        matches the broad ``try/except`` in :meth:`Searchable.calc_delta`.
+        Downstream methods propagate the ``None`` to skip the trajectory.
+        Cached per depth.
+        """
+        def compute():
+            try:
+                walked = self._traj.walk({n: 1}, depth, {n: 0})
+                if self.walk_type() == 1:
+                    walked = walked.inv().T
+                return walked
+            except Exception as e:
+                Logger(
+                    f'Walk failed at depth {depth}: {e}',
+                    Logger.Levels.warning,
+                ).log()
+                return None
+        return self._get_utility(f"walked_{depth}", compute)
+
+    def _inv_transpose_trajectory_matrix(self) -> Matrix:
+        """Return the inverse transpose of the trajectory matrix"""
+        def compute():
+            if self.walk_type() == 1:
+                return self.trajectory_matrix().inv().T
+            return self.trajectory_matrix()
+        return self._get_utility(f"inv_transpose_trajectory_matrix", compute)
 
     # ==================================================================
     #  LINEAR RECURRENCE  (the core object from ramanujantools)
@@ -258,9 +324,7 @@ class TrajectoryAttributesHandler:
         All downstream attributes (recurrence_matrix, kamidelta, asymptotics)
         are methods on this object.
         """
-        return self._get("linear_recurrence", lambda:
-            LinearRecurrence(self.trajectory_matrix())
-        )
+        return self._get("linear_recurrence", lambda: LinearRecurrence(self._inv_transpose_trajectory_matrix()))
 
     # ==================================================================
     #  COMPANION MATRIX
@@ -277,10 +341,7 @@ class TrajectoryAttributesHandler:
         All recurrence coefficients live in the LAST column.
         The 0s and 1s in the left columns are structural.
         """
-        return self._get("companion", lambda:
-            self.trajectory_matrix().as_companion()
-            # self.linear_recurrence().recurrence_matrix
-        )
+        return self._get("companion", lambda: self.trajectory_matrix().as_companion())
 
     # ==================================================================
     #  RECURRENCE FORMULA ATTRIBUTES
@@ -354,9 +415,8 @@ class TrajectoryAttributesHandler:
         characteristic roots. For polynomial coefficients, these are
         the leading-term roots that govern asymptotic growth.
         """
-        return self._get("sorted_eigenvalues", lambda:
-            self.companion().sorted_eigenvals()
-        )
+        # TODO: make sure eigenvalues we are interested in are the companion's!
+        return self._get("sorted_eigenvalues", lambda: self.companion().sorted_eigenvals())
 
     def eigenvalue_errors(self) -> list:
         """
@@ -369,9 +429,15 @@ class TrajectoryAttributesHandler:
             errors[1] = log|λ₁/λ₃|  (if d ≥ 3)
             etc.
         """
-        return self._get("eigenvalue_errors", lambda:
-            self.companion().errors()
-        )
+        # TODO: make sure eigenvalues errors we are interested in are the companion's!
+        def compute():
+            # Using Ramanujan-tools implementation of errors() for caching
+            lambdas = [e.evalf(chop=True) for e in self.sorted_eigenvalues()]
+            deltas = []
+            for i in range(1, len(lambdas)):
+                deltas.append(sp.log(abs(lambdas[0]) / abs(lambdas[i])))
+            return deltas
+        return self._get("eigenvalue_errors", compute)
 
     def spectral_gap(self) -> Optional[float]:
         """
@@ -397,22 +463,45 @@ class TrajectoryAttributesHandler:
         """Return the walk type (1 or 2) for this handler."""
         return self._walk_type
 
-    def _effective_walk_values(self, depth: Optional[int] = None, walk_matrix: Optional[sp.Matrix] = None) -> list:
-        """Return the column of the walked matrix that gets projected by p, q.
+    def _effective_walk_values(self, depth: Optional[int] = None, walk_matrix: Optional[sp.Matrix] = None) -> Optional[list]:
+        """Return the column of the (walked-and-transformed) matrix used for p/q projection.
 
         Picks the first column with a non-zero top entry, prefers one with no
         zero entries (LIReC-friendly), and normalises by the top entry.
-        Pass either ``depth`` (walks internally and caches) or a precomputed
-        ``walk_matrix``.  Internal helper for limit / delta computations.
+        Pass ``depth`` to compute internally (cached via :meth:`_walked_matrix`,
+        so the ``inv().T`` transform for ``walk_type==1`` is applied AFTER the
+        walk).  ``walk_matrix`` may be a raw ``Limit.current`` snapshot —
+        ``inv().T`` is applied here when ``walk_type==1``.
         """
+        if depth is None and walk_matrix is None:
+            Logger(
+                'No depth or walk matrix provided for effective walk values. '
+                'This was not supposed to happen. Skipping trajectory...',
+                Logger.Levels.exception,
+            ).log()
+            return None
 
         depth = depth or self._depth
-        
+
         def compute():
+            if walk_matrix is None:
+                walked = self._walked_matrix(depth)
+            else:
+                try:
+                    walked = walk_matrix
+                    if self.walk_type() == 1:
+                        walked = walked.inv().T
+                except Exception as e:
+                    Logger(
+                        f'inv().T transform failed: {e}',
+                        Logger.Levels.warning,
+                    ).log()
+                    walked = None
+            if walked is None:
+                return None
+
             lirec_valid_col = None
             normalized_col = None
-            walked = walk_matrix or self.trajectory_matrix().walk({n: 1}, depth, {n: 0})
-
             for col_ind in range(sp.shape(walked)[1]):
                 if walked[0, col_ind].is_zero:
                     continue
@@ -427,53 +516,59 @@ class TrajectoryAttributesHandler:
 
             if normalized_col is None:
                 Logger(
-                    f'Could not normalize any walk matrix column. This was not supposed to happen'
-                    'Skipping trajectory...', Logger.Levels.warning
+                    'Could not normalize any walk matrix column. '
+                    'Skipping trajectory...',
+                    Logger.Levels.warning,
                 ).log()
-                return None, None, None
+                return None
 
             if lirec_valid_col is not None:
                 normalized_col = lirec_valid_col
-            
-            return [item for item in normalized_col]
-        
-        if depth is None and walk_matrix is None:
-            Logger(
-                'No depth or walk matrix provided for effective walk values. This was not supposed to happen'
-                'Skipping trajectory...', Logger.Levels.warning
-            ).log()
-            return None
-        
-        if depth is None:
-            return compute()
 
+            return [item for item in normalized_col]
+
+        if walk_matrix is not None:
+            return compute()
         return self._get_utility(f"effective_walk_{depth}", compute)
 
     def _limits(self, depths: list) -> list:
         """
         Internal: get Limit objects at specified depths.
-        Uses the companion's built-in limit() which returns
-        Limit objects with correct p/q extraction.
 
-        Convention (from Limit class source):
-            p = initial_values.row(0) * walk * final_projection.col(0)
-              = e_0^T * W * e_{-1} = W[0, -1]
-            q = initial_values.row(1) * walk * final_projection.col(1)
-              = e_1^T * W * e_{-1} = W[1, -1]
+        Returns ``[]`` when the walk fails (singular matrix, ZeroDivisionError
+        on degenerate trajectories, etc.) — callers must handle this.
         """
-        return self.trajectory_matrix().limit({n: 1}, depths, {n: 0})
+        try:
+            return self.trajectory_matrix().limit({n: 1}, depths, {n: 0})
+        except Exception as e:
+            Logger(
+                f'_limits walk failed at depths={depths}: {e}',
+                Logger.Levels.warning,
+            ).log()
+            return []
 
-    def limit(self, depth: Optional[int] = None):
+    def limit(self, depth: Optional[int] = None) -> float:
         """
         Numerical estimate of L = lim(n→∞) p_n/q_n.
 
-        Returns an mpmath.mpf float.
-        Uses Limit.as_float() for correct p/q extraction.
+        Returns ``float('nan')`` when the walk fails — keeps the DTO
+        constructible (``float(NaN)`` is a valid float) instead of leaking
+        the walk exception to callers.
         """
         depth = depth or self._depth
-        return self._get(f"limit_{depth}", lambda:
-            self._limits([depth])[0].as_float()
-        )
+        def compute() -> float:
+            try:
+                limits = self._limits([depth])
+                if not limits:
+                    return float('nan')
+                return float(limits[0].as_float())
+            except Exception as e:
+                Logger(
+                    f'limit failed at depth {depth}: {e}',
+                    Logger.Levels.warning,
+                ).log()
+                return float('nan')
+        return self._get(f"limit_{depth}", compute)
 
     def limit_rational(self, depth: Optional[int] = None):
         """
@@ -494,16 +589,29 @@ class TrajectoryAttributesHandler:
             |p/q − L| = 1 / q^(1+δ)
 
         For any irrational L: δ ≥ 1 (Dirichlet's theorem).
+        Returns ``float('-inf')`` when the walk fails, identification
+        fails, or the convergence sanity check fails — the documented
+        non-convergence sentinel.
         """
         depth = depth or self._depth
-        def compute():
-            converges, _ = self._convergence_sanity_check(depth)
-            if not converges:
+        def compute() -> float:
+            try:
+                converges, _ = self._convergence_sanity_check(depth)
+                if not converges:
+                    return float('-inf')
+                delta_res = self.delta_sequence([depth])
+                if len(delta_res) == 0:
+                    return float('-inf')
+                return delta_res[0]
+            except Exception as e:
+                Logger(
+                    f'delta failed at depth {depth}: {e}',
+                    Logger.Levels.warning,
+                ).log()
                 return float('-inf')
-            return self.delta_sequence(depth)[0]
         return self._get(f"delta_{depth}", compute)
 
-    def delta_sequence(self, depth: Optional[int] = None) -> list:
+    def delta_sequence(self, depth: Optional[int | list] = None) -> list:
         """
         δ values at every step from 1 to depth.
         Shows how the irrationality measure evolves with walk depth.
@@ -511,29 +619,43 @@ class TrajectoryAttributesHandler:
         Uses Limit.delta(L) at each step.
         """
         depth = depth or self._depth
+        if isinstance(depth, int):
+            depth = list(range(1, depth + 1))
+
         def compute():
-            limits = self._limits(list(range(1, depth + 1)))
-            p, q = self._pq_vector(depth)
+            limits = self._limits(depth)
+            vectors = self._pq_vector(depth[-1])
+            if vectors is None:
+                return []
+            
+            p, q = vectors
             p = sp.Matrix(p).T
             q = sp.Matrix(q).T
             deltas = []
             high_res_constant = self.constant().evalf(search_config.CONSTANT_NO_DIGITS_HIGH_RES)
 
-            for limit in limits:
-                numerator = p.dot(self._effective_walk_values(None, limit))
-                denom = q.dot(self._effective_walk_values(None, limit))
+            for limit in limits:    
+                walk_col = sp.Matrix(self._effective_walk_values(None, limit.current))
+                numerator = p.dot(walk_col)
+                denom = q.dot(walk_col)
                 estimated = sp.Abs(sp.Rational(numerator, denom))
                 err = sp.Abs(estimated - high_res_constant)
-                delta = -1 - sp.log(err) / sp.log(denom)
-
-                if sp.Abs(denom) <= search_config.MIN_ESTIMATE_DENOMINATOR:
+                # Match Searchable.calc_delta: use the integer denominator
+                # of the rational estimate for the delta formula, not the
+                # raw symbolic q·walk (which can be a fractional Rational).
+                denom_int = sp.denom(estimated)
+                
+                if sp.Abs(denom_int) <= search_config.MIN_ESTIMATE_DENOMINATOR:
                     # probably didn't converge for some reason
                     deltas.append(float('-inf'))
                     continue
 
+                delta = -1 - sp.log(err) / sp.log(denom_int)
+
                 # This part is not supposed to be reached at all, these are the final guardrails
                 if delta == sp.oo or delta == sp.zoo:
                     deltas.append(float('-inf'))
+                    # Logger(f"Warning: Infinite delta estimate at step. Marking delta as -inf.", Logger.Levels.warning).log()
                     continue
 
                 deltas.append(float(delta.evalf(10)))
@@ -553,9 +675,17 @@ class TrajectoryAttributesHandler:
         Returns a list of predicted δ values (one per eigenvalue pair).
         For order-2 recurrences, this is a single-element list.
         """
-        return self._get(f"kamidelta_{depth}", lambda:
-            self.companion().kamidelta(depth)
-        )
+        # TODO: make sure this implementation is correct. eigenvalue-errors are
+        #  of the companion but gcd-slope is of the trajectory matrix!
+        def compute():
+            # Copied implementation from Ramanujan-Tools - utilizing cache here.
+            errors = self.eigenvalue_errors()
+            slope = self.gcd_slope(depth)
+            return [-1 + error / slope for error in errors]
+        # return self._get(f"kamidelta_{depth}", lambda:
+        #     self.companion().kamidelta(depth)
+        # )
+        return self._get(f'kamidelta_{depth}', compute)
 
     def gcd_slope(self, depth: int = 20):
         """
@@ -564,9 +694,10 @@ class TrajectoryAttributesHandler:
 
         Used internally by kamidelta, but also useful on its own.
         """
-        return self._get(f"gcd_slope_{depth}", lambda:
-            self.trajectory_matrix().gcd_slope(depth)
-        )
+        # TODO: make sure this implementation is correct. gcd-slope computed for the trakectory matrix
+        #  or should it be the companion? It seems that recurrence limit is computed with the recurrence matrix so we use it here for the gcd_slope
+        # return self._get(f"gcd_slope_{depth}", lambda: self.trajectory_matrix().gcd_slope(depth))
+        return self._get(f"gcd_slope_{depth}", lambda: self.linear_recurrence().recurrence_matrix.gcd_slope(depth))
 
     # ==================================================================
     #  CONVERGENCE RATE
@@ -582,15 +713,17 @@ class TrajectoryAttributesHandler:
         depth = depth or self._depth
         limits = self._limits([round(coef * depth) for coef in search_config.DEPTH_CONVERGENCE_THRESHOLD])
         floats = []
-        p, q = self._pq_vector(depth)
+        vectors = self._pq_vector(depth)
+        if vectors is None:
+            return False, limits
+        p, q = vectors
         p = sp.Matrix(p).T
         q = sp.Matrix(q).T
 
         # extract estimated limit
         for limit in limits:
             walk_col = self._effective_walk_values(depth, limit.current)
-            values = [item for item in walk_col]
-            values_vec = sp.Matrix(values)
+            values_vec = sp.Matrix(walk_col)
             numerator = p.dot(values_vec)
             denom = q.dot(values_vec)
             estimated = sp.Abs(sp.Rational(numerator, denom))
@@ -679,40 +812,47 @@ class TrajectoryAttributesHandler:
     #  PENDING IMPLEMENTATIONS  (stubs — user will fill in later)
     # ==================================================================
 
-    def _pq_vector(self, depth: Optional[int] = None) -> tuple:
+    def _pq_vector(self, depth: Optional[int] = None) -> Optional[tuple[list, list]]:
         """Numerator and denominator projection vectors (p, q) such that constant = p·walk / q·walk."""
         depth = depth or self._depth
 
         def compute():
-            # If searchable is provided, try to find a cached p/q pair that matches the effective walk values.
-            
+            walk_values = self._effective_walk_values(depth)
+            if walk_values is None:
+                # Walk failed (singular matrix, ZeroDivisionError, …) — no
+                # identification possible.  ``identified()`` reads this as
+                # False; ``p_vector``/``q_vector`` propagate ``None``.
+                return None
             low_res_constant = self.constant().evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES)
-            
+            walk_col = sp.Matrix(walk_values)
+
+            # If searchable is provided, try to find a cached p/q pair that matches the effective walk values.
             if self._searchable:
                 def matcher(v):
                     v1, v2 = v
                     v1 = sp.Matrix(v1).T
                     v2 = sp.Matrix(v2).T
-                    numerator = v1.dot(self._effective_walk_values(depth))
-                    denom = v2.dot(self._effective_walk_values(depth))
+                    numerator = v1.dot(walk_col)
+                    denom = v2.dot(walk_col)
                     err = sp.Abs(sp.Abs(sp.Rational(numerator, denom)) - low_res_constant)
                     return sp.N(err, 25) < search_config.CACHE_ACCEPTANCE_THRESHOLD
 
                 if matched := self._searchable.cache.find(matcher):
+                    # Cache hit: matcher verified this (p, q) reconstructs the
+                    # constant.  Returning a non-None result is itself the
+                    # signal that identification succeeded (see ``identified``).
                     return matched
             
             # Compute p, q using LIReC
             try:
-                res = db.identify([low_res_constant] + self._effective_walk_values(depth)[1:])
+                res = db.identify([low_res_constant] + walk_values[1:])
             except Exception as e:
-                Logger(f'Error while identifing constnat. LIReC failed with: "{e}"', Logger.Levels.exception).log()
-                res = []
+                Logger(f'Error while identifing constnat. LIReC failed with: "{e}"', Logger.Levels.warning).log()
+                return None
 
-            # LIReC may also return an empty list when it cannot identify
-            # the constant — fall back to the canonical p=e_0, q=e_1 vectors.
-            if not res:
-                d = len(self._effective_walk_values(depth))
-                return ([1] + [0] * (d - 1), [0, 1] + [0] * (max(d - 2, 0)))
+            # LIReC may also return an empty list when it cannot identify the constant
+            if len(res) == 0:
+                return None
 
             # extract p, q from LIReC result
             res = res[0]
@@ -723,24 +863,33 @@ class TrajectoryAttributesHandler:
             q_dict = denom.as_coefficients_dict()
             syms = sp.symbols(f'c:{self.traj_size()}')[1:]
             ext_syms = [1] + list(syms)
-            # Coerce to native ints — projection coeffs are integers, and
-            # sympy.Integer/One/Zero are not JSON-serialisable downstream.
-            p = [int(p_dict[sym]) for sym in ext_syms]
-            q = [int(q_dict[sym]) for sym in ext_syms]
+            # Keep coefficients as sympy Numbers — they can be Rational
+            # (e.g. ``1/2``) and ``int(Rational)`` raises.  JSON-safety is
+            # handled at the DTO boundary by ``_pq_to_jsonsafe``.
+            p = [p_dict[sym] for sym in ext_syms]
+            q = [q_dict[sym] for sym in ext_syms]
+
+            estimated = estimated_expr.subs({sym: v for sym, v in zip(ext_syms, list(walk_values))})
+            err = sp.Abs(estimated - self.constant().evalf(search_config.CONSTANT_NO_DIGITS_HIGH_RES))
+            if sp.N(err, 15) > search_config.IDENTIFY_CHECK_THRESHOLD:
+                d = len(walk_values)
+                return None
+
             if self._searchable:
-                self._searchable.cache.append((p, q))
-            self._identified = True
+                self._searchable.cache.append((tuple(p), tuple(q)))
             return p, q
 
         return self._get_utility("pq_vector", compute)
 
     def p_vector(self, depth: Optional[int] = None) -> list:
         """Projection vector p such that p·walk gives the numerator sequence."""
-        return self._pq_vector(depth or self._depth)[0]
+        pq = self._pq_vector(depth or self._depth)
+        return pq[0] if pq is not None else None
 
     def q_vector(self, depth: Optional[int] = None) -> list:
         """Projection vector q such that q·walk gives the denominator sequence."""
-        return self._pq_vector(depth or self._depth)[1]
+        pq = self._pq_vector(depth or self._depth)
+        return pq[1] if pq is not None else None
 
     # ==================================================================
     #  ASYMPTOTICS  (Birkhoff-Trjitzinsky)
@@ -765,16 +914,28 @@ class TrajectoryAttributesHandler:
         )
 
     def identified(self) -> bool:
-        """
-        Whether the handler successfully identified a closed-form constant.
+        """Whether the trajectory both identifies and converges to the target.
 
-        This is a simple boolean check: did the p/q vector extraction yield
-        a valid result that matches the effective walk values within the
-        acceptance threshold?
+        A trajectory is identified iff *all* of:
+          1. ``_pq_vector()`` produced numerator/denominator coefficients
+             (LIReC succeeded, or a cache hit matched the constant).
+          2. The path converges to the target constant (the convergence
+             sanity check inside ``delta`` passes).
+          3. The resulting ``delta`` is a well-defined finite float.
 
-        Note: this is not a guarantee of correctness, just a heuristic check.
+        All three conditions collapse to a single check:
+        ``math.isfinite(self.delta())``.  ``delta`` returns ``float('-inf')``
+        whenever any of them fails (walk error, ``_pq_vector`` is ``None``,
+        non-converging path, LIReC silent failure).  ``delta`` is cached, so
+        asking ``identified`` after ``delta`` is O(1); asking it first
+        triggers the same computation that ``delta`` would have anyway.
+
+        Worker handlers without a constant return ``False`` because the
+        identification pipeline can't run.
         """
-        return self._get("identified", lambda: self._identified)
+        if self._constant is None:
+            return False
+        return math.isfinite(self.delta())
 
     def companion_coboundary_rank(self) -> int:
         """

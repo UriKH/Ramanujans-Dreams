@@ -39,9 +39,12 @@ from dreamer.utils.storage.trajectory_attributes import (
 )
 from dreamer.utils.storage.attribute_registry import (
     ATTRIBUTE_REGISTRY,
+    PREDICATES,
+    attribute_name,
     compute_attribute,
     compute_attributes,
     register_attribute,
+    register_predicate,
 )
 from dreamer.utils.storage import Exporter, Importer, Formats
 from dreamer.utils.multi_processing import (
@@ -153,6 +156,8 @@ class TestDTOSerializationRoundTrips:
             delta_estimate=1.5,
             p_vector=(1, 0),
             q_vector=(0, 1),
+            walk_type=2,
+            constant="exp(1)",
         )
         restored = TrajectoryDTO.from_dict(json.loads(dto.to_json_line()))
 
@@ -161,6 +166,48 @@ class TestDTOSerializationRoundTrips:
         assert isinstance(restored.direction, tuple)
         assert isinstance(restored.p_vector, tuple)
         assert isinstance(restored.q_vector, tuple)
+        # New reconstruction-critical fields survive the round trip:
+        assert restored.walk_type == 2
+        assert restored.constant == "exp(1)"
+
+    def test_trajectory_dto_walk_type_and_constant_defaults(self):
+        """Older JSONL records missing ``walk_type``/``constant`` deserialize
+        with safe defaults (``walk_type=1`` for back-compat, ``constant=None``)."""
+        d = {
+            "trajectory_id": "old",
+            "cmf_id": "c",
+            "shard_id": "s",
+            "start_point": [1],
+            "direction": [0],
+            "recurrence_relation": "",
+            "recurrence_order": 1,
+            "limit_value": 1.0,
+            "delta_estimate": 1.0,
+        }
+        restored = TrajectoryDTO.from_dict(d)
+        assert restored.walk_type == 1
+        assert restored.constant is None
+
+    def test_trajectory_dto_constant_sympify_round_trip(self):
+        """``constant`` is sympy-parseable: ``sp.sympify(dto.constant)`` recovers
+        an expression equal to the original."""
+        original = sp.log(2)
+        dto = TrajectoryDTO(
+            trajectory_id="t",
+            cmf_id="c",
+            shard_id="s",
+            start_point=(0,),
+            direction=(1,),
+            recurrence_relation="",
+            recurrence_order=1,
+            limit_value=0.69,
+            delta_estimate=1.0,
+            p_vector=(),
+            q_vector=(),
+            constant=str(original),
+        )
+        restored = TrajectoryDTO.from_dict(json.loads(dto.to_json_line()))
+        assert sp.sympify(restored.constant) == original
 
     def test_trajectory_dto_round_trip_with_extended_metrics(self):
         """extended_metrics survive the round-trip intact."""
@@ -344,32 +391,62 @@ class TestDeriveCmfAndShardIds:
 
 class TestHandlerStubs:
 
-    def test_p_vector_is_list_of_handler_dimension(self, minimal_handler):
-        """``p_vector()`` returns a list whose length matches ``traj_size``.
-
-        The handler now computes (or LIReC-falls-back to) a real projection
-        vector — no longer an empty stub.  The first slot is the constant
-        coefficient (``1`` in the fallback path, integer/rational otherwise).
-        """
+    def test_p_vector_shape_or_none(self, minimal_handler):
+        """``p_vector()`` is either ``None`` (LIReC couldn't identify) or a
+        list of length ``traj_size`` — the handler no longer fabricates a
+        canonical-axis fallback."""
         result = minimal_handler.p_vector()
-        assert isinstance(result, list)
-        assert len(result) == minimal_handler.traj_size()
+        if result is None:
+            assert minimal_handler.identified() is False
+        else:
+            assert isinstance(result, list)
+            assert len(result) == minimal_handler.traj_size()
 
-    def test_q_vector_is_list_of_handler_dimension(self, minimal_handler):
-        """``q_vector()`` mirrors ``p_vector()`` — same length, denominator coeffs."""
+    def test_q_vector_shape_or_none(self, minimal_handler):
+        """``q_vector()`` mirrors ``p_vector()``."""
         result = minimal_handler.q_vector()
-        assert isinstance(result, list)
-        assert len(result) == minimal_handler.traj_size()
+        if result is None:
+            assert minimal_handler.identified() is False
+        else:
+            assert isinstance(result, list)
+            assert len(result) == minimal_handler.traj_size()
 
     def test_identified_returns_bool(self, minimal_handler):
-        """``identified()`` is True only when LIReC succeeded.
+        """``identified()`` is a Python bool.
 
-        We force a p/q computation first, then assert the flag is a bool —
-        the exact value depends on whether LIReC can identify ``e`` from the
-        small ``1F1`` trajectory, which is environment-dependent.
+        The exact value depends on whether LIReC can identify ``e`` from
+        the small ``1F1`` trajectory and whether the path converges, which
+        is environment-dependent — so we only assert the type.  Calling
+        ``identified()`` before any other attribute must work because it
+        drives ``delta()`` (and hence ``_pq_vector`` and the convergence
+        check) itself.
         """
-        minimal_handler.p_vector()
         assert isinstance(minimal_handler.identified(), bool)
+
+    def test_identified_iff_finite_delta(self, minimal_handler):
+        """``identified()`` ↔ ``math.isfinite(delta())`` — the design invariant.
+
+        A trajectory is identified iff it (a) found p/q, (b) converges to
+        the constant, and (c) yields a well-defined delta.  All three
+        collapse to ``delta != -inf``.
+        """
+        import math
+        assert minimal_handler.identified() == math.isfinite(minimal_handler.delta())
+
+    def test_identified_implies_pq_exists(self, minimal_handler):
+        """When ``identified`` is True, ``p_vector`` and ``q_vector`` are populated."""
+        if minimal_handler.identified():
+            assert minimal_handler.p_vector() is not None
+            assert minimal_handler.q_vector() is not None
+
+    def test_identified_false_without_constant(self, simple_cmf, symbols):
+        """A handler built without a constant cannot identify — returns False."""
+        traj = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        handler = TrajectoryAttributesHandler.from_cmf(
+            simple_cmf, traj, start, constant=None,
+        )
+        assert handler.identified() is False
 
     def test_from_cmf_produces_handler(self, simple_cmf, symbols):
         traj = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
@@ -474,8 +551,9 @@ class TestBuildTrajectoryDto:
         assert abs(float(dto.limit_value)) < 1e15
         assert dto.extended_metrics == {}   # workers haven't run yet
 
-    def test_p_and_q_vectors_are_tuples(self, minimal_handler, symbols):
-        """``build_trajectory_dto`` stores p/q as tuples in the DTO."""
+    def test_p_and_q_vectors_are_tuples_or_none(self, minimal_handler, symbols):
+        """``build_trajectory_dto`` stores p/q as tuples — or ``None`` when
+        identification failed (mirrors ``handler.p_vector()``)."""
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         dto = build_trajectory_dto(
@@ -483,12 +561,14 @@ class TestBuildTrajectoryDto:
             cmf_id="c", shard_id="s", cmf_name="c",
             shard_encoding_str="enc", start=start, direction=direction,
         )
-        # DTO wraps whatever p/q the handler returned (lists) into tuples
-        # via TrajectoryDTO.__post_init__.
-        assert isinstance(dto.p_vector, tuple)
-        assert isinstance(dto.q_vector, tuple)
-        assert len(dto.p_vector) == minimal_handler.traj_size()
-        assert len(dto.q_vector) == minimal_handler.traj_size()
+        if dto.p_vector is None:
+            assert dto.q_vector is None
+            assert dto.identified is False
+        else:
+            assert isinstance(dto.p_vector, tuple)
+            assert isinstance(dto.q_vector, tuple)
+            assert len(dto.p_vector) == minimal_handler.traj_size()
+            assert len(dto.q_vector) == minimal_handler.traj_size()
 
 
 # ---------------------------------------------------------------------------
@@ -715,16 +795,21 @@ class TestJsonlRoundTrip:
 class TestAttributeRegistry:
 
     def test_known_attributes_are_registered(self):
-        """All names referenced by default configs must exist in the registry.
-
-        ``identified`` is intentionally absent — it's a Tier-1 ``TrajectoryDTO``
-        field populated directly by ``build_trajectory_dto``, not an
-        extended_metrics attribute computed via the registry.
-        """
+        """Every public handler method that yields JSON-safe output must
+        be reachable through the registry — keeps the registry in sync
+        with :class:`TrajectoryAttributesHandler`'s public surface."""
         expected = {
-            "delta", "limit", "order", "formula",
-            "eigenvalues", "spectral_gap", "gcd_slope", "convergence_class",
-            "asymptotics", "kamidelta",
+            # Tier-1 — core scalars / vectors.
+            "delta", "limit", "order", "formula", "identified",
+            "p_vector", "q_vector", "traj_size", "limit_rational",
+            # Tier-2 — heavier numerical / spectral attributes.
+            "eigenvalues", "eigenvalue_errors", "spectral_gap", "gcd_slope",
+            "convergence_class", "coeff_degrees",
+            "asymptotic_digits_per_step", "precision_at",
+            "companion_coboundary_rank",
+            # Tier-3 — symbolic / expensive attributes.
+            "asymptotics", "kamidelta", "delta_sequence", "digits_per_step",
+            "relation", "recurrence_coeffs",
         }
         assert expected <= set(ATTRIBUTE_REGISTRY)
 
@@ -738,17 +823,38 @@ class TestAttributeRegistry:
         assert isinstance(value, float)
         assert np.isfinite(value) or value == float("-inf")
 
-    def test_compute_attribute_identified_is_unregistered(self, minimal_handler):
-        """``identified`` is a Tier-1 DTO field, not a registry-computed attr.
+    def test_compute_attribute_identified_is_bool(self, minimal_handler):
+        """``identified`` resolves through the registry to a Python bool.
 
-        Asking the registry for it must raise — the build flow uses
-        ``handler.identified()`` directly.
+        Because ``identified`` is derived from ``_pq_vector()`` (rather
+        than tracked as a separate flag), the registry path produces the
+        same result regardless of when it's called relative to other
+        attributes.
         """
-        with pytest.raises(KeyError, match="identified"):
-            compute_attribute(minimal_handler, "identified")
-        # The handler method itself still returns a bool.
-        minimal_handler.p_vector()  # force the p/q identification path
-        assert isinstance(minimal_handler.identified(), bool)
+        value = compute_attribute(minimal_handler, "identified")
+        assert isinstance(value, bool)
+
+    def test_identified_independent_of_call_order(self, simple_cmf, simple_shard, symbols):
+        """Asking for ``identified`` before any other attribute must match
+        asking for it after.
+
+        Builds two fresh handlers from the same fixture: computes
+        ``identified`` first on one (registry-driven, before delta/p_vector),
+        and last on the other (after ``p_vector`` ran the identification
+        path).  Both must agree — that's the order-independence the
+        derived-from-``_pq_vector`` design guarantees.
+        """
+        traj = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        kwargs = dict(constant=e.value_sympy, searchable=simple_shard)
+        h_first = TrajectoryAttributesHandler.from_cmf(simple_cmf, traj, start, **kwargs)
+        h_last = TrajectoryAttributesHandler.from_cmf(simple_cmf, traj, start, **kwargs)
+
+        ident_first = compute_attribute(h_first, "identified")  # before anything else
+        h_last.p_vector()
+        ident_last = compute_attribute(h_last, "identified")
+
+        assert ident_first == ident_last
 
     def test_compute_attributes_collects_dict(self, minimal_handler):
         out = compute_attributes(minimal_handler, ("delta", "order", "formula"))
@@ -789,12 +895,216 @@ class TestAttributeRegistry:
     def test_registry_outputs_are_json_serializable(self, minimal_handler):
         """Every default-registered attribute must yield JSON-safe output.
 
-        ``identified`` is excluded — see ``test_known_attributes_are_registered``.
+        Round-trips every entry through ``json.dumps`` — catches any new
+        registry entry whose serializer leaks SymPy / mpmath / numpy.
+        Per-attribute failures (e.g. expensive ones unable to compute on
+        a degenerate fixture) are tolerated; what matters is that the
+        returned value is JSON-safe when computation succeeds.
         """
-        for name in ("delta", "limit", "order", "formula", "spectral_gap"):
-            value = compute_attribute(minimal_handler, name)
-            # round-trip through json.dumps to confirm
+        for name in ATTRIBUTE_REGISTRY:
+            try:
+                value = compute_attribute(minimal_handler, name)
+            except Exception:
+                continue  # computation failure is orthogonal to serialization
             json.dumps(value)
+
+
+# ---------------------------------------------------------------------------
+# 9b. Conditional attribute computation — predicates and (name, predicate) specs
+# ---------------------------------------------------------------------------
+
+class TestConditionalAttributes:
+    """``compute_attributes`` accepts mixed string / ``(name, predicate)``
+    specs.  Predicates may be callables or string keys into PREDICATES.
+    """
+
+    def test_attribute_name_extracts_from_string_and_tuple(self):
+        """``attribute_name`` returns the bare name for both spec forms."""
+        assert attribute_name("delta") == "delta"
+        assert attribute_name(("eigenvalues", "if_identified")) == "eigenvalues"
+        assert attribute_name(("eigenvalues", lambda _h: True)) == "eigenvalues"
+
+    def test_if_identified_predicate_registered(self):
+        """The default ``if_identified`` predicate exists and tracks the handler."""
+        assert "if_identified" in PREDICATES
+
+    def test_unknown_predicate_name_raises(self, minimal_handler):
+        """A misspelled predicate name must fail loudly (matches the
+        attribute-name policy)."""
+        with pytest.raises(KeyError, match="no_such_predicate"):
+            compute_attributes(
+                minimal_handler,
+                (("eigenvalues", "no_such_predicate"),),
+            )
+
+    def test_predicate_true_runs_attribute(self, minimal_handler):
+        """A truthy predicate produces the attribute in the output dict."""
+        out = compute_attributes(
+            minimal_handler,
+            (("order", lambda _h: True),),
+        )
+        assert "order" in out
+        assert isinstance(out["order"], int)
+
+    def test_predicate_false_skips_attribute(self, minimal_handler):
+        """A falsy predicate omits the attribute entirely — no value, no
+        ``<name>_error``: the signal is "we decided not to compute"."""
+        out = compute_attributes(
+            minimal_handler,
+            (("order", lambda _h: False),),
+        )
+        assert out == {}
+
+    def test_mixed_spec_list(self, minimal_handler):
+        """Plain strings and tuples can coexist in one specs list."""
+        out = compute_attributes(
+            minimal_handler,
+            (
+                "order",
+                ("formula", lambda _h: True),
+                ("delta", lambda _h: False),
+            ),
+        )
+        assert "order" in out
+        assert "formula" in out
+        assert "delta" not in out
+
+    def test_if_identified_gates_on_handler(self, minimal_handler):
+        """The named ``if_identified`` predicate gates on the handler's
+        own identification status.  Whichever way it evaluates, the
+        attribute presence in the output must agree."""
+        out = compute_attributes(
+            minimal_handler,
+            (("order", "if_identified"),),
+        )
+        assert ("order" in out) == minimal_handler.identified()
+
+    def test_register_predicate_then_use(self, minimal_handler):
+        """User-registered named predicates are honoured by ``compute_attributes``."""
+        register_predicate("always_yes", lambda _h: True)
+        try:
+            out = compute_attributes(
+                minimal_handler,
+                (("order", "always_yes"),),
+            )
+            assert "order" in out
+        finally:
+            del PREDICATES["always_yes"]
+
+    # ------------------------------------------------------------------
+    # Handler-only complex predicate (no shard context needed)
+    # ------------------------------------------------------------------
+
+    def test_if_has_degree_2_built_in(self, minimal_handler):
+        """``if_has_degree_2`` is shipped and tracks ``coeff_degrees()``."""
+        assert "if_has_degree_2" in PREDICATES
+        try:
+            expected = 2 in minimal_handler.coeff_degrees()
+        except Exception:
+            pytest.skip("coeff_degrees() unavailable on the fixture")
+        out = compute_attributes(
+            minimal_handler,
+            (("order", "if_has_degree_2"),),
+        )
+        assert ("order" in out) == expected
+
+    def test_inline_handler_only_complex_predicate(self, minimal_handler):
+        """A user-supplied lambda answering a structural question works the
+        same as a named predicate.  Demonstrates the "polynomial coefficient
+        of degree k" idiom for arbitrary ``k``."""
+        try:
+            degrees = minimal_handler.coeff_degrees()
+        except Exception:
+            pytest.skip("coeff_degrees() unavailable on the fixture")
+        expected = 1 in degrees
+        out = compute_attributes(
+            minimal_handler,
+            (("order", lambda h: 1 in h.coeff_degrees()),),
+        )
+        assert ("order" in out) == expected
+
+    # ------------------------------------------------------------------
+    # Context-aware (shard-level) predicate
+    # ------------------------------------------------------------------
+
+    def test_context_aware_predicate_uses_two_args(self, minimal_handler):
+        """Predicates with arity 2 receive ``(handler, context)``.  Single-arg
+        predicates registered in the same list still take only the handler —
+        proving the dispatch is per-predicate, not per-call."""
+        seen = {}
+        def gate(h, ctx):
+            seen["h"] = h
+            seen["ctx"] = ctx
+            return ctx.get("go", False)
+
+        out = compute_attributes(
+            minimal_handler,
+            (("order", gate),),
+            context={"go": True, "marker": "ok"},
+        )
+        assert "order" in out
+        assert seen["h"] is minimal_handler
+        assert seen["ctx"] == {"go": True, "marker": "ok"}
+
+    def test_context_aware_predicate_false_skips(self, minimal_handler):
+        """A falsy two-arg predicate omits the attribute."""
+        out = compute_attributes(
+            minimal_handler,
+            (("order", lambda _h, ctx: ctx.get("go", False)),),
+            context={"go": False},
+        )
+        assert out == {}
+
+    def test_if_top_n_delta_named_predicate(self, minimal_handler):
+        """``if_top_n_delta`` is the shipped shard-level predicate; verifies
+        the canonical context shape ``{trajectory_id, top_n_ids}``."""
+        assert "if_top_n_delta" in PREDICATES
+        ctx_in = {"trajectory_id": "winner", "top_n_ids": {"winner", "other"}}
+        out_in = compute_attributes(
+            minimal_handler,
+            (("order", "if_top_n_delta"),),
+            context=ctx_in,
+        )
+        assert "order" in out_in
+
+        ctx_out = {"trajectory_id": "loser", "top_n_ids": {"winner"}}
+        out_out = compute_attributes(
+            minimal_handler,
+            (("order", "if_top_n_delta"),),
+            context=ctx_out,
+        )
+        assert "order" not in out_out
+
+    def test_top_n_pattern_end_to_end(self, minimal_handler):
+        """End-to-end exercise of the "compute extras for top-N" idiom.
+
+        Models a tiny shard with three pre-computed records; selects the
+        top-2 by delta; runs ``compute_attributes`` once per record with a
+        context built from that selection.  Only the top-2 should get the
+        gated attribute computed.
+        """
+        records = [
+            {"trajectory_id": "t1", "delta_estimate": 0.3},
+            {"trajectory_id": "t2", "delta_estimate": 1.7},
+            {"trajectory_id": "t3", "delta_estimate": 2.5},
+        ]
+        top_n_ids = {
+            r["trajectory_id"]
+            for r in sorted(records, key=lambda r: -r["delta_estimate"])[:2]
+        }
+        # Reusing the same handler is fine — the predicate only cares about
+        # the trajectory_id we thread through the context.
+        results = {}
+        for r in records:
+            ctx = {"trajectory_id": r["trajectory_id"], "top_n_ids": top_n_ids}
+            results[r["trajectory_id"]] = compute_attributes(
+                minimal_handler,
+                ("delta_estimate" not in r and "delta" or "order", ("formula", "if_top_n_delta")),
+                context=ctx,
+            )
+        assert "formula" in results["t2"]
+        assert "formula" in results["t3"]
+        assert "formula" not in results["t1"]
 
 
 # ---------------------------------------------------------------------------

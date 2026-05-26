@@ -18,7 +18,9 @@ class PostProcessConfig(Configurable):
     """
 
     TIER3_ATTRIBUTES: Tuple[str, ...] = field(
-        default=(),
+        default=(
+            "precision_at", "delta_sequence", "digits_per_step", "asymptotic_digits_per_step"
+        ),
         metadata={
             "description": (
                 "Expensive symbolic attributes (e.g. 'asymptotics', 'kamidelta') "
