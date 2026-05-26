@@ -30,7 +30,7 @@ empty — no JSONL is read, no subprocesses created.
 """
 
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import sympy as sp
 from ramanujantools import Position
@@ -49,7 +49,10 @@ from dreamer.utils.schemes.post_process_scheme import PostProcessModScheme
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.storage import Formats, Importer
 from dreamer.utils.storage.attribute_registry import compute_attributes
-from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
+from dreamer.utils.storage.trajectory_attributes import (
+    TrajectoryAttributesHandler,
+    derive_cmf_and_shard_ids,
+)
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 
 post_process_config = config.post_process
@@ -117,6 +120,9 @@ class Tier3PostProcessModV1(PostProcessModScheme):
             version='1.0.0',
         )
         self._cmf_lookup: Dict[str, object] = self._build_cmf_lookup(priorities)
+        self._shard_lookup: Dict[str, Tuple[Searchable, Constant]] = (
+            self._build_shard_lookup(priorities)
+        )
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -233,10 +239,14 @@ class Tier3PostProcessModV1(PostProcessModScheme):
                 ).log()
                 continue
 
+            shard_entry = self._shard_lookup.get(record.get("shard_id"))
+            shard, constant = (shard_entry if shard_entry is not None else (None, None))
             try:
                 start, direction = self._reconstruct_positions(cmf, record)
                 handler = TrajectoryAttributesHandler.from_cmf(
                     cmf, direction, start,
+                    constant=constant.value_sympy if constant is not None else None,
+                    searchable=shard,
                 )
             except Exception as e:
                 Logger(
@@ -273,6 +283,26 @@ class Tier3PostProcessModV1(PostProcessModScheme):
             return lookup
 
         return Tier3PostProcessModV1._load_cmfs_from_disk()
+
+    @staticmethod
+    def _build_shard_lookup(
+        priorities: Dict[Constant, List[Searchable]],
+    ) -> Dict[str, Tuple[Searchable, Constant]]:
+        """Return ``{shard_id: (shard, constant)}`` from in-memory priorities.
+
+        Empty when post-process runs standalone (no priorities); callers must
+        tolerate a missing entry and fall back to ``constant=None,
+        searchable=None`` (acceptable since Tier-3 attrs don't require them).
+        """
+        lookup: Dict[str, Tuple[Searchable, Constant]] = {}
+        for constant, shards in priorities.items():
+            for shard in shards:
+                try:
+                    _, sid, _ = derive_cmf_and_shard_ids(shard)
+                except Exception:
+                    continue
+                lookup.setdefault(sid, (shard, constant))
+        return lookup
 
     @staticmethod
     def _load_cmfs_from_disk() -> Dict[str, object]:

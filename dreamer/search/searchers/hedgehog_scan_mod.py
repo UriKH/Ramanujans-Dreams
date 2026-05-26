@@ -205,6 +205,8 @@ class SearcherModV1(SearcherModScheme):
                 try:
                     handler = TrajectoryAttributesHandler.from_cmf(
                         shard.cmf, traj, start,
+                        constant=shard.const.value_sympy,
+                        searchable=shard,
                     )
                 except Exception as e:
                     Logger(
@@ -227,6 +229,8 @@ class SearcherModV1(SearcherModScheme):
             try:
                 handler = TrajectoryAttributesHandler.from_cmf(
                     shard.cmf, traj, start,
+                    constant=shard.const.value_sympy,
+                    searchable=shard,
                 )
                 dto = build_trajectory_dto(
                     handler,

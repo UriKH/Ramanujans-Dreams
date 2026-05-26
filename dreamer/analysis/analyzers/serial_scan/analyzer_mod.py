@@ -208,6 +208,8 @@ class AnalyzerModV1(AnalyzerModScheme):
                     try:
                         handler = TrajectoryAttributesHandler.from_cmf(
                             shard.cmf, traj, start,
+                            constant=constant.value_sympy,
+                            searchable=shard,
                         )
                         dto = build_trajectory_dto(
                             handler,

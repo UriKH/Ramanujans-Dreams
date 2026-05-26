@@ -24,7 +24,6 @@ from dreamer.extraction.shard import Shard
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.storage.dtos import CmfDTO, CmfFamilyDTO, ShardDTO
 from dreamer.utils.storage.trajectory_attributes import (
-    _serialize_inequalities,
     _stable_id,
     derive_cmf_and_shard_ids,
 )

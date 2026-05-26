@@ -118,11 +118,18 @@ class ShardExtractor(ExtractionScheme):
         """
         return list(self.cmf_data.cmf.matrices.keys())
 
-    def _extract_cmf_hps(self) -> Set[Hyperplane]:
+    def _extract_cmf_hps(self) -> List[Hyperplane]:
         """
         Compute the hyperplanes of the CMF - zeros of the characteristic polynomial of each matrix and the poles of each
          matrix entry.
-        :return: A set of all filtered hyperplanes (i.e., hyperplanes with respect to the shift)
+
+        The result is **sorted by ``str(hp.expr)``** so the ordering is
+        deterministic across runs: ``Hyperplane`` already canonicalises
+        its expression in ``__post_init__`` (LCM denominators, GCD coeffs,
+        leading-coefficient sign), so the sort key is stable.  A canonical
+        order is what lets ``Shard.encoding`` (the ±1 sign vector) be a
+        meaningful, hash-stable label for a shard.
+        :return: A canonically-ordered list of filtered hyperplanes.
         """
         hps = set()
         symbols = list(self.cmf_data.cmf.matrices.keys())
@@ -147,11 +154,13 @@ class ShardExtractor(ExtractionScheme):
                     poles.add(Hyperplane(lhs - rhs, symbols))
             hps.update(poles)
 
-        # compute the relevant hyperplanes with respect to the shift
-        filtered_hps = set()
-        for hp in hps:
-            if hp.apply_shift(self.cmf_data.shift).is_in_integer_shift():
-                filtered_hps.add(hp)
+        # compute the relevant hyperplanes with respect to the shift, then
+        # sort to give Shard.encoding[i] a stable meaning.
+        filtered_hps = [
+            hp for hp in hps
+            if hp.apply_shift(self.cmf_data.shift).is_in_integer_shift()
+        ]
+        filtered_hps.sort(key=lambda hp: str(hp.expr))
         return filtered_hps
 
     def extract(self, call_number=None) -> List[Shard]:

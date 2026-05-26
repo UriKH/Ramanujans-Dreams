@@ -33,7 +33,12 @@ class Formatter(ABC):
         cmf_name_segments = cmf_name_segments if cmf_name_segments is not None else [[self.__class__.__name__]]
         cmf_name_segments: List[List[Union[str, sp.Expr, int]]]
 
-        cmf_name_segments += [shifts, [self.const]]
+        # The constant is intentionally *not* appended to the name: a CMF
+        # may later be searched for additional constants, and we want the
+        # cmf_id (= cmf_name) to remain stable across those re-runs.  The
+        # parent constant directory (EXPORT_CMFS/<const>/...) still
+        # disambiguates files by constant.
+        cmf_name_segments += [shifts]
 
         name_segments_concat = []
 

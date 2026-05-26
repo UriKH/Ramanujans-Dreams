@@ -47,7 +47,6 @@ ATTRIBUTE_REGISTRY: Dict[str, AttributeComputer] = {
     # Tier-1 — core scalars (always computed, main thread, free from the walk).
     "delta":             lambda h: float(h.delta()),
     "limit":             lambda h: float(h.limit()),
-    "identified":        lambda h: bool(h.identified()),
     "order":             lambda h: int(h.order()),
     "formula":           lambda h: h.formula_str(),
 

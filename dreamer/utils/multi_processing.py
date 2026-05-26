@@ -108,26 +108,45 @@ def _run_writer_loop(
     writer_fn: Callable[[Any, Any], None],
     output_path: str,
     config_overrides: dict,
+    batch_size: int,
+    flush_timeout: float,
 ) -> None:
     """Subprocess entry point: drain *results_queue* and write each item.
 
-    Opens *output_path* in append mode once, calls ``writer_fn(item, fout)``
-    for every item, flushes after each write, and exits cleanly on the
+    Opens *output_path* in append mode once and calls ``writer_fn(item, fout)``
+    for every item.  Flushes are batched to reduce fsync overhead — an
+    explicit ``flush`` is issued every *batch_size* records, or after
+    *flush_timeout* seconds of queue inactivity (whichever comes first),
+    and one final flush always runs before the writer exits on the
     ``None`` sentinel.  Being the sole writer eliminates file-lock races.
     """
     _init_worker(config_overrides)
     Logger("Writer started.", Logger.Levels.debug).log()
 
+    pending = 0
     with open(output_path, "a") as fout:
         while True:
-            item = results_queue.get()
+            try:
+                item = results_queue.get(timeout=flush_timeout)
+            except queue.Empty:
+                # Idle period — flush whatever we've buffered so tail data
+                # is durable even if the producer is slow.
+                if pending:
+                    fout.flush()
+                    pending = 0
+                continue
             if item is None:
                 Logger("Writer stopping.", Logger.Levels.debug).log()
                 break
             try:
                 writer_fn(item, fout)
+                pending += 1
             except Exception as e:
                 Logger(f"Writer error: {e}", Logger.Levels.warning).log()
+            if pending >= batch_size:
+                fout.flush()
+                pending = 0
+        if pending:
             fout.flush()
 
 
@@ -207,13 +226,25 @@ def worker_pool(
     if parallel is None:
         parallel = worker_fn is not None
 
+    batch_size = int(config.system.WRITER_BATCH_SIZE)
+    flush_timeout = float(config.system.WRITER_FLUSH_TIMEOUT_SECONDS)
+
     if not parallel:
         # --- Direct mode: apply worker_fn inline on the main thread -----
+        # Same batch policy as MPMC mode; the file is closed (and therefore
+        # flushed) automatically when the ``with`` block exits, so we don't
+        # need a tail-timer here.
         with open(output_path, "a") as fout:
+            pending = 0
+
             def push(item: Any) -> None:
+                nonlocal pending
                 result = effective_worker_fn(item)
                 writer_fn(result, fout)
-                fout.flush()
+                pending += 1
+                if pending >= batch_size:
+                    fout.flush()
+                    pending = 0
             yield push
         return
 
@@ -233,7 +264,10 @@ def worker_pool(
     ]
     writer = mp.Process(
         target=_run_writer_loop,
-        args=(results_queue, writer_fn, output_path, config_overrides),
+        args=(
+            results_queue, writer_fn, output_path, config_overrides,
+            batch_size, flush_timeout,
+        ),
     )
 
     for w in workers:

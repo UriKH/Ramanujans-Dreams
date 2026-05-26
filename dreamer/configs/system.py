@@ -72,6 +72,26 @@ class SystemConfig(Configurable):
         default=4,
         metadata={"description": "Number of background worker processes that compute Tier-2 trajectory attributes during search."},
     )
+    WRITER_BATCH_SIZE: int = field(
+        default=100,
+        metadata={
+            "description": (
+                "Number of records the JSONL writer accumulates before issuing "
+                "an explicit fsync. Larger values reduce I/O overhead but increase "
+                "the worst-case loss window on a crash."
+            )
+        },
+    )
+    WRITER_FLUSH_TIMEOUT_SECONDS: float = field(
+        default=5.0,
+        metadata={
+            "description": (
+                "Seconds of queue inactivity that trigger a flush even when the "
+                "batch is not full. Bounds tail-of-run latency before data is "
+                "durable on disk."
+            )
+        },
+    )
     PATH_TO_SEARCHABLES: str = field(
         default='searchables.tempdir',
         metadata={"description": "Default import directory for precomputed searchable shards."},

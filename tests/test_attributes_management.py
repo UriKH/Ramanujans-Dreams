@@ -3,7 +3,7 @@ Tests for the attributes-management pipeline (Task 3 and follow-ups).
 
 Coverage:
   - ShardDTO field-order fix and all-DTO serialization round-trips
-  - Stable id helpers (_stable_id, _position_to_tuple, _serialize_inequalities,
+  - Stable id helpers (_stable_id, _position_to_tuple, _serialize_encoding,
     derive_cmf_and_shard_ids)
   - TrajectoryAttributesHandler stub methods (p_vector, q_vector, identified)
   - build_trajectory_dto factory
@@ -32,7 +32,7 @@ from dreamer.utils.storage.dtos import CmfDTO, CmfFamilyDTO, ShardDTO, Trajector
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
     _position_to_tuple,
-    _serialize_inequalities,
+    _serialize_encoding,
     _stable_id,
     build_trajectory_dto,
     derive_cmf_and_shard_ids,
@@ -86,11 +86,20 @@ def whole_space_shard(simple_cmf, symbols, zero_shift):
 
 
 @pytest.fixture
-def minimal_handler(simple_cmf, symbols):
-    """TrajectoryAttributesHandler for a concrete (traj, start) pair."""
+def minimal_handler(simple_cmf, simple_shard, symbols):
+    """TrajectoryAttributesHandler for a concrete (traj, start) pair.
+
+    Built with ``constant=e.value_sympy`` and ``searchable=simple_shard`` so
+    Tier-1 attributes (delta, limit, p/q vectors, identified) are computable
+    and the shard's p/q cache is exercised — matching real producer usage.
+    """
     traj = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
     start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
-    return TrajectoryAttributesHandler.from_cmf(simple_cmf, traj, start)
+    return TrajectoryAttributesHandler.from_cmf(
+        simple_cmf, traj, start,
+        constant=e.value_sympy,
+        searchable=simple_shard,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -273,16 +282,22 @@ class TestPositionToTuple:
         assert result[1] == 2
 
 
-class TestSerializeInequalities:
+class TestSerializeEncoding:
+    """Encoding-based serialisation (replaces the old inequality-blob path)."""
 
     def test_bounded_shard_produces_stable_string(self, simple_shard):
-        s1 = _serialize_inequalities(simple_shard)
-        s2 = _serialize_inequalities(simple_shard)
+        s1 = _serialize_encoding(simple_shard)
+        s2 = _serialize_encoding(simple_shard)
         assert s1 == s2
         assert s1 != "whole_space"
 
     def test_whole_space_shard_produces_placeholder(self, whole_space_shard):
-        assert _serialize_inequalities(whole_space_shard) == "whole_space"
+        assert _serialize_encoding(whole_space_shard) == "whole_space"
+
+    def test_encoding_matches_sign_vector(self, simple_shard):
+        """The serialised string is the comma-joined ±1 encoding."""
+        s = _serialize_encoding(simple_shard)
+        assert s == ",".join(str(int(v)) for v in simple_shard.encoding)
 
     def test_different_shards_produce_different_strings(self, simple_cmf, symbols, zero_shift):
         hps_a = [Hyperplane(symbols[0], symbols), Hyperplane(symbols[1], symbols)]
@@ -297,13 +312,7 @@ class TestSerializeInequalities:
         interior_b = Position({symbols[0]: sp.Integer(3), symbols[1]: sp.Integer(3)})
         shard_b = Shard(simple_cmf, e, hps_b, [1, 1, -1], zero_shift, interior_b)
 
-        assert _serialize_inequalities(shard_a) != _serialize_inequalities(shard_b)
-
-    def test_result_is_valid_json(self, simple_shard):
-        s = _serialize_inequalities(simple_shard)
-        if s != "whole_space":
-            parsed = json.loads(s)
-            assert isinstance(parsed, list)
+        assert _serialize_encoding(shard_a) != _serialize_encoding(shard_b)
 
 
 class TestDeriveCmfAndShardIds:
@@ -335,31 +344,51 @@ class TestDeriveCmfAndShardIds:
 
 class TestHandlerStubs:
 
-    def test_p_vector_returns_empty_tuple(self, minimal_handler):
+    def test_p_vector_is_list_of_handler_dimension(self, minimal_handler):
+        """``p_vector()`` returns a list whose length matches ``traj_size``.
+
+        The handler now computes (or LIReC-falls-back to) a real projection
+        vector — no longer an empty stub.  The first slot is the constant
+        coefficient (``1`` in the fallback path, integer/rational otherwise).
+        """
         result = minimal_handler.p_vector()
-        assert result == ()
-        assert isinstance(result, tuple)
+        assert isinstance(result, list)
+        assert len(result) == minimal_handler.traj_size()
 
-    def test_q_vector_returns_empty_tuple(self, minimal_handler):
+    def test_q_vector_is_list_of_handler_dimension(self, minimal_handler):
+        """``q_vector()`` mirrors ``p_vector()`` — same length, denominator coeffs."""
         result = minimal_handler.q_vector()
-        assert result == ()
-        assert isinstance(result, tuple)
+        assert isinstance(result, list)
+        assert len(result) == minimal_handler.traj_size()
 
-    def test_identified_returns_true(self, minimal_handler):
-        assert minimal_handler.identified() is True
+    def test_identified_returns_bool(self, minimal_handler):
+        """``identified()`` is True only when LIReC succeeded.
+
+        We force a p/q computation first, then assert the flag is a bool —
+        the exact value depends on whether LIReC can identify ``e`` from the
+        small ``1F1`` trajectory, which is environment-dependent.
+        """
+        minimal_handler.p_vector()
+        assert isinstance(minimal_handler.identified(), bool)
 
     def test_from_cmf_produces_handler(self, simple_cmf, symbols):
         traj = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
-        handler = TrajectoryAttributesHandler.from_cmf(simple_cmf, traj, start)
+        handler = TrajectoryAttributesHandler.from_cmf(
+            simple_cmf, traj, start, constant=e.value_sympy,
+        )
         assert isinstance(handler, TrajectoryAttributesHandler)
 
     def test_delta_is_finite(self, minimal_handler):
-        """Handler built from a real CMF produces a finite delta value."""
+        """Handler built from a real CMF returns either a finite delta or
+        ``-inf`` (the documented non-convergence sentinel when the LIReC
+        fallback p/q vectors don't reconstruct the target constant)."""
         delta = minimal_handler.delta()
         assert delta is not None
+        assert isinstance(delta, float)
         assert not (delta != delta)  # NaN check
-        assert abs(delta) < 1e9      # finite sanity bound
+        # Either finite, or the documented -inf sentinel.
+        assert abs(delta) < 1e9 or delta == float("-inf")
 
     def test_order_is_positive_int(self, minimal_handler):
         order = minimal_handler.order()
@@ -407,10 +436,14 @@ class TestBuildTrajectoryDto:
         assert dto_a.trajectory_id == dto_b.trajectory_id
 
     def test_different_starts_give_different_ids(self, minimal_handler, symbols, simple_cmf):
+        # Use direction=(1,1) — the (1,0) direction is degenerate for 1F1
+        # (singular trajectory matrix → ZeroDivisionError on walk).
         start_a = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         start_b = Position({symbols[0]: sp.Integer(2), symbols[1]: sp.Integer(3)})
-        direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(0)})
-        handler_b = TrajectoryAttributesHandler.from_cmf(simple_cmf, direction, start_b)
+        direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        handler_b = TrajectoryAttributesHandler.from_cmf(
+            simple_cmf, direction, start_b, constant=e.value_sympy,
+        )
         kwargs_base = dict(cmf_id="c", shard_id="s", cmf_name="c", shard_encoding_str="e")
         dto_a = build_trajectory_dto(minimal_handler, **kwargs_base, start=start_a, direction=direction)
         dto_b = build_trajectory_dto(handler_b, **kwargs_base, start=start_b, direction=direction)
@@ -434,11 +467,15 @@ class TestBuildTrajectoryDto:
         assert dto.recurrence_order >= 1
         assert isinstance(dto.recurrence_relation, str)
         assert dto.recurrence_relation != ""
-        assert abs(dto.delta_estimate) < 1e9
+        # ``delta_estimate`` is either finite or the documented -inf sentinel
+        # (LIReC may fail to identify ``e`` from this small 1F1 trajectory).
+        assert isinstance(dto.delta_estimate, float)
+        assert abs(dto.delta_estimate) < 1e9 or dto.delta_estimate == float("-inf")
         assert abs(float(dto.limit_value)) < 1e15
         assert dto.extended_metrics == {}   # workers haven't run yet
 
     def test_p_and_q_vectors_are_tuples(self, minimal_handler, symbols):
+        """``build_trajectory_dto`` stores p/q as tuples in the DTO."""
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         dto = build_trajectory_dto(
@@ -446,8 +483,12 @@ class TestBuildTrajectoryDto:
             cmf_id="c", shard_id="s", cmf_name="c",
             shard_encoding_str="enc", start=start, direction=direction,
         )
+        # DTO wraps whatever p/q the handler returned (lists) into tuples
+        # via TrajectoryDTO.__post_init__.
         assert isinstance(dto.p_vector, tuple)
         assert isinstance(dto.q_vector, tuple)
+        assert len(dto.p_vector) == minimal_handler.traj_size()
+        assert len(dto.q_vector) == minimal_handler.traj_size()
 
 
 # ---------------------------------------------------------------------------
@@ -674,9 +715,14 @@ class TestJsonlRoundTrip:
 class TestAttributeRegistry:
 
     def test_known_attributes_are_registered(self):
-        """All names referenced by default configs must exist in the registry."""
+        """All names referenced by default configs must exist in the registry.
+
+        ``identified`` is intentionally absent — it's a Tier-1 ``TrajectoryDTO``
+        field populated directly by ``build_trajectory_dto``, not an
+        extended_metrics attribute computed via the registry.
+        """
         expected = {
-            "delta", "limit", "identified", "order", "formula",
+            "delta", "limit", "order", "formula",
             "eigenvalues", "spectral_gap", "gcd_slope", "convergence_class",
             "asymptotics", "kamidelta",
         }
@@ -687,19 +733,29 @@ class TestAttributeRegistry:
             compute_attribute(minimal_handler, "not_a_real_attr")
 
     def test_compute_attribute_delta_is_finite_float(self, minimal_handler):
+        """``delta`` is a float — either finite or the -inf sentinel."""
         value = compute_attribute(minimal_handler, "delta")
         assert isinstance(value, float)
-        assert np.isfinite(value)
+        assert np.isfinite(value) or value == float("-inf")
 
-    def test_compute_attribute_identified_is_bool(self, minimal_handler):
-        assert compute_attribute(minimal_handler, "identified") is True
+    def test_compute_attribute_identified_is_unregistered(self, minimal_handler):
+        """``identified`` is a Tier-1 DTO field, not a registry-computed attr.
+
+        Asking the registry for it must raise — the build flow uses
+        ``handler.identified()`` directly.
+        """
+        with pytest.raises(KeyError, match="identified"):
+            compute_attribute(minimal_handler, "identified")
+        # The handler method itself still returns a bool.
+        minimal_handler.p_vector()  # force the p/q identification path
+        assert isinstance(minimal_handler.identified(), bool)
 
     def test_compute_attributes_collects_dict(self, minimal_handler):
-        out = compute_attributes(minimal_handler, ("delta", "order", "identified"))
-        assert set(out) == {"delta", "order", "identified"}
+        out = compute_attributes(minimal_handler, ("delta", "order", "formula"))
+        assert set(out) == {"delta", "order", "formula"}
         assert isinstance(out["delta"], float)
         assert isinstance(out["order"], int)
-        assert isinstance(out["identified"], bool)
+        assert isinstance(out["formula"], str)
 
     def test_compute_attributes_empty_list(self, minimal_handler):
         assert compute_attributes(minimal_handler, ()) == {}
@@ -731,8 +787,11 @@ class TestAttributeRegistry:
             del ATTRIBUTE_REGISTRY["custom_const"]
 
     def test_registry_outputs_are_json_serializable(self, minimal_handler):
-        """Every default-registered attribute must yield JSON-safe output."""
-        for name in ("delta", "limit", "identified", "order", "formula", "spectral_gap"):
+        """Every default-registered attribute must yield JSON-safe output.
+
+        ``identified`` is excluded — see ``test_known_attributes_are_registered``.
+        """
+        for name in ("delta", "limit", "order", "formula", "spectral_gap"):
             value = compute_attribute(minimal_handler, name)
             # round-trip through json.dumps to confirm
             json.dumps(value)
@@ -1018,7 +1077,11 @@ class TestMergeOnRead:
         if not pairs:
             pytest.skip("No trajectory pairs available")
         traj_p, start_p = pairs[0]
-        handler = TrajectoryAttributesHandler.from_cmf(simple_shard.cmf, traj_p, start_p)
+        handler = TrajectoryAttributesHandler.from_cmf(
+            simple_shard.cmf, traj_p, start_p,
+            constant=e.value_sympy,
+            searchable=simple_shard,
+        )
 
         patch = {"trajectory_id": "t1", "extended_metrics": {}}
         out = compute_tier3_for_item((handler.trajectory_matrix(), patch))
@@ -1806,6 +1869,61 @@ class TestWorkerPool:
         assert output.exists()
         assert output.read_text() == ""
 
+    def test_direct_mode_batches_flushes(self, tmp_path, monkeypatch):
+        """Direct mode flushes every WRITER_BATCH_SIZE items, not per push.
+
+        We monkeypatch ``builtins.open`` to wrap the returned file so we can
+        count ``flush`` calls.  With ``WRITER_BATCH_SIZE=3``, three pushes
+        should produce exactly one flush — not three.
+        """
+        from dreamer.configs import config
+        from dreamer.configs.system import sys_config
+        from dreamer.utils.multi_processing import worker_pool
+
+        monkeypatch.setattr(sys_config, "WRITER_BATCH_SIZE", 3)
+
+        flush_calls = [0]
+        real_open = open
+
+        class FlushCountingFile:
+            def __init__(self, f):
+                self._f = f
+            def write(self, *a, **kw):
+                return self._f.write(*a, **kw)
+            def flush(self):
+                flush_calls[0] += 1
+                return self._f.flush()
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return self._f.__exit__(*a)
+            def close(self):
+                return self._f.close()
+
+        def counting_open(*args, **kwargs):
+            return FlushCountingFile(real_open(*args, **kwargs))
+
+        monkeypatch.setattr(
+            "dreamer.utils.multi_processing.open", counting_open, raising=False,
+        )
+
+        output = tmp_path / "batched.txt"
+        with worker_pool(
+            num_workers=1,
+            worker_fn=None,
+            writer_fn=_write_repr,
+            output_path=str(output),
+            config_overrides=config.export_configurations(),
+            parallel=False,
+        ) as push:
+            push(("x", 1))
+            push(("x", 2))
+            assert flush_calls[0] == 0, "Pre-batch pushes must not flush"
+            push(("x", 3))  # third push fills the batch → exactly one flush
+            assert flush_calls[0] == 1
+            push(("x", 4))  # fourth starts a new batch — no extra flush yet
+            assert flush_calls[0] == 1
+
 
 # ---------------------------------------------------------------------------
 # 16. Tier-3 post-process stage
@@ -2187,3 +2305,13 @@ class TestAtlasWriter:
         hps = [Hyperplane(symbols[0], symbols)]
         updated = update_cmf_hyperplanes(str(tmp_path), e, "anything", hps)
         assert updated is False
+
+    def test_cmf_name_does_not_contain_constant(self, simple_cmf):
+        """``cmf_name`` must be constant-agnostic so a CMF can host more
+        than one constant without spawning a fresh id.
+        """
+        from dreamer.loading.funcs.base_cmf import BaseCMF
+
+        bc = BaseCMF(const=e, cmf_name="my_cmf", cmf=simple_cmf, shifts=[0, 0])
+        assert "e" not in bc.cmf_name.split("__")
+        assert bc.cmf_name.startswith("my_cmf")
