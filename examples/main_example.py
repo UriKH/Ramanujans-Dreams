@@ -33,7 +33,15 @@ if __name__ == '__main__':
         extraction={
             'INIT_POINT_MAX_COORD': 10,
             # In this case this indicates usage of pFq symmetries utilization to reduce the number of shards
-            'IGNORE_DUPLICATE_SEARCHABLES': True
+            'IGNORE_DUPLICATE_SEARCHABLES': False,
+            # New v2 shard extraction:
+            #   'auto'      -- try exact (lrs + MILP), fall back to heuristic on timeout (DEFAULT)
+            #   'exact'     -- lrs + MILP only; raises on failure
+            #   'heuristic' -- ray-shooting only
+            #   'legacy'    -- the original brute-force lattice scan (initial_points.py)
+            'STRATEGY': 'auto',
+            # Wall-clock cap on the exact strategy when STRATEGY='auto'.
+            'STRATEGY_TIMEOUT_SECONDS': 3600.0,
         },
         search={
             # number of trajectories to be auto-generated in search if needed by the module

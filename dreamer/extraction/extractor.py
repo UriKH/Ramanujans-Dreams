@@ -15,6 +15,7 @@ from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.configs import config
 from dreamer.utils.types import CMFData
 from .utils import initial_points as init_points
+from .v2 import ExtractionManager, LrslibExtractor, RayShootingExtractor
 
 import os.path
 import sympy as sp
@@ -24,7 +25,7 @@ from collections import defaultdict
 from functools import partial
 from ramanujantools.cmf import pFq as rt_pFq
 from ramanujantools import Position
-from typing import List, Dict, Set
+from typing import Dict, List, Set, Tuple
 
 
 class ShardExtractorMod(ExtractionModScheme):
@@ -165,7 +166,21 @@ class ShardExtractor(ExtractionScheme):
 
     def extract(self, call_number=None) -> List[Shard]:
         """
-        Extracts the shards from the CMF
+        Extracts the shards from the CMF.
+
+        The discovery method is chosen by
+        ``extraction_config.STRATEGY``:
+
+        * ``"auto" | "exact" | "heuristic"`` -- delegate to the v2
+          :class:`~dreamer.extraction.v2.ExtractionManager` (lrs + MILP
+          with a ray-shooting fallback).  ``"auto"`` is the default and
+          enables the wall-clock timeout protection.
+        * ``"legacy"`` -- the original brute-force lattice scan in
+          :mod:`dreamer.extraction.utils.initial_points` (kept verbatim
+          for parity and benchmarking).
+
+        Either path may be supplemented or fully driven by
+        ``cmf_data.selected_points`` exactly as before.
         :return: The list of shards matching the CMF
         """
         # compute hyperplanes and prepare sample point
@@ -176,38 +191,24 @@ class ShardExtractor(ExtractionScheme):
             return [Shard.from_cmf_data(self.cmf_data, self.const, [], [])]
 
         symbols = list(hps)[0].symbols
-        shard_encodings = dict()
+        shard_encodings: Dict[Tuple[int, ...], Position] = dict()
         selected = [] if self.cmf_data.selected_points is None else self.cmf_data.selected_points
+
         if self.cmf_data.only_selected:
             if self.cmf_data.selected_points is None:
                 raise ValueError('No start points were provided for extraction.')
         else:
-            hps_list = list(hps)
-            shifted_hps = [hp.apply_shift(self.cmf_data.shift) for hp in hps_list]
-            A = np.array([hp.vectors[0] for hp in shifted_hps], dtype=np.int64)
-            b = np.array([hp.vectors[1] for hp in shifted_hps], dtype=np.int64)
-            S = config.extraction.INIT_POINT_MAX_COORD * 2 + 1
-            cpus = cpus if (cpus := os.cpu_count()) else 1
-            prefix_dims = max(min(int(round(math.log(cpus, S))), cpus - 1), 1)
-
-            symmetries_func = None
-            if issubclass(self.cmf_data.cmf.__class__, rt_pFq) and config.extraction.IGNORE_DUPLICATE_SEARCHABLES:
-                symmetries_func = partial(init_points.filter_symmetrical_cones,
-                                          p=self.cmf_data.cmf.p,
-                                          q=self.cmf_data.cmf.q,
-                                          shift=list(self.cmf_data.shift.values()))
-            final_results = init_points.compute_mapping(
-                self.cmf_data.cmf.dim(), S, A, b, prefix_dims, symmetries_func
-            )
-            unique_sigs = list(final_results.keys())
-            decoded_vectors = init_points.decode_signatures(unique_sigs, len(hps))
-            for i, sig in enumerate(unique_sigs):
-                sign_vector = decoded_vectors[i]
-                if 0 in sign_vector:
-                    continue
-                actual_point = final_results[sig]
-                shard_encodings[tuple(sign_vector)] = Position(
-                    {sym: int(v) + self.cmf_data.shift[sym] for sym, v in zip(symbols, actual_point)}
+            strategy = config.extraction.STRATEGY
+            if strategy == 'legacy':
+                shard_encodings.update(self._discover_via_legacy(hps, symbols))
+            elif strategy in ('auto', 'exact', 'heuristic'):
+                shard_encodings.update(
+                    self._discover_via_v2(hps, symbols, strategy)
+                )
+            else:
+                raise ValueError(
+                    f"Unknown extraction strategy {strategy!r}; expected "
+                    "'auto', 'exact', 'heuristic' or 'legacy'"
                 )
 
         if self.cmf_data.selected_points:
@@ -229,6 +230,7 @@ class ShardExtractor(ExtractionScheme):
                 if len(enc) == len(hps):
                     shard_encodings[tuple(enc)] = Position(point_dict)
 
+        Logger(hps).log()
         Logger(
             f'In CMF no. {call_number}: found {len(hps)} hyperplanes and {len(shard_encodings)} shards ',
             level=Logger.Levels.info
@@ -239,3 +241,86 @@ class ShardExtractor(ExtractionScheme):
         for enc in SmartTQDM(shard_encodings.keys(), desc='Creating shard objects', **sys_config.TQDM_CONFIG):
             shards.append(Shard.from_cmf_data(self.cmf_data, self.const, list(hps), enc, shard_encodings[enc]))
         return shards
+
+    def _discover_via_legacy(
+        self, hps: List[Hyperplane], symbols: List[sp.Symbol]
+    ) -> Dict[Tuple[int, ...], Position]:
+        """
+        Original brute-force lattice scan in
+        :mod:`dreamer.extraction.utils.initial_points`.
+
+        Preserved verbatim from the pre-v2 implementation so the
+        ``legacy`` strategy remains a byte-for-byte fallback.
+        """
+        hps_list = list(hps)
+        shifted_hps = [hp.apply_shift(self.cmf_data.shift) for hp in hps_list]
+        A = np.array([hp.vectors[0] for hp in shifted_hps], dtype=np.int64)
+        b = np.array([hp.vectors[1] for hp in shifted_hps], dtype=np.int64)
+        S = config.extraction.INIT_POINT_MAX_COORD * 2 + 1
+        cpus = cpus if (cpus := os.cpu_count()) else 1
+        prefix_dims = max(min(int(round(math.log(cpus, S))), cpus - 1), 1)
+
+        symmetries_func = None
+        if issubclass(self.cmf_data.cmf.__class__, rt_pFq) and config.extraction.IGNORE_DUPLICATE_SEARCHABLES:
+            symmetries_func = partial(init_points.filter_symmetrical_cones,
+                                      p=self.cmf_data.cmf.p,
+                                      q=self.cmf_data.cmf.q,
+                                      shift=list(self.cmf_data.shift.values()))
+        final_results = init_points.compute_mapping(
+            self.cmf_data.cmf.dim(), S, A, b, prefix_dims, symmetries_func
+        )
+        unique_sigs = list(final_results.keys())
+        decoded_vectors = init_points.decode_signatures(unique_sigs, len(hps))
+        out: Dict[Tuple[int, ...], Position] = {}
+        for i, sig in enumerate(unique_sigs):
+            sign_vector = decoded_vectors[i]
+            if 0 in sign_vector:
+                continue
+            actual_point = final_results[sig]
+            out[tuple(sign_vector)] = Position(
+                {sym: int(v) + self.cmf_data.shift[sym] for sym, v in zip(symbols, actual_point)}
+            )
+        return out
+
+    def _discover_via_v2(
+        self,
+        hps: List[Hyperplane],
+        symbols: List[sp.Symbol],
+        strategy: str,
+    ) -> Dict[Tuple[int, ...], Position]:
+        """
+        Route through the v2 :class:`ExtractionManager`.
+
+        The v2 module works on the *shifted* hyperplanes (so that the
+        integer point it returns lives in the shifted lattice) and
+        labels each shard by a ``+/-1`` sign tuple ordered identically
+        to the input list -- matching how :class:`Shard.encoding` is
+        interpreted downstream.  Integer witnesses are translated back
+        to absolute coordinates by adding the shift.
+
+        :param strategy: One of ``"auto" | "exact" | "heuristic"``.
+        """
+        if issubclass(self.cmf_data.cmf.__class__, rt_pFq) and config.extraction.IGNORE_DUPLICATE_SEARCHABLES:
+            Logger(
+                "IGNORE_DUPLICATE_SEARCHABLES=True is ignored under the "
+                f"{strategy!r} strategy (v2 does not yet deduplicate pFq "
+                "symmetric shards). Use STRATEGY='legacy' to keep the "
+                "old dedup behaviour.",
+                level=Logger.Levels.warning,
+            ).log()
+
+        hps_list = list(hps)
+        shifted_hps = [hp.apply_shift(self.cmf_data.shift) for hp in hps_list]
+
+        manager = ExtractionManager(
+            strategy=strategy,
+            timeout_seconds=config.extraction.STRATEGY_TIMEOUT_SECONDS,
+        )
+        mapping = manager.extract(shifted_hps)
+
+        out: Dict[Tuple[int, ...], Position] = {}
+        for sig, point in mapping.items():
+            out[tuple(sig)] = Position(
+                {sym: int(v) + self.cmf_data.shift[sym] for sym, v in zip(symbols, point)}
+            )
+        return out
