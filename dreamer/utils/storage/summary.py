@@ -47,7 +47,7 @@ class _ShardStats:
     __slots__ = (
         "shard_id", "cmf_id", "constant", "trajectories",
         "identified", "positive_delta", "best_delta", "best_trajectory_id",
-        "best_start", "best_direction",
+        "best_start", "best_direction", "interior_point",
     )
 
     def __init__(self, shard_id: str, cmf_id: str, constant: str):
@@ -61,6 +61,11 @@ class _ShardStats:
         self.best_trajectory_id: Optional[str] = None
         self.best_start: Optional[list] = None
         self.best_direction: Optional[list] = None
+        # Representative integer point inside the shard, as returned by
+        # the extractor (legacy lattice scan or v2 MILP).  Filled in from
+        # ``ShardDTO.interior_point`` after the trajectory walk if the
+        # ``EXPORT_CMFS`` sidecar is available.
+        self.interior_point: Optional[Tuple[int, ...]] = None
 
     def add(self, record: dict) -> None:
         self.trajectories += 1
@@ -125,6 +130,43 @@ def _load_cmf_metadata(export_cmfs_root: Optional[str], constant_name: str) -> D
             cmf_id = record.get("cmf_id")
             if cmf_id:
                 out[cmf_id] = record
+    return out
+
+
+def _load_shard_metadata(
+    export_cmfs_root: Optional[str], constant_name: str
+) -> Dict[str, dict]:
+    """Return ``{shard_id: shard_dict}`` from every ``*__shards.jsonl``
+    under ``<root>/<safe_const>/``.
+
+    Used to surface the per-shard ``interior_point`` (a witness integer
+    coordinate from the extractor) so reviewers can sanity-check what
+    starting point the search actually ran from.  Missing directory or
+    files degrade silently.
+    """
+    if not export_cmfs_root:
+        return {}
+    safe_const = "".join(c for c in constant_name if c.isalnum() or c in ("-", "_"))
+    const_dir = os.path.join(export_cmfs_root, safe_const)
+    if not os.path.isdir(const_dir):
+        return {}
+    out: Dict[str, dict] = {}
+    for fname in sorted(os.listdir(const_dir)):
+        if not fname.endswith("__shards.jsonl"):
+            continue
+        path = os.path.join(const_dir, fname)
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                shard_id = record.get("shard_id")
+                if shard_id:
+                    out[shard_id] = record
     return out
 
 
@@ -275,6 +317,13 @@ def _render_overview(
     return "\n".join(lines), overall_best
 
 
+def _fmt_interior_point(pt: Optional[Tuple[int, ...]]) -> str:
+    """Format a shard's interior witness point for the markdown table."""
+    if pt is None:
+        return "—"
+    return f"`{list(pt)}`"
+
+
 def _render_per_constant_section(
     const_name: str,
     cmf_shards: Dict[str, List[_ShardStats]],
@@ -314,13 +363,14 @@ def _render_per_constant_section(
         lines += bullets + [""]
 
         lines += [
-            "| Shard | Trajectories | Identified | Positive δ | Best δ | Best trajectory (start → direction) |",
-            "|---|---:|---:|---:|---:|---|",
+            "| Shard | Start point | Trajectories | Identified | Positive δ | Best δ | Best trajectory (start → direction) |",
+            "|---|---|---:|---:|---:|---:|---|",
         ]
         for s in shards:
             lines.append(
-                f"| {_fmt_shard_label(s.shard_id)} | {s.trajectories} | "
-                f"{s.identified} | {s.positive_delta} | "
+                f"| {_fmt_shard_label(s.shard_id)} | "
+                f"{_fmt_interior_point(s.interior_point)} | "
+                f"{s.trajectories} | {s.identified} | {s.positive_delta} | "
                 f"{_fmt_delta(s.best_delta)} | {_fmt_traj_cell(s)} |"
             )
         lines.append("")
@@ -381,6 +431,25 @@ def build_summary_markdown(
             "",
         ]
         return "\n".join(header)
+
+    # Backfill each shard's interior witness point from the
+    # ``<EXPORT_CMFS>/<const>/<cmf>__shards.jsonl`` sidecar so the
+    # per-shard table can show where the search actually started.
+    for const_name, cmf_shards in data.items():
+        shard_meta = _load_shard_metadata(export_cmfs_root, const_name)
+        if not shard_meta:
+            continue
+        for shards in cmf_shards.values():
+            for s in shards:
+                rec = shard_meta.get(s.shard_id)
+                if not rec:
+                    continue
+                pt = rec.get("interior_point")
+                if pt is not None:
+                    try:
+                        s.interior_point = tuple(int(v) for v in pt)
+                    except (TypeError, ValueError):
+                        s.interior_point = tuple(pt)
 
     overview_md, _overall_best = _render_overview(data)
 

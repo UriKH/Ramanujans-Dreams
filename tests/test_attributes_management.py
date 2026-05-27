@@ -2885,3 +2885,69 @@ class TestSummaryWriter:
         text = (root / "summary.md").read_text()
         # One unique trajectory_id → 1 trajectory, 1 identified, 1 positive δ
         assert "| 1 | 1 | 1 |" in text
+
+    def test_summary_surfaces_shard_interior_point(self, tmp_path):
+        """When the EXPORT_CMFS sidecar carries an interior_point, the
+        per-shard table must render it under a 'Start point' column."""
+        from dreamer.utils.storage.summary import write_summary
+
+        search_root = tmp_path / "search results"
+        cmfs_root = tmp_path / "CMFs"
+        cmf_id = "pFq_X"
+        shard_id = f"{cmf_id}__deadbeefdeadbeef"
+        tid = f"{shard_id}__cafef00dcafef00d"
+
+        self._write_jsonl(
+            str(search_root / "log-2" / f"{shard_id}.jsonl"),
+            [{
+                "trajectory_id": tid,
+                "cmf_id": cmf_id, "shard_id": shard_id,
+                "constant": "log-2",
+                "start_point": [7, -3], "direction": [1, 0],
+                "delta_estimate": 0.42, "identified": True,
+            }],
+        )
+        # ShardDTO sidecar — only interior_point is what the summary reads.
+        self._write_jsonl(
+            str(cmfs_root / "log-2" / f"{cmf_id}__shards.jsonl"),
+            [{
+                "shard_id": shard_id,
+                "cmf_id": cmf_id,
+                "shard_encoding": [1, -1],
+                "dimensionality": 2,
+                "found_constants": ["log-2"],
+                "interior_point": [7, -3],
+            }],
+        )
+
+        write_summary(
+            search_results_root=str(search_root),
+            export_cmfs_root=str(cmfs_root),
+        )
+        text = (search_root / "summary.md").read_text()
+        assert "Start point" in text  # header column rendered
+        assert "`[7, -3]`" in text    # per-shard row carries the witness
+
+    def test_summary_start_point_shows_dash_when_sidecar_missing(self, tmp_path):
+        """Missing ShardDTO sidecar => column rendered as em-dash (no crash)."""
+        from dreamer.utils.storage.summary import write_summary
+
+        root = tmp_path / "search results"
+        cmf_id = "pFq_Y"
+        shard_id = f"{cmf_id}__1234123412341234"
+        tid = f"{shard_id}__abcdabcdabcdabcd"
+        self._write_jsonl(
+            str(root / "log-2" / f"{shard_id}.jsonl"),
+            [{
+                "trajectory_id": tid,
+                "cmf_id": cmf_id, "shard_id": shard_id,
+                "constant": "log-2",
+                "delta_estimate": 0.1, "identified": True,
+            }],
+        )
+        # No export_cmfs_root passed => no sidecar to load.
+        write_summary(search_results_root=str(root))
+        text = (root / "summary.md").read_text()
+        assert "Start point" in text
+        # Row should contain an em-dash for the missing point.
+        assert "| — |" in text

@@ -65,16 +65,54 @@ def find_integer_point(
     if not np.all(np.isin(s, [-1, 1])):
         raise ValueError("sign_vector entries must be +1 or -1")
 
-    D = A.shape[1]
+    N, D = A.shape
     # s_i * (A_i . x + c_i) >= 1  <=>  (s_i * A_i) . x >= 1 - s_i * c_i
     A_signed = (s[:, None] * A).astype(np.float64)
     lower = (1 - s * c).astype(np.float64)
-    upper = np.full(A.shape[0], np.inf)
+    upper = np.full(N, np.inf)
 
-    constraints = LinearConstraint(A_signed, lower, upper)
-    bounds = Bounds(lb=-bound, ub=bound)
-    integrality = np.ones(D, dtype=int)
-    objective = np.zeros(D, dtype=np.float64)
+    # 2. The L1 Norm "Dummy" Constraints
+    # We introduce D new variables 't' such that t_i >= |x_i|.
+    # This means: x_i - t_i <= 0   AND   x_i + t_i >= 0
+    # Our full variable vector is now [x_1 ... x_D, t_1 ... t_D] (length 2D)
+    
+    # Create the block matrices for the linear constraints
+    # Block for Shard: [A_signed, 0]
+    A_shard_full = np.hstack([A_signed, np.zeros((N, D))])
+    
+    # Block for t >= x  => x - t <= 0
+    A_t_pos = np.hstack([np.eye(D), -np.eye(D)])
+    lower_t_pos = np.full(D, -np.inf)
+    upper_t_pos = np.zeros(D)
+    
+    # Block for t >= -x => x + t >= 0
+    A_t_neg = np.hstack([np.eye(D), np.eye(D)])
+    lower_t_neg = np.zeros(D)
+    upper_t_neg = np.full(D, np.inf)
+    
+    # Stack everything together
+    A_full = np.vstack([A_shard_full, A_t_pos, A_t_neg])
+    lower_full = np.concatenate([lower_shard, lower_t_pos, lower_t_neg])
+    upper_full = np.concatenate([upper_shard, upper_t_pos, upper_t_neg])
+    
+    constraints = LinearConstraint(A_full, lower_full, upper_full)
+    
+    # 3. Bounds: x is bounded by 'bound', t is bounded by [0, bound]
+    lb = np.concatenate([np.full(D, -bound), np.zeros(D)])
+    ub = np.concatenate([np.full(D, bound), np.full(D, bound)])
+    bounds = Bounds(lb=lb, ub=ub)
+    
+    # 4. Integrality: x must be integer, t can technically be continuous 
+    # (it will naturally snap to integers because x is integer and we minimize t)
+    integrality = np.concatenate([np.ones(D, dtype=int), np.zeros(D, dtype=int)])
+    
+    # 5. Objective: Minimize the sum of t (which minimizes sum of |x|)
+    objective = np.concatenate([np.zeros(D), np.ones(D)])
+
+    # constraints = LinearConstraint(A_signed, lower, upper)
+    # bounds = Bounds(lb=-bound, ub=bound)
+    # integrality = np.ones(D, dtype=int)
+    # objective = np.zeros(D, dtype=np.float64)
 
     result = milp(
         c=objective,
