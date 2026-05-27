@@ -23,7 +23,9 @@ handler-based pipeline:
       a dedicated writer subprocess that appends to the JSONL.
 
 Output files are written to:
-    ``sys_config.EXPORT_SEARCH_RESULTS / <constant_name> / <cmf>__<shard_id>.jsonl``
+    ``sys_config.EXPORT_SEARCH_RESULTS / <constant_name> / <shard_id>.jsonl``
+where ``<shard_id>`` already includes the parent cmf id as a prefix
+(``<cmf_id>__<encoding_hash>``) — see ``derive_cmf_and_shard_ids``.
 """
 
 import os
@@ -41,9 +43,9 @@ from dreamer.utils.storage.attribute_registry import attribute_name
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
     _position_to_tuple,
-    _stable_id,
     build_trajectory_dto,
     derive_cmf_and_shard_ids,
+    derive_trajectory_id,
 )
 from dreamer.utils.multi_processing import (
     compute_tier2_for_item,
@@ -115,7 +117,10 @@ class SearcherModV1(SearcherModScheme):
         based on whether ``TIER2_ATTRIBUTES`` is non-empty.
         """
         cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
-        output_path = os.path.join(dir_path, f"{shard.cmf_name}__{shard_id}.jsonl")
+        # ``shard_id`` already starts with the cmf id (e.g.
+        # ``pFq_2_1_-1__0_0_0__<hash>``), so the filename is just
+        # ``{shard_id}.jsonl`` — no need to prepend the cmf name again.
+        output_path = os.path.join(dir_path, f"{shard_id}.jsonl")
         seen_trajectories = load_seen_trajectories(output_path)
 
         # ``compute_tier2_for_item`` unpacks the ``(traj_matrix, payload)`` tuple
@@ -186,13 +191,17 @@ class SearcherModV1(SearcherModScheme):
         # Specs may be ``(name, predicate)`` tuples — use just the names
         # for set arithmetic against the JSONL ``extended_metrics`` keys.
         desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
+        # The target constant in sympy form — propagated through every
+        # work item so the worker can build a constant-aware handler
+        # (needed by ``delta_sequence``, ``limit``, p/q identification).
+        constant_sympy = shard.const.value_sympy
 
         for traj, start in pairs:
             # Cheap: derive trajectory_id without symbolic work or any walk.
             start_t = _position_to_tuple(start)
             dir_t = _position_to_tuple(traj)
-            trajectory_id = _stable_id(
-                shard.cmf_name, shard_encoding_str, str(start_t), str(dir_t)
+            trajectory_id = derive_trajectory_id(
+                shard_id, shard.cmf_name, shard_encoding_str, start_t, dir_t,
             )
 
             seen_record = seen_trajectories.get(trajectory_id)
@@ -223,7 +232,7 @@ class SearcherModV1(SearcherModScheme):
                     "trajectory_id": trajectory_id,
                     "extended_metrics": {},
                 }
-                sink((handler.trajectory_matrix(), patch))
+                sink((handler.trajectory_matrix(), constant_sympy, patch))
                 seen_trajectories[trajectory_id] = {
                     "extended_metrics": dict.fromkeys(existing_keys | missing),
                 }
@@ -258,4 +267,4 @@ class SearcherModV1(SearcherModScheme):
             seen_trajectories[trajectory_id] = {
                 "extended_metrics": dict.fromkeys(desired),
             }
-            sink((handler.trajectory_matrix(), dto))
+            sink((handler.trajectory_matrix(), constant_sympy, dto))

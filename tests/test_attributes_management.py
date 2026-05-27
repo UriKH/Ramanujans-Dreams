@@ -36,6 +36,7 @@ from dreamer.utils.storage.trajectory_attributes import (
     _stable_id,
     build_trajectory_dto,
     derive_cmf_and_shard_ids,
+    derive_trajectory_id,
 )
 from dreamer.utils.storage.attribute_registry import (
     ATTRIBUTE_REGISTRY,
@@ -382,7 +383,17 @@ class TestDeriveCmfAndShardIds:
     def test_whole_space_shard_works(self, whole_space_shard):
         cmf_id, shard_id, enc = derive_cmf_and_shard_ids(whole_space_shard)
         assert enc == "whole_space"
-        assert len(shard_id) == 16
+        # Structural format: ``"{cmf_id}__{16-char hash}"``.
+        assert shard_id.startswith(f"{cmf_id}__")
+        assert len(shard_id.rsplit("__", 1)[1]) == 16
+
+    def test_shard_id_embeds_cmf_id(self, simple_shard):
+        """shard_id must literally start with cmf_id so any record's shard id
+        discloses its parent CMF without a separate lookup."""
+        cmf_id, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
+        assert shard_id.startswith(f"{cmf_id}__"), (
+            f"shard_id={shard_id!r} should start with '{cmf_id}__'"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1190,21 +1201,17 @@ class TestConfigAttributeSelection:
     """End-to-end: registry honours config-listed attribute names."""
 
     def test_search_config_default_tier2_attrs_in_registry(self):
-        """Every default TIER2_ATTRIBUTES name must be registered."""
+        """Every default TIER2_ATTRIBUTES name must be registered.
+
+        Specs may be bare strings or ``(name, predicate)`` tuples; only the
+        resolved attribute name needs to live in the registry.
+        """
         from dreamer.configs.search import search_config
-        for name in search_config.TIER2_ATTRIBUTES:
+        for spec in search_config.TIER2_ATTRIBUTES:
+            name = attribute_name(spec)
             assert name in ATTRIBUTE_REGISTRY, (
                 f"TIER2_ATTRIBUTES default {name!r} missing from registry"
             )
-
-    def test_search_config_default_tier2_is_empty(self):
-        """Default TIER2_ATTRIBUTES must be empty so vanilla runs do no extra work.
-
-        Opt-in is explicit: the user adds attribute names to this tuple to
-        engage the background-worker MPMC pipeline.
-        """
-        from dreamer.configs.search import search_config
-        assert tuple(search_config.TIER2_ATTRIBUTES) == ()
 
     def test_compute_attributes_with_known_tier2_names_works(self, minimal_handler):
         """A representative Tier-2 attribute list resolves through the registry."""
@@ -1328,7 +1335,7 @@ class TestMergeOnRead:
                 "convergence_class": "linear",
             },
         }
-        out = compute_tier2_for_item((None, patch))
+        out = compute_tier2_for_item((None, None, patch))
 
         assert out["trajectory_id"] == "existing_t1"
         # Pre-computed values must not be replaced by error entries.
@@ -1353,7 +1360,7 @@ class TestMergeOnRead:
             shard_encoding_str="enc", start=start, direction=direction,
         )
 
-        out = compute_tier2_for_item((None, dto))
+        out = compute_tier2_for_item((None, None, dto))
         assert out is dto, "Worker must return the same DTO object unchanged"
         assert out.extended_metrics == {}
 
@@ -1369,7 +1376,7 @@ class TestMergeOnRead:
         monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ("eigenvalues",))
 
         patch = {"trajectory_id": "t1", "extended_metrics": {}}
-        out = compute_tier2_for_item((None, patch))
+        out = compute_tier2_for_item((None, None, patch))
         # No computation happened; extended_metrics stays empty.
         assert out["extended_metrics"] == {}
 
@@ -1394,7 +1401,7 @@ class TestMergeOnRead:
         )
 
         patch = {"trajectory_id": "t1", "extended_metrics": {}}
-        out = compute_tier3_for_item((handler.trajectory_matrix(), patch))
+        out = compute_tier3_for_item((handler.trajectory_matrix(), e.value_sympy, patch))
 
         assert out is patch  # same dict, mutated in place
         # kamidelta either computed successfully or recorded as an error;
@@ -1479,7 +1486,7 @@ class TestMergeOnRead:
         for traj_p, start_p in pairs:
             start_t = tuple(int(v) for v in start_p.values())
             dir_t = tuple(int(v) for v in traj_p.values())
-            tid = _stable_id(simple_shard.cmf_name, enc_str, str(start_t), str(dir_t))
+            tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
             seen_trajectories[tid] = {
                 "trajectory_id": tid,
                 "extended_metrics": {"eigenvalues": "dummy"},
@@ -1524,7 +1531,7 @@ class TestMergeOnRead:
         for traj_p, start_p in pairs:
             start_t = tuple(int(v) for v in start_p.values())
             dir_t = tuple(int(v) for v in traj_p.values())
-            tid = _stable_id(simple_shard.cmf_name, enc_str, str(start_t), str(dir_t))
+            tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
             seen_trajectories[tid] = {"trajectory_id": tid, "extended_metrics": {}}
 
         # Count handler constructions.
@@ -1572,12 +1579,15 @@ class TestMergeOnRead:
         )
 
         assert len(items) > 0, "Expected new trajectories to reach the sink"
-        for traj_matrix, payload in items:
+        for traj_matrix, constant, payload in items:
             assert isinstance(payload, TrajectoryDTO), (
                 f"Expected TrajectoryDTO for a new trajectory, got {type(payload).__name__}"
             )
             assert traj_matrix is not None, (
                 "New trajectories must ship the trajectory matrix to workers."
+            )
+            assert constant is not None, (
+                "Producer must propagate the sympy constant alongside each item."
             )
 
     def test_producer_updates_seen_trajectories_after_emit(self, simple_shard):
@@ -1654,7 +1664,7 @@ class TestMergeOnRead:
         for traj_p, start_p in pairs:
             start_t = tuple(int(v) for v in start_p.values())
             dir_t = tuple(int(v) for v in traj_p.values())
-            tid = _stable_id(simple_shard.cmf_name, enc_str, str(start_t), str(dir_t))
+            tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
             seen_trajectories[tid] = {
                 "trajectory_id": tid,
                 "extended_metrics": {},  # eigenvalues missing → patch path
@@ -1711,7 +1721,7 @@ class TestMergeOnRead:
         for traj_p, start_p in pairs:
             start_t = tuple(int(v) for v in start_p.values())
             dir_t = tuple(int(v) for v in traj_p.values())
-            tid = _stable_id(simple_shard.cmf_name, enc_str, str(start_t), str(dir_t))
+            tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
             seen_trajectories[tid] = {
                 "trajectory_id": tid,
                 "extended_metrics": {present_attr: "pre-computed"},
@@ -1728,7 +1738,7 @@ class TestMergeOnRead:
         )
 
         assert len(items) > 0, "Expected at least one patch to be emitted"
-        for _traj_matrix, payload in items:
+        for _traj_matrix, _constant, payload in items:
             assert isinstance(payload, dict), (
                 f"Expected patch dict, got {type(payload).__name__}"
             )
@@ -1841,12 +1851,12 @@ class TestAnalyzerDedup:
         )
         shard_dir = tmp_path / e.name
         shard_dir.mkdir(parents=True)
-        jsonl_path = shard_dir / f"{simple_shard.cmf_name}__{shard_id}.jsonl"
+        jsonl_path = shard_dir / f"{shard_id}.jsonl"
         with open(jsonl_path, "w") as fout:
             for traj_p, start_p in pairs:
                 start_t = tuple(int(v) for v in start_p.values())
                 dir_t = tuple(int(v) for v in traj_p.values())
-                tid = _stable_id(simple_shard.cmf_name, enc_str, str(start_t), str(dir_t))
+                tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
                 fout.write(json.dumps({
                     "trajectory_id": tid,
                     "delta_estimate": 1.0,
@@ -1888,12 +1898,12 @@ class TestAnalyzerDedup:
         )
         shard_dir = tmp_path / e.name
         shard_dir.mkdir(parents=True)
-        jsonl_path = shard_dir / f"{simple_shard.cmf_name}__{shard_id}.jsonl"
+        jsonl_path = shard_dir / f"{shard_id}.jsonl"
         with open(jsonl_path, "w") as fout:
             for traj_p, start_p in pairs:
                 start_t = tuple(int(v) for v in start_p.values())
                 dir_t = tuple(int(v) for v in traj_p.values())
-                tid = _stable_id(simple_shard.cmf_name, enc_str, str(start_t), str(dir_t))
+                tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
                 fout.write(json.dumps({
                     "trajectory_id": tid,
                     "delta_estimate": 2.5,
@@ -1956,7 +1966,7 @@ class TestAnalyzerDedup:
 
         _cmf_id, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
         jsonl_path = (
-            tmp_path / e.name / f"{simple_shard.cmf_name}__{shard_id}.jsonl"
+            tmp_path / e.name / f"{shard_id}.jsonl"
         )
         assert jsonl_path.exists(), (
             "Analyzer must write to the shared per-shard JSONL location"
@@ -2005,11 +2015,11 @@ class TestAnalyzerDedup:
         traj_p, start_p = cached_pair
         start_t = tuple(int(v) for v in start_p.values())
         dir_t = tuple(int(v) for v in traj_p.values())
-        tid = _stable_id(simple_shard.cmf_name, enc_str, str(start_t), str(dir_t))
+        tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
 
         shard_dir = tmp_path / e.name
         shard_dir.mkdir(parents=True)
-        jsonl_path = shard_dir / f"{simple_shard.cmf_name}__{shard_id}.jsonl"
+        jsonl_path = shard_dir / f"{shard_id}.jsonl"
         with open(jsonl_path, "w") as fout:
             fout.write(json.dumps({
                 "trajectory_id": tid,
@@ -2285,7 +2295,7 @@ class TestTier3PostProcess:
         cmf_id, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
         const_dir = tmp_path / e.name
         const_dir.mkdir()
-        jsonl = const_dir / f"{simple_shard.cmf_name}__{shard_id}.jsonl"
+        jsonl = const_dir / f"{shard_id}.jsonl"
         # All trajectories already carry the only configured Tier-3 attr.
         jsonl.write_text(
             json.dumps({
@@ -2336,7 +2346,7 @@ class TestTier3PostProcess:
         cmf_id, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
         const_dir = tmp_path / e.name
         const_dir.mkdir()
-        jsonl = const_dir / f"{simple_shard.cmf_name}__{shard_id}.jsonl"
+        jsonl = const_dir / f"{shard_id}.jsonl"
         base_record = {
             "trajectory_id": "t-needs-tier3",
             "cmf_id": cmf_id,

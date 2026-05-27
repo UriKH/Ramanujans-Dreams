@@ -19,7 +19,8 @@ class PostProcessConfig(Configurable):
 
     TIER3_ATTRIBUTES: Tuple[str, ...] = field(
         default=(
-            "precision_at", "delta_sequence", "digits_per_step", "asymptotic_digits_per_step"
+            ("precision_at", "if_identified"), #("delta_sequence", "if_identified"),
+            ("digits_per_step", "if_identified"), ("asymptotic_digits_per_step", "if_identified")
         ),
         metadata={
             "description": (

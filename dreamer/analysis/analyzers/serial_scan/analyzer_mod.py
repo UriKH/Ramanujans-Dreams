@@ -16,9 +16,11 @@ recomputing anything.
 
 **Single canonical store** — the analyzer's per-trajectory output is
 written to the same per-shard JSONL the searcher uses:
-``EXPORT_SEARCH_RESULTS/<constant>/<cmf>__<shard_id>.jsonl``.  This is the
-canonical location for any per-trajectory record (analyzer + search +
-post-process all read/write it via merge-on-read).
+``EXPORT_SEARCH_RESULTS/<constant>/<shard_id>.jsonl``.  ``<shard_id>``
+itself encodes the parent CMF (``<cmf_id>__<encoding_hash>``) so the
+filename remains uniquely identifying.  This is the canonical location
+for any per-trajectory record (analyzer + search + post-process all
+read/write it via merge-on-read).
 """
 
 import json
@@ -37,9 +39,9 @@ from dreamer.extraction.shard import Shard
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
     _position_to_tuple,
-    _stable_id,
     build_trajectory_dto,
     derive_cmf_and_shard_ids,
+    derive_trajectory_id,
 )
 from dreamer.utils.multi_processing import load_seen_trajectories
 from dreamer.search.methods.hedgehog_scan import SerialSearcher
@@ -99,8 +101,11 @@ class AnalyzerModV1(AnalyzerModScheme):
 
             for shard in shards:
                 cmf_id, shard_id, encoding_str = derive_cmf_and_shard_ids(shard)
+                # ``shard_id`` already carries the cmf_id prefix — the
+                # filename is just ``{shard_id}.jsonl`` (no need to repeat
+                # the cmf name).  Mirrors the searcher convention.
                 shard_jsonl_path = os.path.join(
-                    const_dir, f"{shard.cmf_name}__{shard_id}.jsonl",
+                    const_dir, f"{shard_id}.jsonl",
                 )
                 seen_trajectories = load_seen_trajectories(shard_jsonl_path)
 
@@ -191,8 +196,8 @@ class AnalyzerModV1(AnalyzerModScheme):
                 # Trajectory id derived without any symbolic / walk work.
                 start_t = _position_to_tuple(start)
                 dir_t = _position_to_tuple(traj)
-                tid = _stable_id(
-                    shard.cmf_name, encoding_str, str(start_t), str(dir_t),
+                tid = derive_trajectory_id(
+                    shard_id, shard.cmf_name, encoding_str, start_t, dir_t,
                 )
 
                 cached = seen_trajectories.get(tid)

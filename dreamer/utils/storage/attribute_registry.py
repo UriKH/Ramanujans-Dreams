@@ -138,7 +138,16 @@ ATTRIBUTE_REGISTRY: Dict[str, AttributeComputer] = {
 
     # ----- Tier-3 — symbolic / expensive attributes (post-process). -----
     "precision_at":                lambda h: int(h.precision_at()),
-    "delta_sequence":              lambda h: _list_of_float(h.delta_sequence()),
+    # ``delta_sequence`` defaults to the handler's full walk depth (often
+    # 1500) and compares each step against the constant at 50 000 digits —
+    # that is hours per trajectory in practice.  Cap the registry-driven
+    # call to ``min(_depth, 100)`` so it mirrors ``digits_per_step`` and
+    # stays inside a budget the post-process stage can actually complete.
+    # Callers that want the full sequence can invoke ``h.delta_sequence()``
+    # directly with an explicit depth.
+    "delta_sequence":              lambda h: _list_of_float(
+        h.delta_sequence(min(h._depth, 100))
+    ),
     "digits_per_step":             lambda h: [[int(k), int(d)] for k, d in h.digits_per_step()],
     "asymptotic_digits_per_step":  lambda h: _opt_float(h.asymptotic_digits_per_step()),
 }

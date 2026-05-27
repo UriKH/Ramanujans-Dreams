@@ -294,19 +294,23 @@ def worker_pool(
 def compute_tier2_for_item(item):
     """Per-item worker: compute the configured Tier-2 attributes.
 
-    *item* is ``(trajectory_matrix, dto_or_patch)`` where *dto_or_patch* is
-    either a ``TrajectoryDTO`` (new trajectory) or a patch ``dict`` (partial
-    coverage).  Only attributes listed in ``search.TIER2_ATTRIBUTES`` and
-    **not already present** in ``extended_metrics`` are computed.  Per-attribute
-    failures are stored as ``<name>_error``; a fatal handler failure is
-    recorded under ``worker_error``.  The same dto/patch is returned for
-    the writer.
+    *item* is ``(trajectory_matrix, constant, dto_or_patch)`` where
+    *dto_or_patch* is either a ``TrajectoryDTO`` (new trajectory) or a patch
+    ``dict`` (partial coverage), and *constant* is the sympy expression for
+    the target constant (e.g. ``sp.log(2)``) — required by attributes that
+    need to compare against the limit (``delta_sequence``, ``limit``, p/q
+    identification).  Pass ``None`` when no constant context is available.
+
+    Only attributes listed in ``search.TIER2_ATTRIBUTES`` and **not already
+    present** in ``extended_metrics`` are computed.  Per-attribute failures
+    are stored as ``<name>_error``; a fatal handler failure is recorded
+    under ``worker_error``.  The same dto/patch is returned for the writer.
     """
     from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
     from dreamer.utils.storage.attribute_registry import compute_attributes, attribute_name
     from dreamer.configs import config
 
-    traj_matrix, dto_or_patch = item
+    traj_matrix, constant, dto_or_patch = item
     is_patch = isinstance(dto_or_patch, dict)
     extended_metrics = (
         dto_or_patch["extended_metrics"]
@@ -329,7 +333,7 @@ def compute_tier2_for_item(item):
     ]
     if missing and traj_matrix is not None:
         try:
-            handler = TrajectoryAttributesHandler(traj_matrix)
+            handler = TrajectoryAttributesHandler(traj_matrix, constant=constant)
             extended_metrics.update(
                 compute_attributes(handler, missing, on_error="store")
             )
@@ -348,8 +352,16 @@ def write_jsonl_line(item, fout) -> None:
     Dicts (patches) go through ``json.dumps``; DTO objects use their
     ``to_json_line()`` method.  The caller's open file handle does the
     actual ``write``.
+
+    A patch with an empty ``extended_metrics`` carries no new information
+    (every attribute was either already present or skipped by its predicate)
+    — silently drop it instead of bloating the JSONL with no-op lines.
+    Full ``TrajectoryDTO`` objects always go through, including when their
+    ``extended_metrics`` is empty: that's the base record for a trajectory.
     """
     if isinstance(item, dict):
+        if not (item.get("extended_metrics") or {}):
+            return
         line = json.dumps(item)
     else:
         line = item.to_json_line()

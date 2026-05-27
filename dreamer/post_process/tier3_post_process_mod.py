@@ -65,16 +65,21 @@ post_process_config = config.post_process
 def compute_tier3_for_item(item):
     """Per-item worker for the post-process stage.
 
-    *item* is ``(trajectory_matrix, patch_dict)``.  Reads
-    ``post_process.TIER3_ATTRIBUTES`` from the (subprocess-local) config and
-    computes every entry not already present in ``patch_dict['extended_metrics']``.
-    Per-attribute failures are stored as ``<name>_error``; a fatal handler
-    failure is recorded under ``worker_error``.  The patch is returned for
-    the writer.
+    *item* is ``(trajectory_matrix, constant, patch_dict)`` where *constant*
+    is the sympy expression for the target constant (e.g. ``sp.log(2)``).
+    Constant context is required by attributes that compare against the
+    limit (``delta_sequence``, ``limit``); pass ``None`` when none is
+    available — those attributes will then be skipped with an error entry.
+
+    Reads ``post_process.TIER3_ATTRIBUTES`` from the (subprocess-local)
+    config and computes every entry not already present in
+    ``patch_dict['extended_metrics']``.  Per-attribute failures are stored as
+    ``<name>_error``; a fatal handler failure is recorded under
+    ``worker_error``.  The patch is returned for the writer.
     """
     from dreamer.configs import config
 
-    traj_matrix, patch = item
+    traj_matrix, constant, patch = item
     attrs_to_compute = config.post_process.TIER3_ATTRIBUTES
     extended_metrics = patch.setdefault("extended_metrics", {})
     # Specs may be bare strings or ``(name, predicate)`` tuples; filter by
@@ -86,7 +91,7 @@ def compute_tier3_for_item(item):
 
     if missing and traj_matrix is not None:
         try:
-            handler = TrajectoryAttributesHandler(traj_matrix)
+            handler = TrajectoryAttributesHandler(traj_matrix, constant=constant)
             extended_metrics.update(
                 compute_attributes(handler, missing, on_error="store")
             )
@@ -227,8 +232,21 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         """Emit ``(traj_matrix, patch)`` for every trajectory missing Tier-3 attrs.
 
         Trajectories whose CMF cannot be resolved are logged and skipped.
+
+        The loop is wrapped in a tqdm bar — Tier-3 attributes (asymptotics,
+        delta_sequence, …) can be minutes-per-trajectory, so without a
+        progress indicator a long shard looks indistinguishable from a hang.
         """
-        for tid, record in merged.items():
+        items = [
+            (tid, record)
+            for tid, record in merged.items()
+            if desired - set((record.get("extended_metrics") or {}).keys())
+        ]
+        for tid, record in SmartTQDM(
+            items,
+            desc='Tier-3 trajectories: ',
+            **sys_config.TQDM_CONFIG,
+        ):
             existing = set((record.get("extended_metrics") or {}).keys())
             missing = desired - existing
             if not missing:
@@ -246,11 +264,26 @@ class Tier3PostProcessModV1(PostProcessModScheme):
 
             shard_entry = self._shard_lookup.get(record.get("shard_id"))
             shard, constant = (shard_entry if shard_entry is not None else (None, None))
+
+            # Resolve the sympy constant for this trajectory.  Prefer the
+            # typed object from the shard lookup; fall back to parsing the
+            # record's ``constant`` string (populated by the searcher) so
+            # post-process can run standalone — without it, attributes that
+            # need the limit (``delta_sequence``) silently error out.
+            constant_sympy = constant.value_sympy if constant is not None else None
+            if constant_sympy is None:
+                const_str = record.get("constant")
+                if const_str:
+                    try:
+                        constant_sympy = sp.sympify(const_str)
+                    except (sp.SympifyError, SyntaxError, TypeError):
+                        constant_sympy = None
+
             try:
                 start, direction = self._reconstruct_positions(cmf, record)
                 handler = TrajectoryAttributesHandler.from_cmf(
                     cmf, direction, start,
-                    constant=constant.value_sympy if constant is not None else None,
+                    constant=constant_sympy,
                     searchable=shard,
                 )
             except Exception as e:
@@ -261,7 +294,7 @@ class Tier3PostProcessModV1(PostProcessModScheme):
                 continue
 
             patch = {"trajectory_id": tid, "extended_metrics": {}}
-            sink((handler.trajectory_matrix(), patch))
+            sink((handler.trajectory_matrix(), constant_sympy, patch))
 
     # ------------------------------------------------------------------
     # Helpers

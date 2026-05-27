@@ -86,15 +86,42 @@ def derive_cmf_and_shard_ids(shard) -> tuple[str, str, str]:
     """Return ``(cmf_id, shard_id, shard_encoding_str)`` for *shard*.
 
     * ``cmf_id`` — the CMF name (unique per CMF in the current system).
-    * ``shard_id`` — stable SHA-256 of ``(cmf_id, shard_encoding_str)``.
+    * ``shard_id`` — structural id ``"{cmf_id}__{encoding_hash}"`` where
+      ``encoding_hash`` is a stable SHA-256 truncation of
+      ``(cmf_id, shard_encoding_str)``.  Embedding the cmf_id literally
+      makes shard ids self-describing — any record's shard id discloses
+      its parent CMF without a separate lookup, and the filenames written
+      by the pipeline can simply be ``{shard_id}.jsonl``.
     * ``shard_encoding_str`` — canonical ±1 sign vector string (see
       :func:`_serialize_encoding`).  Also used as part of trajectory ids
       so the two levels stay consistent.
     """
     cmf_id = shard.cmf_name
     shard_encoding_str = _serialize_encoding(shard)
-    shard_id = _stable_id(cmf_id, shard_encoding_str)
+    encoding_hash = _stable_id(cmf_id, shard_encoding_str)
+    shard_id = f"{cmf_id}__{encoding_hash}"
     return cmf_id, shard_id, shard_encoding_str
+
+
+def derive_trajectory_id(
+    shard_id: str,
+    cmf_name: str,
+    shard_encoding_str: str,
+    start_tuple,
+    direction_tuple,
+) -> str:
+    """Return a structural trajectory id ``"{shard_id}__{traj_hash}"``.
+
+    The trailing ``traj_hash`` is a stable SHA-256 truncation of
+    ``(cmf_name, shard_encoding_str, start, direction)`` — the same data
+    that previously formed the entire id, just hashed onto the back of
+    the shard id so the result is self-describing (you can recover the
+    cmf and shard by rsplitting on ``"__"``).
+    """
+    traj_hash = _stable_id(
+        cmf_name, shard_encoding_str, str(start_tuple), str(direction_tuple),
+    )
+    return f"{shard_id}__{traj_hash}"
 
 
 # ---------------------------------------------------------------------------
@@ -113,8 +140,8 @@ def build_trajectory_dto(
 ) -> "TrajectoryDTO":
     """Build a ``TrajectoryDTO`` carrying Tier-1 attributes from a handler.
 
-    The ``trajectory_id`` is deterministic: SHA-256 of
-    ``(cmf_name, shard_encoding_str, start_tuple, direction_tuple)``.
+    The ``trajectory_id`` is built via :func:`derive_trajectory_id`:
+    ``"{shard_id}__{stable_hash(cmf_name, shard_encoding_str, start, direction)}"``.
 
     ``extended_metrics`` is left empty; background workers compute the
     asynchronous (Tier-2) attributes after the DTO is enqueued.
@@ -134,7 +161,9 @@ def build_trajectory_dto(
 
     start_t = _position_to_tuple(start)
     dir_t = _position_to_tuple(direction)
-    trajectory_id = _stable_id(cmf_name, shard_encoding_str, str(start_t), str(dir_t))
+    trajectory_id = derive_trajectory_id(
+        shard_id, cmf_name, shard_encoding_str, start_t, dir_t,
+    )
     return TrajectoryDTO(
         trajectory_id=trajectory_id,
         cmf_id=cmf_id,
@@ -270,6 +299,8 @@ class TrajectoryAttributesHandler:
         attributes (linear_recurrence, companion, eigenvalues, kamidelta,
         gcd_slope) all operate on raw ``M``.
         """
+        if self.walk_type() == 1:
+            self._traj = self._traj.inv().T
         return self._traj
 
     def traj_size(self) -> int:
@@ -287,10 +318,7 @@ class TrajectoryAttributesHandler:
         """
         def compute():
             try:
-                walked = self._traj.walk({n: 1}, depth, {n: 0})
-                if self.walk_type() == 1:
-                    walked = walked.inv().T
-                return walked
+                return self.trajectory_matrix().walk({n: 1}, depth, {n: 0})
             except Exception as e:
                 Logger(
                     f'Walk failed at depth {depth}: {e}',
@@ -298,14 +326,6 @@ class TrajectoryAttributesHandler:
                 ).log()
                 return None
         return self._get_utility(f"walked_{depth}", compute)
-
-    def _inv_transpose_trajectory_matrix(self) -> Matrix:
-        """Return the inverse transpose of the trajectory matrix"""
-        def compute():
-            if self.walk_type() == 1:
-                return self.trajectory_matrix().inv().T
-            return self.trajectory_matrix()
-        return self._get_utility(f"inv_transpose_trajectory_matrix", compute)
 
     # ==================================================================
     #  LINEAR RECURRENCE  (the core object from ramanujantools)
@@ -324,7 +344,7 @@ class TrajectoryAttributesHandler:
         All downstream attributes (recurrence_matrix, kamidelta, asymptotics)
         are methods on this object.
         """
-        return self._get("linear_recurrence", lambda: LinearRecurrence(self._inv_transpose_trajectory_matrix()))
+        return self._get("linear_recurrence", lambda: LinearRecurrence(self.trajectory_matrix()))
 
     # ==================================================================
     #  COMPANION MATRIX
