@@ -16,6 +16,8 @@ from dreamer.utils.schemes.post_process_scheme import PostProcessModScheme
 from dreamer.utils.schemes.extraction_scheme import ExtractionModScheme
 from dreamer.utils.storage import Exporter, Importer, Formats
 from dreamer.utils.storage.atlas_writer import write_cmf_records
+from dreamer.utils.storage.summary import write_summary
+from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
 from dreamer.utils.types import CMFData
 from dreamer.utils.logger import Logger
 from dreamer.utils.constants.constant import Constant
@@ -185,6 +187,48 @@ class System:
         # but we also skip the call when no post-processor was supplied.
         if self.post_processor is not None:
             self.post_processor(filtered_priorities).execute()
+
+        # =======================================================
+        # SUMMARY - write a human-readable summary.md of the run
+        # =======================================================
+        # Always attempt to write summary.md so the run leaves a self-describing
+        # artifact behind, even if earlier stages produced little data.
+        # ``this_run_shards`` scopes the summary to the shards *this* pipeline
+        # invocation actually touched: extraction sampling is stochastic, so
+        # earlier runs may have left orphan JSONLs in the search-results dir
+        # with a different shard_encoding hash — without the filter those
+        # would silently inflate the shard count above what the extraction
+        # stage reports.  Failures here are non-fatal: the data on disk is
+        # still intact even if rendering breaks.
+        try:
+            # Source the "this-run" shard set from ``shard_dict`` (extraction
+            # output), not ``priorities`` — the analyzer writes per-shard
+            # JSONLs for *every* shard it sampled, including ones that
+            # didn't pass the identification threshold and so don't make it
+            # into priorities.  We want all of them in the summary.
+            this_run_shards: Dict[str, Set[str]] = defaultdict(set)
+            for const, shards in shard_dict.items():
+                for shard in shards:
+                    try:
+                        _, shard_id, _ = derive_cmf_and_shard_ids(shard)
+                    except Exception:
+                        continue
+                    this_run_shards[const.name].add(shard_id)
+            summary_path = write_summary(
+                search_results_root=sys_config.EXPORT_SEARCH_RESULTS,
+                export_cmfs_root=sys_config.EXPORT_CMFS,
+                this_run_shards=dict(this_run_shards) or None,
+            )
+            if summary_path:
+                Logger(
+                    f"Run summary written to {summary_path}",
+                    Logger.Levels.info,
+                ).log()
+        except Exception as e:
+            Logger(
+                f"Failed to write run summary: {e}",
+                Logger.Levels.warning,
+            ).log()
 
     def __loading_stage(self, constants: List[Constant]) -> Dict[Constant, List[CMFData]]:
         """

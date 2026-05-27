@@ -2635,3 +2635,253 @@ class TestAtlasWriter:
         bc = BaseCMF(const=e, cmf_name="my_cmf", cmf=simple_cmf, shifts=[0, 0])
         assert "e" not in bc.cmf_name.split("__")
         assert bc.cmf_name.startswith("my_cmf")
+
+
+# ---------------------------------------------------------------------------
+# Summary writer
+# ---------------------------------------------------------------------------
+
+class TestSummaryWriter:
+    """Tests for ``dreamer.utils.storage.summary``.
+
+    Each test builds a tiny EXPORT_SEARCH_RESULTS tree by hand (so the test
+    is independent of the rest of the pipeline) and then asserts on the
+    rendered markdown.
+    """
+
+    @staticmethod
+    def _write_jsonl(path, records):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+
+    def test_returns_none_when_root_missing(self, tmp_path):
+        from dreamer.utils.storage.summary import write_summary
+
+        missing = tmp_path / "does_not_exist"
+        out = write_summary(search_results_root=str(missing))
+        assert out is None
+
+    def test_empty_root_produces_minimal_report(self, tmp_path):
+        """An empty search-results directory still produces a valid markdown file."""
+        from dreamer.utils.storage.summary import write_summary
+
+        root = tmp_path / "search results"
+        root.mkdir()
+        out = write_summary(search_results_root=str(root))
+        assert out is not None
+        text = (root / "summary.md").read_text()
+        assert "Pipeline Summary" in text
+        assert "nothing to summarise" in text.lower()
+
+    def test_single_shard_renders_full_report(self, tmp_path):
+        """A small synthetic JSONL renders all sections with correct stats."""
+        from dreamer.utils.storage.summary import write_summary
+
+        root = tmp_path / "search results"
+        const_dir = root / "log-2"
+        cmf_id = "pFq_2_1_-1__0_0_0"
+        shard_id = f"{cmf_id}__deadbeefdeadbeef"
+        records = [
+            {
+                "trajectory_id": f"{shard_id}__aaaaaaaaaaaaaaaa",
+                "cmf_id": cmf_id,
+                "shard_id": shard_id,
+                "constant": "log(2)",
+                "start_point": [-3, 1, -1],
+                "direction": [-1, 1, 0],
+                "delta_estimate": 0.28,
+                "identified": True,
+            },
+            {
+                "trajectory_id": f"{shard_id}__bbbbbbbbbbbbbbbb",
+                "cmf_id": cmf_id,
+                "shard_id": shard_id,
+                "constant": "log(2)",
+                "start_point": [-3, 1, -1],
+                "direction": [0, 1, 0],
+                "delta_estimate": -0.5,
+                "identified": True,
+            },
+            {
+                "trajectory_id": f"{shard_id}__cccccccccccccccc",
+                "cmf_id": cmf_id,
+                "shard_id": shard_id,
+                "constant": "log(2)",
+                "start_point": [-3, 1, -1],
+                "direction": [-1, 0, -1],
+                # ``-inf`` is the documented non-convergence sentinel — must
+                # be ignored, not propagated into max/sum stats.
+                "delta_estimate": float("-inf"),
+                "identified": False,
+            },
+        ]
+        self._write_jsonl(str(const_dir / f"{shard_id}.jsonl"), records)
+
+        out = write_summary(search_results_root=str(root))
+        assert out is not None
+        text = (root / "summary.md").read_text()
+
+        # Header + overview
+        assert "Pipeline Summary" in text
+        assert "log-2" in text
+        # Best-δ value rounded to 4 decimals
+        assert "0.2800" in text
+        # Per-CMF section appeared
+        assert f"CMF `{cmf_id}`" in text
+        # Per-shard table row: trajectories=3, identified=2, positive δ=1
+        # (the -inf row counts toward trajectories but not delta-derived stats)
+        assert "| 3 | 2 | 1 |" in text
+        # Best trajectory line carries start → direction from the winning record
+        assert "`[-3, 1, -1]` → `[-1, 1, 0]`" in text
+        # Overall-best block also names the start and direction
+        assert "start point: `[-3, 1, -1]`" in text
+        assert "direction: `[-1, 1, 0]`" in text
+
+    def test_this_run_shards_filter_drops_orphan_files(self, tmp_path):
+        """Stale JSONLs (from a previous run with different sampling) must
+        be dropped when ``this_run_shards`` is supplied.
+
+        Reproduces the user-reported scenario: extraction sampling found 2
+        shards this run, but the search-results dir still has a 3rd file
+        on disk from a prior run with different stochastic sampling.
+        """
+        from dreamer.utils.storage.summary import write_summary
+
+        root = tmp_path / "search results"
+        const_dir = root / "log-2"
+        cmf_id = "pFq_X"
+
+        current_shards = {
+            f"{cmf_id}__1111111111111111",
+            f"{cmf_id}__2222222222222222",
+        }
+        orphan_shard = f"{cmf_id}__3333333333333333"
+
+        for sid in list(current_shards) + [orphan_shard]:
+            self._write_jsonl(
+                str(const_dir / f"{sid}.jsonl"),
+                [{
+                    "trajectory_id": f"{sid}__deadbeefdeadbeef",
+                    "cmf_id": cmf_id, "shard_id": sid,
+                    "constant": "log-2",
+                    "start_point": [0, 0], "direction": [1, 0],
+                    "delta_estimate": 0.5, "identified": True,
+                }],
+            )
+
+        # Without the filter — all three appear (legacy behaviour)
+        write_summary(search_results_root=str(root))
+        all_text = (root / "summary.md").read_text()
+        assert orphan_shard.rsplit("__", 1)[-1][:18] in all_text
+
+        # With the filter — only the two this-run shards appear
+        write_summary(
+            search_results_root=str(root),
+            this_run_shards={"log-2": current_shards},
+        )
+        filtered_text = (root / "summary.md").read_text()
+        assert orphan_shard.rsplit("__", 1)[-1][:18] not in filtered_text
+        for sid in current_shards:
+            assert sid.rsplit("__", 1)[-1][:18] in filtered_text
+        # Overview shard count must be 2, not 3
+        assert "| 2 |" in filtered_text
+        assert "this run only" in filtered_text
+
+    def test_this_run_shards_drops_unknown_constants(self, tmp_path):
+        """A constant absent from ``this_run_shards`` must not leak into the summary."""
+        from dreamer.utils.storage.summary import write_summary
+
+        root = tmp_path / "search results"
+        # Old data from a previous "pi" run still on disk.
+        old_shard = "pFq_old__deadbeefdeadbeef"
+        self._write_jsonl(
+            str(root / "pi" / f"{old_shard}.jsonl"),
+            [{
+                "trajectory_id": f"{old_shard}__aaaaaaaaaaaaaaaa",
+                "cmf_id": "pFq_old", "shard_id": old_shard,
+                "constant": "pi",
+                "delta_estimate": 0.9, "identified": True,
+            }],
+        )
+        # Current run touched only "log-2".
+        new_shard = "pFq_new__cafef00dcafef00d"
+        self._write_jsonl(
+            str(root / "log-2" / f"{new_shard}.jsonl"),
+            [{
+                "trajectory_id": f"{new_shard}__bbbbbbbbbbbbbbbb",
+                "cmf_id": "pFq_new", "shard_id": new_shard,
+                "constant": "log-2",
+                "delta_estimate": 0.4, "identified": True,
+            }],
+        )
+
+        write_summary(
+            search_results_root=str(root),
+            this_run_shards={"log-2": {new_shard}},
+        )
+        text = (root / "summary.md").read_text()
+        assert "log-2" in text
+        # The "pi" constant section must not appear — it's stale.
+        assert "## pi" not in text
+        assert "`pi`" not in text or "constant: `pi`" not in text
+
+    def test_overall_best_picks_max_across_constants(self, tmp_path):
+        """Best δ in the overview must aggregate across every constant."""
+        from dreamer.utils.storage.summary import write_summary
+
+        root = tmp_path / "search results"
+
+        def make_shard(const_name: str, cmf_id: str, hash_suffix: str, delta: float):
+            shard_id = f"{cmf_id}__{hash_suffix}"
+            rec = {
+                "trajectory_id": f"{shard_id}__deadbeefdeadbeef",
+                "cmf_id": cmf_id,
+                "shard_id": shard_id,
+                "constant": const_name,
+                "delta_estimate": delta,
+                "identified": True,
+            }
+            self._write_jsonl(str(root / const_name / f"{shard_id}.jsonl"), [rec])
+
+        make_shard("log-2", "pFq_A", "1111111111111111", 0.10)
+        make_shard("pi",    "pFq_B", "2222222222222222", 0.50)
+        make_shard("e",     "pFq_C", "3333333333333333", 0.30)
+
+        out = write_summary(search_results_root=str(root))
+        text = (root / "summary.md").read_text()
+
+        # Each constant got a row
+        for const in ("log-2", "pi", "e"):
+            assert f"`{const}`" in text
+        # Overall best comes from the "pi" shard
+        assert "Overall best δ" in text
+        assert "0.5000" in text
+        assert "constant: `pi`" in text
+
+    def test_empty_patch_lines_do_not_inflate_trajectory_counts(self, tmp_path):
+        """Patches merge into base records — they must not be counted as new trajectories."""
+        from dreamer.utils.storage.summary import write_summary
+
+        root = tmp_path / "search results"
+        cmf_id = "pFq_X"
+        shard_id = f"{cmf_id}__deadbeefdeadbeef"
+        tid = f"{shard_id}__cafef00dcafef00d"
+        records = [
+            {
+                "trajectory_id": tid,
+                "cmf_id": cmf_id, "shard_id": shard_id,
+                "constant": "log-2",
+                "delta_estimate": 0.7,
+                "identified": True,
+            },
+            {"trajectory_id": tid, "extended_metrics": {"gcd_slope": 0.5}},
+            {"trajectory_id": tid, "extended_metrics": {"asymptotics": ["1"]}},
+        ]
+        self._write_jsonl(str(root / "log-2" / f"{shard_id}.jsonl"), records)
+
+        write_summary(search_results_root=str(root))
+        text = (root / "summary.md").read_text()
+        # One unique trajectory_id → 1 trajectory, 1 identified, 1 positive δ
+        assert "| 1 | 1 | 1 |" in text

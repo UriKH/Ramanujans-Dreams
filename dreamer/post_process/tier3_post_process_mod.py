@@ -193,7 +193,7 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         config_overrides: dict,
     ) -> None:
         """Run the producer → worker_pool pipeline for one shard JSONL.
-
+        
         Skips entirely if every trajectory is already fully covered (no
         ``push`` calls → no ``worker_pool`` is created, no subprocess spawn).
         """
