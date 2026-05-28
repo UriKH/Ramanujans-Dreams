@@ -31,6 +31,7 @@ dependencies = [
     "pandas",
     "scipy",
     "pulp",
+    "mip",
     "LIReC @ git+https://github.com/RamanujanMachine/LIReC.git@main",
     "cysignals",
     "fpylll"

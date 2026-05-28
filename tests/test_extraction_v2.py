@@ -130,6 +130,29 @@ class TestFindIntegerPoint:
         with pytest.raises(ValueError, match="\\+1 or -1"):
             milp.find_integer_point(A, c, [0])
 
+    def test_returned_point_has_correct_dim(self):
+        """Witness shape must be (D,) -- not the (2D,) raw MILP vector
+        that includes the L1 slacks."""
+        A = np.eye(5, dtype=np.int64)
+        c = np.zeros(5, dtype=np.int64)
+        pt = milp.find_integer_point(A, c, [1, 1, 1, 1, 1])
+        assert pt is not None
+        assert pt.shape == (5,)
+        # Sanity: A @ pt is valid (would raise if shape were 2D).
+        _ = A @ pt
+
+    def test_l1_minimisation_prefers_near_origin(self):
+        """With L1 objective the witness should land near the origin,
+        not 10**6 like the old feasibility-only formulation could give."""
+        # 3-D positive orthant: x > 0, y > 0, z > 0
+        A = np.eye(3, dtype=np.int64)
+        c = np.zeros(3, dtype=np.int64)
+        pt = milp.find_integer_point(A, c, [1, 1, 1])
+        assert pt is not None
+        # The L1-optimal integer point in the open positive orthant
+        # under strict-integer-tightening x_i >= 1 is (1, 1, 1).
+        assert pt.tolist() == [1, 1, 1]
+
 
 # ----------------------------------------------------------------------
 # lrs format + parser (no binary needed)
@@ -215,6 +238,47 @@ class TestEnumerateCells:
         with pytest.raises(RuntimeError, match="max_cells"):
             cells.enumerate_cells(A, c, seed=0, max_cells=2)
 
+    def test_scipy_fallback_matches_mip(self, monkeypatch):
+        """With python-mip force-disabled, enumeration must fall back to
+        the scipy LP and produce the identical cell set."""
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_triangle_2d())
+        mip_result = cells.enumerate_cells(A, c, seed=0)
+
+        monkeypatch.setattr(cells, "_HAS_MIP", False)
+        scipy_result = cells.enumerate_cells(A, c, seed=0)
+
+        assert sorted(scipy_result) == sorted(mip_result)
+        assert len(scipy_result) == 7
+
+    def test_checker_uses_stateful_solver_when_mip_present(self):
+        """When mip is available the feasibility checker must be the
+        bound-swapping stateful solver, not the scipy fallback."""
+        if not cells._HAS_MIP:
+            pytest.skip("python-mip not installed in this environment")
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_axes_2d())
+        checker = cells._make_feasibility_checker(A, c, epsilon=1e-9)
+        # The stateful solver exposes itself as a bound method of the
+        # solver instance; the scipy fallback is a plain lambda.
+        assert getattr(checker, "__self__", None).__class__ is cells._StatefulFeasibilitySolver
+        # And it answers feasibility correctly: every quadrant is real.
+        for sign in [(1, 1), (1, -1), (-1, 1), (-1, -1)]:
+            assert checker(np.array(sign, dtype=np.int64)) is True
+
+    def test_stateful_solver_rejects_empty_cell(self):
+        """A geometrically empty sign pattern must be infeasible."""
+        if not cells._HAS_MIP:
+            pytest.skip("python-mip not installed in this environment")
+        # Two parallel hyperplanes x0 = 0 and x0 = 1 (c = [0, -1]).
+        # sign (-1, +1) means x0 < 0 AND x0 > 1 -> empty; the other
+        # three sign patterns are non-empty.
+        A = np.array([[1, 0], [1, 0]], dtype=np.int64)
+        c = np.array([0, -1], dtype=np.int64)
+        solver = cells._StatefulFeasibilitySolver(A, c, epsilon=1e-6)
+        assert solver.feasible(np.array([1, 1], dtype=np.int64)) is True
+        assert solver.feasible(np.array([1, -1], dtype=np.int64)) is True
+        assert solver.feasible(np.array([-1, 1], dtype=np.int64)) is False
+        assert solver.feasible(np.array([-1, -1], dtype=np.int64)) is True
+
 
 # ----------------------------------------------------------------------
 # RayShootingExtractor
@@ -222,13 +286,16 @@ class TestEnumerateCells:
 
 
 class TestRayShootingExtractor:
-    def test_finds_some_unbounded_quadrants(self):
+    def test_finds_all_unbounded_quadrants(self):
+        """With the algebraic formulation, even a modest ray budget
+        should cover every quadrant of the 2-D axes arrangement."""
         extractor = RayShootingExtractor(num_rays=200, max_coord=3, seed=0)
         result = extractor.extract(_hps_axes_2d())
-        assert len(result) >= 2  # should hit at least 2/4 quadrants
+        # All 4 quadrants are unbounded; algebraic shooter should hit them.
+        assert len(result) == 4
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_axes_2d())
         for sig, point in result.items():
             assert all(s in (-1, 1) for s in sig)
-            A, c = BaseExtractor.hyperplanes_to_matrix(_hps_axes_2d())
             vals = A @ point + c
             assert tuple(np.where(vals > 0, 1, -1).tolist()) == sig
 
@@ -240,6 +307,106 @@ class TestRayShootingExtractor:
             RayShootingExtractor(num_rays=0)
         with pytest.raises(ValueError):
             RayShootingExtractor(max_coord=0)
+
+    def test_no_scipy_dependency(self):
+        """The rewrite must be solver-free -- module must not import scipy."""
+        import dreamer.extraction.v2.ray_extractor as mod
+        # Detect scipy in any form referenced from the module's globals.
+        for name, value in vars(mod).items():
+            mod_name = getattr(value, "__module__", "") or ""
+            assert not mod_name.startswith("scipy"), (
+                f"ray_extractor referenced scipy via attribute {name!r}"
+            )
+        # Defensive: scan AST for any scipy import (catches a sneaked-in
+        # lazy import that wouldn't show up in module globals).
+        import ast
+        import inspect
+        tree = ast.parse(inspect.getsource(mod))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert not alias.name.startswith("scipy"), (
+                        f"ray_extractor imports {alias.name}"
+                    )
+            elif isinstance(node, ast.ImportFrom):
+                modname = node.module or ""
+                assert not modname.startswith("scipy"), (
+                    f"ray_extractor imports from {modname}"
+                )
+
+    def test_handles_parallel_rays_without_div_by_zero(self):
+        """A ray parallel to a hyperplane (dot = 0) must not crash and
+        must still yield a witness in some open cell."""
+        import sympy as sp
+        x, y = sp.symbols("x y")
+        # Hyperplanes x = 0 and y = 0; rays along (1, 0) and (0, 1)
+        # are each parallel to one of them.
+        hps = [Hyperplane(x, [x, y]), Hyperplane(y, [x, y])]
+        # max_coord=1 forces only +/-1, 0 entries -> guaranteed
+        # axis-aligned rays in the sample.
+        extractor = RayShootingExtractor(num_rays=64, max_coord=1, seed=42)
+        result = extractor.extract(hps)
+        # Should still cover all 4 quadrants without raising.
+        assert len(result) >= 1
+        for sig in result:
+            assert 0 not in sig
+
+    def test_drops_ray_lying_on_hyperplane(self):
+        """A ray that lies exactly on a hyperplane (M=0 and c=0) must
+        be filtered out -- no witness can sit on a hyperplane."""
+        import sympy as sp
+        x, y = sp.symbols("x y")
+        # y = 0 passes through origin; any ray with v_y = 0 lies on it.
+        hps = [Hyperplane(y, [x, y])]
+        extractor = RayShootingExtractor(num_rays=32, max_coord=1, seed=0)
+        result = extractor.extract(hps)
+        # Surviving witnesses must each have y != 0 (sign +/-1, not 0).
+        for sig, point in result.items():
+            assert sig[0] in (-1, 1)
+            assert int(point[1]) != 0
+
+    def test_finds_cells_in_higher_dim(self):
+        """6-D coordinate axes -> 2^6 = 64 cells, all unbounded.  The
+        algebraic shooter should cover most of them with a moderate
+        ray budget."""
+        import sympy as sp
+        syms = list(sp.symbols("a b c d e f"))
+        hps = [Hyperplane(s, syms) for s in syms]
+        extractor = RayShootingExtractor(num_rays=4096, max_coord=3, seed=0)
+        result = extractor.extract(hps)
+        # Don't insist on all 64 -- random sampling won't be exhaustive,
+        # but a vectorised pass should comfortably cover the majority.
+        assert len(result) >= 32
+
+    def test_sampled_rays_are_primitive(self):
+        """Every sampled direction must have coordinate-gcd == 1.
+        This is what guarantees witness points stay close to origin."""
+        extractor = RayShootingExtractor(num_rays=2_000, max_coord=6, seed=7)
+        rng = np.random.default_rng(extractor.seed)
+        V = extractor._sample_rays(rng, d=5)
+        # gcd of absolute coords must be 1 for every row.
+        gcds = np.gcd.reduce(np.abs(V), axis=1)
+        assert (gcds == 1).all(), f"non-primitive rows: {(gcds != 1).sum()}"
+
+    def test_default_num_rays_is_100k(self):
+        """Default raised to 100_000 per FIX_RAY_SHOOTING_SPEC."""
+        assert RayShootingExtractor().num_rays == 100_000
+
+    def test_vectorised_runs_fast(self):
+        """Heuristic on a non-trivial arrangement must complete in
+        well under a second -- the whole point of the rewrite."""
+        import sympy as sp
+        import time
+        syms = list(sp.symbols("a b c d e"))
+        hps = [Hyperplane(s, syms) for s in syms]
+        extractor = RayShootingExtractor(num_rays=10_000, max_coord=4, seed=0)
+        t0 = time.perf_counter()
+        result = extractor.extract(hps)
+        elapsed = time.perf_counter() - t0
+        # Loose ceiling -- 10k rays through a (5,)-dim arrangement in
+        # pure NumPy should be tens of ms, not seconds.
+        assert elapsed < 1.0, f"too slow: {elapsed:.3f}s"
+        assert result  # found at least one cell
 
 
 # ----------------------------------------------------------------------

@@ -68,8 +68,10 @@ def find_integer_point(
     N, D = A.shape
     # s_i * (A_i . x + c_i) >= 1  <=>  (s_i * A_i) . x >= 1 - s_i * c_i
     A_signed = (s[:, None] * A).astype(np.float64)
-    lower = (1 - s * c).astype(np.float64)
-    upper = np.full(N, np.inf)
+    # lower = (1 - s * c).astype(np.float64)
+    # upper = np.full(N, np.inf)
+    lower_shard = (1 - s * c).astype(np.float64)
+    upper_shard = np.full(N, np.inf)
 
     # 2. The L1 Norm "Dummy" Constraints
     # We introduce D new variables 't' such that t_i >= |x_i|.
@@ -122,7 +124,9 @@ def find_integer_point(
     )
     if not result.success or result.x is None:
         return None
-    pt = np.rint(result.x).astype(np.int64)
+    # Decision vector is [x_1..x_D, t_1..t_D] under L1 minimisation —
+    # the trailing D slacks encode |x_i| and are not part of the witness.
+    pt = np.rint(result.x[:D]).astype(np.int64)
     # Final sanity check: round-tripping the MILP solution should still
     # satisfy the strict integer-tight constraint.  If rounding pushed
     # us onto a hyperplane, treat the cell as infeasible.
