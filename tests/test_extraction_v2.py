@@ -478,6 +478,20 @@ class TestRayShootingExtractor:
             RayShootingExtractor(batch_size=0)
         with pytest.raises(ValueError):
             RayShootingExtractor(plateau_ratio=1.5)
+        with pytest.raises(ValueError):
+            RayShootingExtractor(plateau_patience=0)
+
+    def test_plateau_patience_needs_consecutive_low_batches(self):
+        """patience>1 must NOT stop on a single low-yield batch -- it keeps
+        going until the low streak is sustained, so it discovers at least as
+        many cells as patience=1 on the same arrangement/seed."""
+        import sympy as sp
+        syms = list(sp.symbols("a b c d"))      # 4-D axes: 16 unbounded cells
+        hps = [Hyperplane(s, syms) for s in syms]
+        kw = dict(num_rays=200_000, batch_size=2_000, plateau_ratio=1e-2, seed=0)
+        eager = RayShootingExtractor(plateau_patience=1, **kw).extract(hps)
+        patient = RayShootingExtractor(plateau_patience=5, **kw).extract(hps)
+        assert len(patient) >= len(eager)
 
     def test_no_scipy_dependency(self):
         """The rewrite must be solver-free -- module must not import scipy."""

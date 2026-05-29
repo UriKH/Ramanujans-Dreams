@@ -55,15 +55,22 @@ class RayShootingExtractor(BaseExtractor):
     Vectorised algebraic ray-shooting heuristic.
 
     :param num_rays: Maximum number of integer direction rays to sample
-        (the cap; adaptive batching may stop earlier).
+        (the cap; adaptive batching may stop earlier).  On low-D
+        arrangements the plateau stop fires well before this; on high-D
+        ones (where random-ray coverage does not saturate) this cap is the
+        effective coverage/time budget.  Default ``2_000_000``.
     :param max_coord: Each ray direction is sampled uniformly from
         ``[-max_coord, max_coord]^D \\ {0}``.
     :param batch_size: Rays are shot in batches of this size; after each
         batch the new-cell yield is checked for the plateau stop.
-    :param plateau_ratio: Stop early once a batch contributes fewer than
-        ``plateau_ratio * batch_size`` *new* cells (diminishing returns),
-        provided at least one full batch has been shot.  ``0`` disables
-        early stopping (always shoot the full ``num_rays``).
+    :param plateau_ratio: A batch is "low-yield" when it contributes fewer
+        than ``plateau_ratio * batch_size`` *new* cells.  ``0`` disables
+        early stopping (always shoot the full ``num_rays``).  Default
+        ``1e-4`` (the old ``1e-3`` stopped ~10% short on D=5/7 — the cell
+        tail is long and low-but-nonzero).
+    :param plateau_patience: Stop only after this many *consecutive*
+        low-yield batches (default ``3``).  The yield tail is lumpy, so a
+        single low batch must not end the search; a sustained streak does.
     :param seed: RNG seed for reproducibility.
     :param refine_witnesses: When ``True``, after discovery polish the ray
         witnesses with the same MILP the exact extractor uses
@@ -93,10 +100,11 @@ class RayShootingExtractor(BaseExtractor):
     def __init__(
         self,
         *,
-        num_rays: int = 1_000_000,
+        num_rays: int = 2_000_000,
         max_coord: int = 5,
         batch_size: int = 20_000,
-        plateau_ratio: float = 1e-3,
+        plateau_ratio: float = 1e-4,
+        plateau_patience: int = 3,
         seed: Optional[int] = 0,
         refine_witnesses: bool = False,
         refine_l1_threshold: float = 50.0,
@@ -110,6 +118,8 @@ class RayShootingExtractor(BaseExtractor):
             raise ValueError(f"batch_size must be positive, got {batch_size}")
         if not 0.0 <= plateau_ratio <= 1.0:
             raise ValueError(f"plateau_ratio must be in [0, 1], got {plateau_ratio}")
+        if plateau_patience < 1:
+            raise ValueError(f"plateau_patience must be >= 1, got {plateau_patience}")
         if refine_l1_threshold < 0:
             raise ValueError(
                 f"refine_l1_threshold must be >= 0, got {refine_l1_threshold}"
@@ -118,6 +128,7 @@ class RayShootingExtractor(BaseExtractor):
         self.max_coord = max_coord
         self.batch_size = batch_size
         self.plateau_ratio = plateau_ratio
+        self.plateau_patience = plateau_patience
         self.seed = seed
         self.refine_witnesses = refine_witnesses
         self.refine_l1_threshold = refine_l1_threshold
@@ -147,6 +158,7 @@ class RayShootingExtractor(BaseExtractor):
         # *batches* is in Python (a handful of iterations).
         out: ShardMapping = {}
         shot = 0
+        low_streak = 0
         while shot < self.num_rays:
             if deadline is not None and time.time() > deadline:
                 break
@@ -159,14 +171,19 @@ class RayShootingExtractor(BaseExtractor):
             before = len(out)
             self._collect_unique_cells_into(points, A, c, out)
             new = len(out) - before
-            # Plateau stop: once we've shot a full batch, bail if the new
-            # cells discovered fell below the ratio threshold.
-            if (
-                self.plateau_ratio > 0.0
-                and shot >= self.batch_size
-                and new < self.plateau_ratio * batch
-            ):
-                break
+            # Plateau stop: bail only after ``plateau_patience`` *consecutive*
+            # batches each fall below the yield threshold.  The cell-yield tail
+            # is lumpy (a batch can find nothing, then the next finds a few),
+            # so stopping on the first low batch (the old behaviour) quit far
+            # too early -- it cost ~10% of the shards on D=5/7.  Requiring a
+            # sustained low streak captures that tail cheaply.
+            if self.plateau_ratio > 0.0 and shot >= self.batch_size:
+                if new < self.plateau_ratio * batch:
+                    low_streak += 1
+                    if low_streak >= self.plateau_patience:
+                        break
+                else:
+                    low_streak = 0
 
         if self.refine_witnesses:
             self._refine_witnesses(A, c, out, deadline=deadline)
