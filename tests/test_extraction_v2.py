@@ -245,6 +245,28 @@ class TestEnumerateCells:
         found = cells.enumerate_cells(A, c, seed=0)  # default max_cells=None
         assert len(found) == 7  # full arrangement enumerated, no cap raised
 
+    def test_find_start_cell_prefers_near_origin(self):
+        """The reverse-search base is sampled near the origin first.  With
+        two 1-D hyperplanes far out at x = +-50, the tight [-3, 3] box lies
+        entirely inside the middle cell (-1, +1); a far-out base would land
+        in an outer cell instead, so getting the middle cell confirms the
+        near-origin bias (which front-loads fat, integer-rich cells)."""
+        A = np.array([[1], [1]], dtype=np.int64)
+        c = np.array([-50, 50], dtype=np.int64)  # hyperplanes x = 50 and x = -50
+        base = cells._find_start_cell(A, c, rng=np.random.default_rng(0))
+        assert tuple(base.tolist()) == (-1, 1)
+
+    def test_find_start_cell_widens_when_tight_box_unusable(self):
+        """If every lattice point in the tight box lies exactly on a
+        hyperplane, sampling must widen outward until a real cell is found
+        rather than giving up."""
+        ks = list(range(-3, 4))  # hyperplanes x = -3, -2, ..., 3
+        A = np.array([[1]] * len(ks), dtype=np.int64)
+        c = np.array([-k for k in ks], dtype=np.int64)
+        base = cells._find_start_cell(A, c, rng=np.random.default_rng(0))
+        assert base.shape == (len(ks),)
+        assert 0 not in base.tolist()  # a genuine open cell, not on a hyperplane
+
     def test_scipy_fallback_matches_mip(self, monkeypatch):
         """With python-mip force-disabled, enumeration must fall back to
         the scipy LP and produce the identical cell set."""
@@ -380,6 +402,32 @@ class TestRayShootingExtractor:
 
     def test_empty_hyperplanes(self):
         assert RayShootingExtractor().extract([]) == {}
+
+    def test_collision_keeps_nearest_witness(self):
+        """When two rays land in the same cell, the nearest-to-origin
+        (min-L1) witness is kept regardless of arrival order."""
+        ext = RayShootingExtractor()
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_axes_2d())
+        for order in ([[3, 3], [1, 1]], [[1, 1], [3, 3]]):
+            out = {}
+            ext._collect_unique_cells_into(np.array(order, dtype=np.int64), A, c, out)
+            assert out[(1, 1)].tolist() == [1, 1]
+
+    def test_refine_witnesses_returns_milp_minimal(self):
+        """With refine_witnesses=True each shard's point is the MILP
+        L1-minimal integer point of its cell -- same cells discovered, and
+        the witness is never worse than the raw ray witness."""
+        hps = _hps_axes_2d()
+        A, c = BaseExtractor.hyperplanes_to_matrix(hps)
+        raw = RayShootingExtractor(num_rays=500, max_coord=5, seed=0).extract(hps)
+        refined = RayShootingExtractor(
+            num_rays=500, max_coord=5, seed=0, refine_witnesses=True
+        ).extract(hps)
+        assert set(raw) == set(refined)  # refinement never changes which cells
+        for sig, pt in refined.items():
+            expected = milp.find_integer_point(A, c, np.asarray(sig, dtype=np.int64))
+            assert pt.tolist() == expected.tolist()
+            assert np.abs(pt).sum() <= np.abs(raw[sig]).sum()
 
     def test_rejects_bad_params(self):
         with pytest.raises(ValueError):
@@ -698,6 +746,19 @@ class TestExtractionManager:
         heur = _FakeHeuristic(returns={(1,): np.array([1])})
         mgr = ExtractionManager(strategy="heuristic", heuristic=heur)  # type: ignore[arg-type]
         assert mgr.extract([]) == {(1,): heur._returns[(1,)]}
+
+    def test_heuristic_refine_forwarded(self):
+        """heuristic_refine must reach the lazily-built RayShootingExtractor."""
+        built = ExtractionManager(
+            strategy="heuristic", heuristic_refine=True
+        )._get_heuristic()
+        assert isinstance(built, RayShootingExtractor)
+        assert built.refine_witnesses is True
+        # Default leaves the solver-free path on.
+        assert (
+            ExtractionManager(strategy="heuristic")._get_heuristic().refine_witnesses
+            is False
+        )
 
     def test_exact_only_propagates_error(self):
         exact = _FakeExact(raises=RuntimeError("nope"))

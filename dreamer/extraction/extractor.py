@@ -387,6 +387,7 @@ class ShardExtractor(ExtractionScheme):
             timeout_seconds=config.extraction.STRATEGY_TIMEOUT_SECONDS,
             exact_unbounded_check=config.extraction.EXACT_UNBOUNDED_CHECK,
             exact_num_workers=config.extraction.EXACT_NUM_WORKERS,
+            heuristic_refine=config.extraction.HEURISTIC_REFINE_WITNESSES,
         )
         mapping = manager.extract(shifted_hps)
 

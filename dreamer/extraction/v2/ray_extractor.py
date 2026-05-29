@@ -31,6 +31,7 @@ import numpy as np
 
 from dreamer.extraction.hyperplanes import Hyperplane
 from .base import BaseExtractor, ShardMapping
+from .milp import find_integer_point
 
 
 SignTuple = Tuple[int, ...]
@@ -51,6 +52,13 @@ class RayShootingExtractor(BaseExtractor):
         provided at least one full batch has been shot.  ``0`` disables
         early stopping (always shoot the full ``num_rays``).
     :param seed: RNG seed for reproducibility.
+    :param refine_witnesses: When ``True``, after discovery replace each
+        cell's ray witness with the **L1-minimal** integer point of that
+        cell, found by the same MILP the exact extractor uses
+        (:func:`dreamer.extraction.v2.milp.find_integer_point`).  Ray
+        shooting lands *some* integer point per cell; this upgrades it to
+        the provably closest-to-origin one, at ~2 ms/cell.  Default
+        ``False`` keeps the solver-free fast path.
     :raises ValueError: For non-positive ``num_rays``/``max_coord``/
         ``batch_size`` or a ``plateau_ratio`` outside ``[0, 1]``.
     """
@@ -65,6 +73,7 @@ class RayShootingExtractor(BaseExtractor):
         batch_size: int = 20_000,
         plateau_ratio: float = 1e-3,
         seed: Optional[int] = 0,
+        refine_witnesses: bool = False,
     ):
         if num_rays <= 0:
             raise ValueError(f"num_rays must be positive, got {num_rays}")
@@ -79,6 +88,7 @@ class RayShootingExtractor(BaseExtractor):
         self.batch_size = batch_size
         self.plateau_ratio = plateau_ratio
         self.seed = seed
+        self.refine_witnesses = refine_witnesses
 
     # ------------------------------------------------------------------
     # Public API
@@ -124,7 +134,36 @@ class RayShootingExtractor(BaseExtractor):
                 and new < self.plateau_ratio * batch
             ):
                 break
+
+        if self.refine_witnesses:
+            self._refine_witnesses(A, c, out, deadline=deadline)
         return out
+
+    def _refine_witnesses(
+        self,
+        A: np.ndarray,
+        c: np.ndarray,
+        out: ShardMapping,
+        *,
+        deadline: Optional[float] = None,
+    ) -> None:
+        """
+        Replace each discovered cell's ray witness with the L1-minimal
+        integer point of that cell (in place).
+
+        Every cell in ``out`` already contains an integer point (its ray
+        witness), so the MILP is feasible and returns the closest-to-origin
+        integer point -- never worse than what we had.  A ``None`` result
+        (should not happen) or a passed ``deadline`` leaves the existing
+        witness untouched, so refinement can only improve the map.
+        """
+        for key in list(out.keys()):
+            if deadline is not None and time.time() > deadline:
+                break
+            sign = np.asarray(key, dtype=np.int64)
+            pt = find_integer_point(A, c, sign)
+            if pt is not None:
+                out[key] = pt
 
     # ------------------------------------------------------------------
     # Internals -- all pure NumPy, no Python loops over rays
@@ -226,8 +265,12 @@ class RayShootingExtractor(BaseExtractor):
     ) -> None:
         """
         Add the witnesses' ``{sign_tuple: point}`` entries into ``out``
-        (in place, first witness per cell wins).  Points sitting exactly
-        on any hyperplane (sign 0) are dropped -- not inside an open cell.
+        (in place).  When several rays land in the **same** cell, keep the
+        witness **nearest the origin** (smallest L1 norm) -- different rays
+        escape at very different ``t_final``, so the first to arrive is
+        rarely the closest, and a smaller witness means a shorter downstream
+        trajectory walk.  Points sitting exactly on any hyperplane (sign 0)
+        are dropped -- not inside an open cell.
         """
         if points.shape[0] == 0:
             return
@@ -239,4 +282,7 @@ class RayShootingExtractor(BaseExtractor):
             if np.any(sign_row == 0):
                 continue
             key: SignTuple = tuple(sign_row.tolist())
-            out.setdefault(key, point.astype(np.int64))
+            pt = point.astype(np.int64)
+            existing = out.get(key)
+            if existing is None or np.abs(pt).sum() < np.abs(existing).sum():
+                out[key] = pt

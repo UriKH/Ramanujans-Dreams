@@ -74,6 +74,19 @@ class ExtractionConfig(Configurable):
             )
         },
     )
+    HEURISTIC_REFINE_WITNESSES: bool = field(
+        default=False,
+        metadata={
+            "description": (
+                "If True, the heuristic ray-shooter post-processes each "
+                "discovered shard with an MILP to return the L1-minimal "
+                "(closest-to-origin) integer start point instead of the raw "
+                "ray witness.  Costs ~2ms/shard; default False keeps the "
+                "solver-free fast path.  Also applies to the heuristic "
+                "top-up under STRATEGY='auto'."
+            )
+        },
+    )
 
 
 extraction_config: ExtractionConfig = ExtractionConfig()

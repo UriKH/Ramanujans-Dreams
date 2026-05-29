@@ -115,9 +115,9 @@ def main() -> int:
     # matter, but a couple touch the extractor directly.
     config.configure(
         extraction={
-            'INIT_POINT_MAX_COORD': 3,
+            'INIT_POINT_MAX_COORD': 4,
             'IGNORE_DUPLICATE_SEARCHABLES': False,
-            'STRATEGY_TIMEOUT_SECONDS': 180.0,
+            'STRATEGY_TIMEOUT_SECONDS': 200.0,
         },
         logging={'GENERATE_LOGS': False},
     )
@@ -127,7 +127,7 @@ def main() -> int:
     print(f"lrs binary available: {lrs_io.lrs_available()}")
     print()
 
-    strategies: List[str] = ["legacy", "auto"] #, "heuristic", "exact"]
+    strategies: List[str] = ["legacy", "auto", "heuristic"] #, "exact"]
     results: List[BenchResult] = []
     for strategy in strategies:
         print(f"-> running strategy={strategy!r} ...", flush=True)

@@ -126,11 +126,12 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
 
     class _Spy:
         def __init__(self, strategy, timeout_seconds, exact_unbounded_check="lp",
-                     exact_num_workers=1):
+                     exact_num_workers=1, heuristic_refine=False):
             captured["strategy"] = strategy
             captured["timeout_seconds"] = timeout_seconds
             captured["exact_unbounded_check"] = exact_unbounded_check
             captured["exact_num_workers"] = exact_num_workers
+            captured["heuristic_refine"] = heuristic_refine
 
         def extract(self, hyperplanes):
             captured["num_hps"] = len(hyperplanes)
@@ -145,6 +146,7 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
     assert captured["strategy"] == "auto"
     assert captured["timeout_seconds"] == extraction_config.STRATEGY_TIMEOUT_SECONDS
     assert captured["exact_unbounded_check"] == extraction_config.EXACT_UNBOUNDED_CHECK
+    assert captured["heuristic_refine"] == extraction_config.HEURISTIC_REFINE_WITNESSES
     assert captured["num_hps"] == 1
     assert len(shards) == 1
     assert tuple(shards[0].encoding) == (1,)

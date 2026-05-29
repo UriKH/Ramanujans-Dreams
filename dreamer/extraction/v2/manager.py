@@ -52,6 +52,9 @@ class ExtractionManager:
     :param heuristic: Optional pre-built :class:`RayShootingExtractor`.
     :param exact_unbounded_check: Forwarded to a lazily-built
         :class:`LrslibExtractor` (``"lp"`` or ``"lrs"``).
+    :param heuristic_refine: Forwarded to a lazily-built
+        :class:`RayShootingExtractor` as ``refine_witnesses`` -- MILP-polish
+        each shard's witness to the L1-minimal integer point.
     :raises ValueError: If ``strategy`` is unknown.
     """
 
@@ -64,6 +67,7 @@ class ExtractionManager:
         heuristic: Optional[RayShootingExtractor] = None,
         exact_unbounded_check: str = "lp",
         exact_num_workers: int = 1,
+        heuristic_refine: bool = False,
     ):
         if strategy not in ("auto", "exact", "heuristic"):
             raise ValueError(
@@ -73,6 +77,7 @@ class ExtractionManager:
         self.strategy = strategy
         self._exact_unbounded_check = exact_unbounded_check
         self._exact_num_workers = exact_num_workers
+        self._heuristic_refine = heuristic_refine
         self.timeout_seconds = timeout_seconds
         self._exact = exact
         self._heuristic = heuristic
@@ -146,5 +151,7 @@ class ExtractionManager:
 
     def _get_heuristic(self) -> RayShootingExtractor:
         if self._heuristic is None:
-            self._heuristic = RayShootingExtractor()
+            self._heuristic = RayShootingExtractor(
+                refine_witnesses=self._heuristic_refine
+            )
         return self._heuristic
