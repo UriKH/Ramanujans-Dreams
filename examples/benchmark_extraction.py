@@ -78,7 +78,7 @@ def build_cmf_data() -> Tuple[CMFData, sp.Expr]:
     # constant = calegary
     # formatter = pFq(constant, 3, 2, 1)
     constant = zeta(2)
-    formatter = pFq(constant, 4, 3, 1)
+    formatter = pFq(constant, 6, 5, 1)
     return formatter.to_cmf(), constant
 
 
@@ -113,9 +113,16 @@ def main() -> int:
     # matter, but a couple touch the extractor directly.
     config.configure(
         extraction={
-            'INIT_POINT_MAX_COORD': 4,
+            'INIT_POINT_MAX_COORD': 2,
             'IGNORE_DUPLICATE_SEARCHABLES': False,
             'STRATEGY_TIMEOUT_SECONDS': 200.0,
+            # Heuristic budget knobs.  The default rel_improvement=5e-4 stops
+            # once marginal gain drops below 0.05%; lower it for more coverage.
+            # For high-D (e.g. 6F5/11D) set HEURISTIC_MAX_SECONDS and raise
+            # HEURISTIC_NUM_RAYS so the time budget governs, not the ray cap.
+            'HEURISTIC_REL_IMPROVEMENT': 5e-4,   # 0.05% marginal gain threshold
+            # 'HEURISTIC_MAX_SECONDS': 7200,     # e.g. 2h for a 6F5 scan
+            # 'HEURISTIC_NUM_RAYS': 500_000_000, # raise ceiling for long scans
         },
         logging={'GENERATE_LOGS': False},
     )
@@ -125,7 +132,7 @@ def main() -> int:
     print(f"lrs binary available: {lrs_io.lrs_available()}")
     print()
 
-    strategies: List[str] = ["legacy", "auto", "heuristic"] #, "exact"]
+    strategies: List[str] = ["legacy", "heuristic"] #, "exact"]
     results: List[BenchResult] = []
     for strategy in strategies:
         print(f"-> running strategy={strategy!r} ...", flush=True)
