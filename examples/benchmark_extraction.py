@@ -28,8 +28,6 @@ import traceback
 from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple
 
-from charset_normalizer import constant
-
 # Make sure repo root is importable when running the script directly.
 _HERE = os.path.abspath(os.path.dirname(__file__))
 _ROOT = os.path.abspath(os.path.join(_HERE, os.pardir))
