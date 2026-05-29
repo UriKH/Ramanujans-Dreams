@@ -77,6 +77,8 @@ def build_cmf_data() -> Tuple[CMFData, sp.Expr]:
     # formatter = pFq(constant, 2, 1, -1)
     # constant = calegary
     # formatter = pFq(constant, 3, 2, sp.Rational(1, 4), shifts=5 * [sp.Rational(1, 2)])
+    # constant = calegary
+    # formatter = pFq(constant, 3, 2, 1)
     constant = zeta(2)
     formatter = pFq(constant, 4, 3, 1)
     return formatter.to_cmf(), constant
@@ -115,7 +117,7 @@ def main() -> int:
         extraction={
             'INIT_POINT_MAX_COORD': 3,
             'IGNORE_DUPLICATE_SEARCHABLES': False,
-            'STRATEGY_TIMEOUT_SECONDS': 300.0,
+            'STRATEGY_TIMEOUT_SECONDS': 180.0,
         },
         logging={'GENERATE_LOGS': False},
     )
@@ -125,7 +127,7 @@ def main() -> int:
     print(f"lrs binary available: {lrs_io.lrs_available()}")
     print()
 
-    strategies: List[str] = ["legacy", "heuristic", "auto", "exact"]
+    strategies: List[str] = ["legacy", "auto"] #, "heuristic", "exact"]
     results: List[BenchResult] = []
     for strategy in strategies:
         print(f"-> running strategy={strategy!r} ...", flush=True)

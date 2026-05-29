@@ -24,6 +24,7 @@ max for ``t_escape``.  No Python loop over rays, no scipy.
 
 from __future__ import annotations
 
+import time
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -39,11 +40,19 @@ class RayShootingExtractor(BaseExtractor):
     """
     Vectorised algebraic ray-shooting heuristic.
 
-    :param num_rays: How many integer direction rays to sample.
+    :param num_rays: Maximum number of integer direction rays to sample
+        (the cap; adaptive batching may stop earlier).
     :param max_coord: Each ray direction is sampled uniformly from
         ``[-max_coord, max_coord]^D \\ {0}``.
+    :param batch_size: Rays are shot in batches of this size; after each
+        batch the new-cell yield is checked for the plateau stop.
+    :param plateau_ratio: Stop early once a batch contributes fewer than
+        ``plateau_ratio * batch_size`` *new* cells (diminishing returns),
+        provided at least one full batch has been shot.  ``0`` disables
+        early stopping (always shoot the full ``num_rays``).
     :param seed: RNG seed for reproducibility.
-    :raises ValueError: For non-positive ``num_rays`` or ``max_coord``.
+    :raises ValueError: For non-positive ``num_rays``/``max_coord``/
+        ``batch_size`` or a ``plateau_ratio`` outside ``[0, 1]``.
     """
 
     name = "heuristic"
@@ -51,23 +60,36 @@ class RayShootingExtractor(BaseExtractor):
     def __init__(
         self,
         *,
-        num_rays: int = 100_000,
+        num_rays: int = 1_000_000,
         max_coord: int = 5,
+        batch_size: int = 20_000,
+        plateau_ratio: float = 1e-3,
         seed: Optional[int] = 0,
     ):
         if num_rays <= 0:
             raise ValueError(f"num_rays must be positive, got {num_rays}")
         if max_coord <= 0:
             raise ValueError(f"max_coord must be positive, got {max_coord}")
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+        if not 0.0 <= plateau_ratio <= 1.0:
+            raise ValueError(f"plateau_ratio must be in [0, 1], got {plateau_ratio}")
         self.num_rays = num_rays
         self.max_coord = max_coord
+        self.batch_size = batch_size
+        self.plateau_ratio = plateau_ratio
         self.seed = seed
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def extract(self, hyperplanes: List[Hyperplane]) -> ShardMapping:
+    def extract(
+        self,
+        hyperplanes: List[Hyperplane],
+        *,
+        deadline: Optional[float] = None,
+    ) -> ShardMapping:
         if not hyperplanes:
             return {}
 
@@ -75,22 +97,42 @@ class RayShootingExtractor(BaseExtractor):
         d = A.shape[1]
         rng = np.random.default_rng(self.seed)
 
-        # Sample integer direction rays.  Re-roll any all-zero row in
-        # place (acceptable: max_coord >= 1 so the all-zero outcome has
-        # probability (1/(2 max_coord+1))^D -- vanishingly small past
-        # D=3, and we only redo the few that hit it).
-        V = self._sample_rays(rng, d)
-        if V.shape[0] == 0:
-            return {}
-
-        points = self._shoot(V, A, c)
-        return self._collect_unique_cells(points, A, c)
+        # Adaptive budgeting: shoot rays in batches and stop once a batch
+        # adds few new cells (diminishing returns) -- so easy arrangements
+        # finish fast while hard ones get the full ``num_rays``.  Each
+        # batch is the same vectorised NumPy pass; only the loop over
+        # *batches* is in Python (a handful of iterations).
+        out: ShardMapping = {}
+        shot = 0
+        while shot < self.num_rays:
+            if deadline is not None and time.time() > deadline:
+                break
+            batch = min(self.batch_size, self.num_rays - shot)
+            V = self._sample_rays(rng, d, batch)
+            shot += batch
+            if V.shape[0] == 0:
+                continue
+            points = self._shoot(V, A, c)
+            before = len(out)
+            self._collect_unique_cells_into(points, A, c, out)
+            new = len(out) - before
+            # Plateau stop: once we've shot a full batch, bail if the new
+            # cells discovered fell below the ratio threshold.
+            if (
+                self.plateau_ratio > 0.0
+                and shot >= self.batch_size
+                and new < self.plateau_ratio * batch
+            ):
+                break
+        return out
 
     # ------------------------------------------------------------------
     # Internals -- all pure NumPy, no Python loops over rays
     # ------------------------------------------------------------------
 
-    def _sample_rays(self, rng: np.random.Generator, d: int) -> np.ndarray:
+    def _sample_rays(
+        self, rng: np.random.Generator, d: int, n_rays: int
+    ) -> np.ndarray:
         """
         Return ``(R, D)`` integer rays with no all-zero rows, each
         reduced to its **primitive direction** (coordinate-GCD divided
@@ -102,7 +144,7 @@ class RayShootingExtractor(BaseExtractor):
         cascades into faster trajectory walks downstream.
         """
         V = rng.integers(
-            -self.max_coord, self.max_coord + 1, size=(self.num_rays, d), dtype=np.int64
+            -self.max_coord, self.max_coord + 1, size=(n_rays, d), dtype=np.int64
         )
         # Reroll any all-zero rays until none remain (cheap: rare in
         # practice, the loop iterates at most once or twice).
@@ -175,29 +217,26 @@ class RayShootingExtractor(BaseExtractor):
         # Broadcast scalar t per row over the D-vector v per row.
         return (t_final[:, None] * V).astype(np.int64)
 
-    def _collect_unique_cells(
-        self, points: np.ndarray, A: np.ndarray, c: np.ndarray
-    ) -> ShardMapping:
+    def _collect_unique_cells_into(
+        self,
+        points: np.ndarray,
+        A: np.ndarray,
+        c: np.ndarray,
+        out: ShardMapping,
+    ) -> None:
         """
-        Convert ``(R, D)`` integer witnesses into a deduplicated
-        ``{sign_tuple: point}`` map.  Points sitting exactly on any
-        hyperplane (sign 0) are dropped -- those would not be inside an
-        open cell.
+        Add the witnesses' ``{sign_tuple: point}`` entries into ``out``
+        (in place, first witness per cell wins).  Points sitting exactly
+        on any hyperplane (sign 0) are dropped -- not inside an open cell.
         """
         if points.shape[0] == 0:
-            return {}
+            return
         # (R, N) sign matrix -- +1 above, -1 below, 0 on the hyperplane.
         vals = points @ A.T + c
         signs = np.sign(vals).astype(np.int64)
 
-        out: ShardMapping = {}
-        # One Python loop over UNIQUE cells discovered, not over rays.
-        # `np.unique(..., axis=0, return_index=True)` would do this in
-        # one call but we additionally need to drop sign-0 rows, so a
-        # short explicit loop is clearer.
         for sign_row, point in zip(signs, points):
             if np.any(sign_row == 0):
                 continue
             key: SignTuple = tuple(sign_row.tolist())
             out.setdefault(key, point.astype(np.int64))
-        return out

@@ -10,7 +10,11 @@ from dreamer.utils.constants.constant import Constant
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.storage.exporter import Exporter
 from dreamer.utils.storage.formats import Formats
-from dreamer.utils.storage.atlas_writer import update_cmf_hyperplanes, write_shard_records
+from dreamer.utils.storage.atlas_writer import (
+    read_shard_records,
+    update_cmf_hyperplanes,
+    write_shard_records,
+)
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.configs import config
 from dreamer.utils.types import CMFData
@@ -25,7 +29,7 @@ from collections import defaultdict
 from functools import partial
 from ramanujantools.cmf import pFq as rt_pFq
 from ramanujantools import Position
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 
 class ShardExtractorMod(ExtractionModScheme):
@@ -198,18 +202,29 @@ class ShardExtractor(ExtractionScheme):
             if self.cmf_data.selected_points is None:
                 raise ValueError('No start points were provided for extraction.')
         else:
-            strategy = config.extraction.STRATEGY
-            if strategy == 'legacy':
-                shard_encodings.update(self._discover_via_legacy(hps, symbols))
-            elif strategy in ('auto', 'exact', 'heuristic'):
-                shard_encodings.update(
-                    self._discover_via_v2(hps, symbols, strategy)
-                )
+            cached = None
+            if config.extraction.LOAD_SHARD_CACHE:
+                cached = self._load_cached_encodings(hps, symbols)
+            if cached is not None:
+                shard_encodings.update(cached)
+                Logger(
+                    f'Loaded {len(cached)} cached shards from shards.jsonl; '
+                    'skipping extraction',
+                    level=Logger.Levels.info,
+                ).log()
             else:
-                raise ValueError(
-                    f"Unknown extraction strategy {strategy!r}; expected "
-                    "'auto', 'exact', 'heuristic' or 'legacy'"
-                )
+                strategy = config.extraction.STRATEGY
+                if strategy == 'legacy':
+                    shard_encodings.update(self._discover_via_legacy(hps, symbols))
+                elif strategy in ('auto', 'exact', 'heuristic'):
+                    shard_encodings.update(
+                        self._discover_via_v2(hps, symbols, strategy)
+                    )
+                else:
+                    raise ValueError(
+                        f"Unknown extraction strategy {strategy!r}; expected "
+                        "'auto', 'exact', 'heuristic' or 'legacy'"
+                    )
 
         if self.cmf_data.selected_points:
             points = [
@@ -230,17 +245,72 @@ class ShardExtractor(ExtractionScheme):
                 if len(enc) == len(hps):
                     shard_encodings[tuple(enc)] = Position(point_dict)
 
-        Logger(hps).log()
         Logger(
             f'In CMF no. {call_number}: found {len(hps)} hyperplanes and {len(shard_encodings)} shards ',
             level=Logger.Levels.info
         ).log()
 
-        # create shard objects
+        # Create shard objects.  The shift is identical for every shard,
+        # so shift the hyperplanes ONCE here and reuse the result — this
+        # avoids re-running the (sympy) per-hyperplane apply_shift inside
+        # every Shard.__init__, which otherwise dominates this loop.
+        shifted_hps = [hp.apply_shift(self.cmf_data.shift) for hp in hps]
         shards = []
         for enc in SmartTQDM(shard_encodings.keys(), desc='Creating shard objects', **sys_config.TQDM_CONFIG):
-            shards.append(Shard.from_cmf_data(self.cmf_data, self.const, list(hps), enc, shard_encodings[enc]))
+            shards.append(Shard.from_cmf_data(
+                self.cmf_data, self.const, shifted_hps, enc, shard_encodings[enc],
+                hyperplanes_already_shifted=True,
+            ))
         return shards
+
+    def _load_cached_encodings(
+        self, hps: List[Hyperplane], symbols: List[sp.Symbol]
+    ) -> Optional[Dict[Tuple[int, ...], Position]]:
+        """
+        Load previously-computed shards from the ``<cmf>__shards.jsonl``
+        cache so extraction can be skipped.
+
+        Returns a mapping ``{sign-encoding: interior-point}`` rebuilt
+        from the cached :class:`ShardDTO` records, or :data:`None` when
+        there is no usable cache (no ``EXPORT_CMFS`` configured, missing
+        / empty file, or a stale cache whose encodings no longer match
+        the current hyperplane count).
+
+        Hyperplanes are recomputed by the caller and passed in:
+        ``_extract_cmf_hps`` returns them in a canonical, deterministic
+        order, so ``encoding[i]`` still labels ``hps[i]`` exactly as it
+        did when the cache was written.
+        """
+        if not sys_config.EXPORT_CMFS:
+            return None
+
+        dtos = read_shard_records(
+            sys_config.EXPORT_CMFS, self.const, self.cmf_data.cmf_name
+        )
+        if not dtos:
+            return None
+
+        n = len(hps)
+        out: Dict[Tuple[int, ...], Position] = {}
+        for dto in dtos:
+            enc = tuple(int(v) for v in dto.shard_encoding)
+            if len(enc) != n:
+                # Cache was written for a different hyperplane set — the
+                # CMF or its hyperplanes changed.  Treat as stale and
+                # force a fresh extraction rather than mis-aligning signs.
+                Logger(
+                    f'Ignoring stale shard cache (encoding length {len(enc)} '
+                    f'!= {n} hyperplanes) for "{self.cmf_data.cmf_name}"',
+                    level=Logger.Levels.warning,
+                ).log()
+                return None
+            point = None
+            if dto.interior_point is not None:
+                point = Position(
+                    {sym: int(v) for sym, v in zip(symbols, dto.interior_point)}
+                )
+            out[enc] = point
+        return out
 
     def _discover_via_legacy(
         self, hps: List[Hyperplane], symbols: List[sp.Symbol]
@@ -315,6 +385,8 @@ class ShardExtractor(ExtractionScheme):
         manager = ExtractionManager(
             strategy=strategy,
             timeout_seconds=config.extraction.STRATEGY_TIMEOUT_SECONDS,
+            exact_unbounded_check=config.extraction.EXACT_UNBOUNDED_CHECK,
+            exact_num_workers=config.extraction.EXACT_NUM_WORKERS,
         )
         mapping = manager.extract(shifted_hps)
 

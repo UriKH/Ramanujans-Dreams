@@ -15,7 +15,7 @@ returned (no zero entries).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -42,7 +42,12 @@ class BaseExtractor(ABC):
     name: str = "base"
 
     @abstractmethod
-    def extract(self, hyperplanes: List[Hyperplane]) -> ShardMapping:
+    def extract(
+        self,
+        hyperplanes: List[Hyperplane],
+        *,
+        deadline: Optional[float] = None,
+    ) -> ShardMapping:
         """
         Compute one integer representative per unbounded shard.
 
@@ -50,6 +55,11 @@ class BaseExtractor(ABC):
             form via :class:`Hyperplane.__post_init__`).  The order of
             this list defines the order of bits in every returned
             :data:`SignEncoding`.
+        :param deadline: Optional wall-clock (``time.time()``) instant
+            after which the strategy must abort.  Cooperative — the
+            implementation checks it and raises rather than being killed.
+            Strategies that are inherently fast (the heuristic) may
+            ignore it.
         :return: A :data:`ShardMapping` -- never contains zero entries
             in any encoding and never returns the empty cell.
         :raises RuntimeError: When the underlying algorithm cannot

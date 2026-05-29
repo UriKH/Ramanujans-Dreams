@@ -7,48 +7,56 @@ labelled by a sign vector ``s in {-1, +1}^N``.  Iterating over all
 ``2^N`` sign vectors is infeasible past ``N ~ 25``, but the number of
 *non-empty* cells is bounded by :math:`O(N^D)`.
 
-We enumerate non-empty cells via BFS in the "flip graph":
+Enumeration: Avis–Fukuda reverse search
+=======================================
 
-1. Pick a starting feasible sign vector via random sampling.
-2. From each visited cell, flip bit ``i`` (for every ``i``) and ask an
-   LP whether the resulting cell has non-empty interior.  Enqueue when
-   feasible and unseen.
+We enumerate cells by **memoryless reverse search** (Avis & Fukuda,
+"Reverse search for enumeration").  Pick a generic *base* cell (sign
+vector ``base``); every other non-empty cell ``c`` is assigned a unique
+*parent*
 
-Feasibility backend (Phase 1 — hot-started stateful solver)
-===========================================================
+    parent(c) = flip ``c`` at the minimum index ``i`` such that
+                ``c[i] != base[i]``  (separating)  and
+                ``flip(c, i)`` is itself a non-empty cell.
 
-The dominant cost of the BFS is the per-neighbour feasibility LP.  The
-old implementation rebuilt a fresh ``scipy.optimize.linprog`` model
-(dense ``N x (D+1)`` matrix) on every call — for ``D >= 7`` that
-setup/teardown overhead made exact enumeration time out.
+Because ``parent`` strictly reduces the Hamming distance to ``base``,
+iterating it from any cell reaches ``base`` — so the parent pointers
+form a spanning tree rooted at the base cell.  We enumerate by walking
+that tree *forwards*: a neighbour ``c'`` of ``c`` (one sign flipped) is
+a child of ``c`` iff ``parent(c') == c``.
 
-We now build the LP **once** and navigate the arrangement by swapping
-variable *bounds* only (``context/shard_extraction/EXACT_EXTRACTION_OPTIMIZATION_SPEC.md``):
+Why reverse search over BFS?  No ``seen`` set is needed (each cell is
+reached through its unique parent exactly once), so
+
+* memory is ``O(tree depth)`` instead of ``O(#cells)``, and
+* disjoint subtrees can be dispatched to separate processes with zero
+  shared state — see ``num_workers``.
+
+Feasibility backend (hot-started stateful solver)
+=================================================
+
+The per-cell non-emptiness test dominates runtime.  We build the LP
+**once** and navigate by swapping variable *bounds* only:
 
 * Coordinate variables ``x in [-bound, bound]^D``.
-* Auxiliary variables ``y_i`` (one per hyperplane).
-* Static equality constraints ``A_i . x + c_i - y_i = 0`` — these never
-  change, so the constraint matrix (and the simplex basis in memory) is
-  reused across every neighbour check.
+* Auxiliary variables ``y_i`` with static constraints
+  ``A_i . x + c_i - y_i = 0`` (never modified — the simplex basis is
+  reused across checks).
 * A sign vector maps to ``y`` bounds: ``s_i = +1`` => ``y_i in [eps, inf)``;
   ``s_i = -1`` => ``y_i in (-inf, -eps]``.  Feasibility of those bounds
   proves the open cell has interior of slack ``>= eps``.
 
-Because only bounds change between solves, the solver (CBC via
-``python-mip``) hot-starts from the previous basis.  When ``python-mip``
-is unavailable we fall back to the original per-call ``scipy`` LP so the
-module never hard-fails on a mip-less environment.
-
-Phase 2 (future): for ``11 <= D <= 15`` the BFS ``seen`` set itself
-becomes the bottleneck under multiprocessing.  The documented next step
-is memoryless Avis–Fukuda reverse search, which assigns each cell a
-unique parent and so parallelises across cores with no shared state.
+CBC (via ``python-mip``) hot-starts from the previous basis because
+only bounds change.  When ``python-mip`` is unavailable we fall back to
+the original per-call ``scipy`` LP so the module never hard-fails.
 """
 
 from __future__ import annotations
 
-from collections import deque
-from typing import Callable, List, Optional, Set, Tuple
+import os
+import time
+from multiprocessing import get_context
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 from scipy.optimize import linprog
@@ -69,8 +77,22 @@ SignTuple = Tuple[int, ...]
 FeasibilityChecker = Callable[[np.ndarray], bool]
 
 
+class ExtractionTimeout(RuntimeError):
+    """Raised when cell enumeration passes its wall-clock ``deadline``.
+
+    Carries an optional ``partial`` payload so a caller that was
+    streaming results (e.g. the exact extractor interleaving
+    classification) can attach whatever it had completed before the
+    deadline, letting the manager salvage it instead of discarding.
+    """
+
+    def __init__(self, *args, partial=None):
+        super().__init__(*args)
+        self.partial = partial
+
+
 # ---------------------------------------------------------------------------
-# Phase 1: stateful python-mip feasibility solver (bound swapping)
+# Hot-started python-mip feasibility solver (bound swapping)
 # ---------------------------------------------------------------------------
 
 class _StatefulFeasibilitySolver:
@@ -87,7 +109,7 @@ class _StatefulFeasibilitySolver:
         c: np.ndarray,
         *,
         bound: float = 1e6,
-        epsilon: float = 1e-9,
+        epsilon: float = 1e-6,
     ):
         if not _HAS_MIP:  # pragma: no cover - guarded by caller
             raise RuntimeError("python-mip is not available")
@@ -104,13 +126,9 @@ class _StatefulFeasibilitySolver:
         model = mip.Model(sense=mip.MINIMIZE, solver_name=mip.CBC)
         model.verbose = 0  # suppress solver chatter for speed
 
-        # Coordinate variables x, bounded by a large box to keep the LP
-        # bounded; auxiliary y_i = A_i . x + c_i carry the per-hyperplane
-        # signed distance and are the only bounds we ever touch.
         self._x = [model.add_var(lb=-bound, ub=bound) for _ in range(self.d)]
         self._y = [model.add_var(lb=-mip.INF, ub=mip.INF) for _ in range(self.n)]
 
-        # Static constraints — added once, never modified.
         for i in range(self.n):
             model += (
                 mip.xsum(float(A[i, j]) * self._x[j] for j in range(self.d))
@@ -126,9 +144,6 @@ class _StatefulFeasibilitySolver:
         """
         Return ``True`` iff the open cell labelled by ``sign_vector``
         has interior of slack ``>= epsilon``.
-
-        Only ``y`` bounds change between calls, so the solver re-uses
-        its previous basis (hot start).
         """
         eps = self.epsilon
         for i in range(self.n):
@@ -158,21 +173,16 @@ def _interior_slack(
 ) -> float:
     """
     Return the maximum interior slack of a cell, or ``-inf`` if the LP
-    fails.
-
-    Solves ``max t`` subject to ``s_i (A_i . x + c_i) - t >= 0`` and
-    ``|x_d| <= bound``.  A strictly positive optimum proves the cell
-    has non-empty interior.  Kept as the fallback feasibility backend
-    for environments without ``python-mip``.
+    fails.  Kept as the fallback feasibility backend for environments
+    without ``python-mip``.
     """
     n, d = A.shape
-    # Decision variables: [x_1, ..., x_d, t].  linprog minimises -> use -t.
     obj = np.zeros(d + 1, dtype=np.float64)
     obj[-1] = -1.0
     A_ub = np.zeros((n, d + 1), dtype=np.float64)
-    A_ub[:, :d] = -(sign_vector[:, None] * A)  # s_i A_i x >= t  =>  -s_i A_i x + t <= 0
+    A_ub[:, :d] = -(sign_vector[:, None] * A)
     A_ub[:, -1] = 1.0
-    b_ub = (sign_vector * c).astype(np.float64)  # s_i c_i
+    b_ub = (sign_vector * c).astype(np.float64)
     bounds = [(-bound, bound)] * d + [(None, None)]
     res = linprog(obj, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
     if not res.success or res.x is None:
@@ -188,7 +198,7 @@ def _make_feasibility_checker(
     bound: float = 1e6,
 ) -> FeasibilityChecker:
     """
-    Build the per-neighbour feasibility predicate.
+    Build the per-cell feasibility predicate.
 
     Prefers the hot-started ``python-mip`` solver; transparently falls
     back to the per-call scipy LP when mip is unavailable.
@@ -200,14 +210,144 @@ def _make_feasibility_checker(
 
 
 # ---------------------------------------------------------------------------
-# Starting cell
+# Unboundedness via the recession cone (replaces a per-cell lrs subprocess)
+# ---------------------------------------------------------------------------
+#
+# A non-empty (full-dimensional) cell C = { x : s_i (A_i . x + c_i) > 0 }
+# is *unbounded* iff its recession cone  K = { d : s_i (A_i . d) >= 0 }
+# contains a nonzero direction (a ray along which C escapes to infinity).
+# The constants c_i drop out — only the linear parts and the signs matter.
+#
+# Two cases:
+#
+#   1. Lineality.  If rank(A) < D there is a nonzero d with A.d = 0 (hence
+#      s_i A_i d = 0 >= 0 for every cell), so *every* cell is unbounded.
+#      rank(A) is the same for all cells (sign flips don't change rank),
+#      so we test it once.
+#
+#   2. Full rank (rank(A) = D, no lineality).  Then A.d = 0 only at d = 0,
+#      so any nonzero d in K has some s_i (A_i d) > 0.  We maximise
+#      f(d) = sum_i s_i (A_i . d)  over  K ∩ [-1,1]^D.  f >= 0 always
+#      (every term is >= 0 on K); f = 0 exactly when K = {0} (bounded),
+#      and f > 0 when a nonzero recession direction exists (unbounded).
+#
+# The LP uses the same hot-started bound-swap trick as the feasibility
+# solver: y_i = A_i . d are auxiliary variables whose sign bounds encode
+# the cone (s_i = +1 -> y_i >= 0, s_i = -1 -> y_i <= 0); only those bounds
+# and the objective coefficients (the signs) change between cells.
+
+UnboundedChecker = Callable[[np.ndarray], bool]
+
+# f(d) is exactly 0 for bounded cells and bounded-below by an O(1) value
+# for unbounded ones on integer arrangements; any small positive tol
+# cleanly separates the two (well above CBC's ~1e-7 tolerance).
+_UNBOUNDED_TOL = 1e-6
+
+
+class _StatefulUnboundedSolver:
+    """
+    Hot-started LP oracle: ``unbounded(sign_vector)`` for the cells of an
+    arrangement.  Build once, swap ``y`` sign bounds + objective signs
+    per cell.
+    """
+
+    def __init__(self, A: np.ndarray, *, tol: float = _UNBOUNDED_TOL):
+        if not _HAS_MIP:  # pragma: no cover - guarded by caller
+            raise RuntimeError("python-mip is not available")
+        self.n, self.d = A.shape
+        self.tol = tol
+
+        model = mip.Model(sense=mip.MINIMIZE, solver_name=mip.CBC)
+        model.verbose = 0
+
+        # Direction d (unit box) and y_i = A_i . d.
+        self._d = [model.add_var(lb=-1.0, ub=1.0) for _ in range(self.d)]
+        self._y = [model.add_var(lb=-mip.INF, ub=mip.INF) for _ in range(self.n)]
+
+        for i in range(self.n):
+            # Skip zero coefficients: a 0.0 * var term can confuse CBC's
+            # presolve (see the feasibility-solver notes).
+            terms = [
+                float(A[i, j]) * self._d[j]
+                for j in range(self.d)
+                if A[i, j] != 0
+            ]
+            model += mip.xsum(terms) - self._y[i] == 0
+        self._model = model
+
+    def unbounded(self, sign_vector: np.ndarray) -> bool:
+        # Recession cone: s_i = +1 -> y_i >= 0 ; s_i = -1 -> y_i <= 0.
+        for i in range(self.n):
+            if sign_vector[i] > 0:
+                self._y[i].lb, self._y[i].ub = 0.0, mip.INF
+            else:
+                self._y[i].lb, self._y[i].ub = -mip.INF, 0.0
+        # Maximise sum_i s_i y_i  ==  minimise sum_i (-s_i) y_i.
+        self._model.objective = mip.minimize(
+            mip.xsum(-float(sign_vector[i]) * self._y[i] for i in range(self.n))
+        )
+        status = self._model.optimize()
+        if status not in (
+            mip.OptimizationStatus.OPTIMAL,
+            mip.OptimizationStatus.FEASIBLE,
+        ):
+            # d = 0 is always feasible, so this should not happen; treat
+            # an unexpected solver state as "bounded" (conservative).
+            return False
+        # objective_value = -max(sum s_i y_i); > tol ⇒ nonzero recession.
+        return (-self._model.objective_value) > self.tol
+
+
+def _recession_unbounded_scipy(
+    A: np.ndarray, sign_vector: np.ndarray, *, tol: float = _UNBOUNDED_TOL
+) -> bool:
+    """scipy fallback for :class:`_StatefulUnboundedSolver` (full-rank case)."""
+    n, d = A.shape
+    s = sign_vector.astype(np.float64)
+    sA = s[:, None] * A  # rows s_i A_i
+    # maximise sum_i (s_i A_i) . d  ==  minimise -(sum_i s_i A_i) . d
+    obj = -sA.sum(axis=0)
+    # cone: s_i A_i . d >= 0  =>  -(s_i A_i) . d <= 0
+    A_ub = -sA
+    b_ub = np.zeros(n)
+    bounds = [(-1.0, 1.0)] * d
+    res = linprog(obj, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
+    if not res.success or res.x is None:
+        return False
+    return (-float(res.fun)) > tol
+
+
+def make_unbounded_checker(
+    A: np.ndarray, *, tol: float = _UNBOUNDED_TOL
+) -> UnboundedChecker:
+    """
+    Build the per-cell unboundedness predicate (recession-cone LP).
+
+    Handles the lineality case once via ``rank(A)``: if ``rank(A) < D``
+    every cell is unbounded.  Otherwise prefers the hot-started
+    ``python-mip`` solver, falling back to the per-call scipy LP when mip
+    is unavailable.  Needs only ``A`` (the constants ``c`` do not affect
+    unboundedness).
+    """
+    A = np.asarray(A, dtype=np.int64)
+    d = A.shape[1]
+    if np.linalg.matrix_rank(A) < d:
+        # A nonzero direction d with A.d = 0 is a recession direction of
+        # every cell -> all cells unbounded.
+        return lambda sign_vector: True
+    if _HAS_MIP:
+        return _StatefulUnboundedSolver(A, tol=tol).unbounded
+    return lambda sign_vector: _recession_unbounded_scipy(
+        A, np.asarray(sign_vector, dtype=np.int64), tol=tol
+    )
+
+
+# ---------------------------------------------------------------------------
+# Starting / base cell
 # ---------------------------------------------------------------------------
 
 def _sign_at(A: np.ndarray, c: np.ndarray, x: np.ndarray) -> Optional[np.ndarray]:
-    """
-    Return the sign vector at ``x`` or :data:`None` if ``x`` lies on any
-    hyperplane.
-    """
+    """Return the sign vector at ``x`` or :data:`None` if ``x`` lies on a hyperplane."""
     vals = A @ x + c
     if np.any(vals == 0):
         return None
@@ -223,7 +363,8 @@ def _find_start_cell(
     radius: int = 1000,
 ) -> np.ndarray:
     """
-    Find any non-empty cell by random integer sampling.
+    Find any non-empty cell (the reverse-search base/root) by random
+    integer sampling.
 
     :raises RuntimeError: If no off-hyperplane point is found in
         ``max_attempts`` tries.
@@ -240,30 +381,238 @@ def _find_start_cell(
 
 
 # ---------------------------------------------------------------------------
-# BFS enumeration
+# Reverse-search primitives
+# ---------------------------------------------------------------------------
+
+def _parent(
+    base: np.ndarray, sign: np.ndarray, is_feasible: FeasibilityChecker, n: int
+) -> Optional[np.ndarray]:
+    """
+    Return the parent of ``sign`` in the reverse-search tree, or
+    :data:`None` if ``sign`` is the base cell.
+
+    The parent flips the minimum-index *separating* hyperplane (one
+    whose sign differs from ``base``) whose flip yields a non-empty
+    cell.  This reduces the Hamming distance to ``base`` by one, so the
+    parent chain always terminates at the root.
+    """
+    for i in range(n):
+        if sign[i] != base[i]:  # separating hyperplane
+            cand = sign.copy()
+            cand[i] = -cand[i]
+            if is_feasible(cand):
+                return cand
+    return None
+
+
+def _reverse_search_iter(
+    base: np.ndarray,
+    root: np.ndarray,
+    is_feasible: FeasibilityChecker,
+    n: int,
+    *,
+    max_cells: Optional[int],
+    deadline: Optional[float],
+):
+    """
+    Yield every cell in the subtree rooted at ``root`` (with parent
+    pointers defined relative to ``base``).
+
+    A DFS over the spanning tree: from each cell we emit it, then push
+    every neighbour whose parent is the current cell.  No ``seen`` set —
+    the unique-parent property guarantees each cell is visited once.
+
+    Yielding (rather than returning a list) lets a consumer interleave
+    work per cell and salvage partial results on a deadline hit.
+
+    :raises ExtractionTimeout: If ``deadline`` (wall-clock ``time.time``)
+        is passed.
+    :raises RuntimeError: If ``max_cells`` is not ``None`` and more than
+        that many cells are emitted.
+    """
+    stack: List[np.ndarray] = [root.copy()]
+    count = 0
+
+    while stack:
+        # Each cell costs ~2N LP solves, so a per-iteration time.time()
+        # check (microseconds) is free relative to the work and gives
+        # tight deadline adherence -- the caller can fall back promptly.
+        if deadline is not None and time.time() > deadline:
+            raise ExtractionTimeout(
+                f"Cell enumeration passed its deadline after {count} cells"
+            )
+        sig = stack.pop()
+        yield tuple(sig.tolist())
+        count += 1
+        # ``max_cells`` is an optional safety ceiling; the deadline is the
+        # primary stop.  Reverse search is memoryless (O(depth) stack, no
+        # ``seen`` set), so a large/None cap does not bloat RAM during
+        # enumeration -- only the caller's kept output grows.
+        if max_cells is not None and count > max_cells:
+            raise RuntimeError(f"Cell enumeration exceeded max_cells={max_cells}")
+
+        for i in range(n):
+            child = sig.copy()
+            child[i] = -child[i]
+            if not is_feasible(child):
+                continue
+            par = _parent(base, child, is_feasible, n)
+            if par is not None and np.array_equal(par, sig):
+                stack.append(child)
+
+
+def iter_cells(
+    A: np.ndarray,
+    c: np.ndarray,
+    *,
+    max_cells: Optional[int] = None,
+    seed: Optional[int] = 0,
+    epsilon: float = 1e-6,
+    deadline: Optional[float] = None,
+):
+    """
+    Stream the non-empty cells of the arrangement (serial reverse
+    search), yielding each sign-encoding as it is discovered.
+
+    Unlike :func:`enumerate_cells` this does not collect or sort — it is
+    meant for a consumer that processes cells incrementally (e.g. the
+    exact extractor, which classifies + locates each cell on the fly so
+    it can salvage partial results if a ``deadline`` is hit).
+
+    Parameters mirror :func:`enumerate_cells` (minus ``num_workers`` —
+    streaming is inherently serial).
+    """
+    A = np.asarray(A, dtype=np.int64)
+    c = np.asarray(c, dtype=np.int64)
+    if A.ndim != 2:
+        raise ValueError(f"A must be 2-D, got shape {A.shape}")
+    if c.shape != (A.shape[0],):
+        raise ValueError(f"c shape {c.shape} incompatible with A shape {A.shape}")
+
+    rng = np.random.default_rng(seed)
+    base = _find_start_cell(A, c, rng=rng)
+    is_feasible = _make_feasibility_checker(A, c, epsilon=epsilon)
+    yield from _reverse_search_iter(
+        base, base, is_feasible, A.shape[0], max_cells=max_cells, deadline=deadline
+    )
+
+
+def reverse_search_seeds(
+    A: np.ndarray,
+    c: np.ndarray,
+    *,
+    seed: Optional[int] = 0,
+    epsilon: float = 1e-6,
+) -> Tuple[np.ndarray, List[np.ndarray]]:
+    """
+    Return ``(base, root_children)`` for parallel reverse search.
+
+    ``base`` is a generic starting cell; ``root_children`` are its
+    feasible neighbours — each the root of a **disjoint** subtree (every
+    other cell has a unique parent chain leading back through exactly one
+    of them).  A caller can dispatch each subtree to its own process and
+    must additionally handle ``base`` itself (it belongs to no subtree).
+    """
+    A = np.asarray(A, dtype=np.int64)
+    c = np.asarray(c, dtype=np.int64)
+    n = A.shape[0]
+    rng = np.random.default_rng(seed)
+    base = _find_start_cell(A, c, rng=rng)
+    is_feasible = _make_feasibility_checker(A, c, epsilon=epsilon)
+    children: List[np.ndarray] = []
+    for i in range(n):
+        child = base.copy()
+        child[i] = -child[i]
+        if is_feasible(child):
+            children.append(child)
+    return base, children
+
+
+def iter_subtree(
+    A: np.ndarray,
+    c: np.ndarray,
+    base: np.ndarray,
+    root: np.ndarray,
+    *,
+    max_cells: Optional[int] = None,
+    epsilon: float = 1e-6,
+    deadline: Optional[float] = None,
+):
+    """
+    Stream the cells of the subtree rooted at ``root`` (parent pointers
+    relative to ``base``).  Used by parallel workers, each of which
+    builds its own feasibility solver.
+    """
+    A = np.asarray(A, dtype=np.int64)
+    c = np.asarray(c, dtype=np.int64)
+    base = np.asarray(base, dtype=np.int64)
+    root = np.asarray(root, dtype=np.int64)
+    is_feasible = _make_feasibility_checker(A, c, epsilon=epsilon)
+    yield from _reverse_search_iter(
+        base, root, is_feasible, A.shape[0], max_cells=max_cells, deadline=deadline
+    )
+
+
+# ---------------------------------------------------------------------------
+# Parallel subtree worker (top-level so it is picklable)
+# ---------------------------------------------------------------------------
+
+def _subtree_worker(args) -> List[SignTuple]:
+    """
+    Enumerate one subtree in a child process.
+
+    Each worker builds its **own** feasibility solver (CBC models are
+    not picklable, and a per-process solver is exactly what we want for
+    parallel scaling).
+    """
+    A, c, base, root, epsilon, max_cells, deadline = args
+    A = np.asarray(A, dtype=np.int64)
+    c = np.asarray(c, dtype=np.int64)
+    base = np.asarray(base, dtype=np.int64)
+    root = np.asarray(root, dtype=np.int64)
+    is_feasible = _make_feasibility_checker(A, c, epsilon=epsilon)
+    return list(
+        _reverse_search_iter(
+            base, root, is_feasible, A.shape[0], max_cells=max_cells, deadline=deadline
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
 # ---------------------------------------------------------------------------
 
 def enumerate_cells(
     A: np.ndarray,
     c: np.ndarray,
     *,
-    max_cells: int = 100_000,
+    max_cells: Optional[int] = None,
     seed: Optional[int] = 0,
     epsilon: float = 1e-6,
+    deadline: Optional[float] = None,
+    num_workers: int = 1,
 ) -> List[SignTuple]:
     """
-    Enumerate every non-empty cell of the arrangement.
+    Enumerate every non-empty cell of the arrangement via reverse search.
 
     :param A: Hyperplane coefficient matrix, shape ``(N, D)``.
     :param c: Hyperplane constants, shape ``(N,)``.
-    :param max_cells: Safety cap.  Raises if exceeded -- prevents
-        runaway BFS on pathological arrangements.
-    :param seed: RNG seed used to find the starting cell.
+    :param max_cells: Optional safety ceiling (``None`` = unbounded;
+        the ``deadline`` is the intended stop).  Raises if exceeded.
+        Reverse search is memoryless, so a large/``None`` cap does not
+        bloat RAM during enumeration.
+    :param seed: RNG seed used to find the base/root cell.
     :param epsilon: Minimum interior slack for a cell to count as
-        non-empty (the ``y`` bound magnitude in the stateful solver).
-        Must stay above the LP solver's feasibility tolerance (~1e-7
-        for CBC); the stateful solver floors it at 1e-6 for safety.
-    :return: List of sign-encoding tuples (``+1`` / ``-1``).
+        non-empty.  Floored at 1e-6 (above CBC's feasibility tolerance).
+    :param deadline: Optional wall-clock (``time.time()``) instant after
+        which enumeration aborts with :class:`ExtractionTimeout`.  This
+        is what lets a caller bound the exact method and fall back to a
+        heuristic instead of running unbounded.
+    :param num_workers: ``> 1`` dispatches disjoint root subtrees across
+        that many processes (reverse search needs no shared state).
+        ``1`` (default) runs serially.
+    :return: Sorted list of sign-encoding tuples (``+1`` / ``-1``).
+    :raises ExtractionTimeout: If ``deadline`` is passed.
     :raises RuntimeError: If ``max_cells`` is exceeded or no starting
         cell can be found.
     :raises ValueError: For inconsistent input shapes.
@@ -277,26 +626,78 @@ def enumerate_cells(
 
     n = A.shape[0]
     rng = np.random.default_rng(seed)
-    start = _find_start_cell(A, c, rng=rng)
+    base = _find_start_cell(A, c, rng=rng)
 
+    if num_workers is None or num_workers <= 1:
+        is_feasible = _make_feasibility_checker(A, c, epsilon=epsilon)
+        cells = list(
+            _reverse_search_iter(
+                base, base, is_feasible, n, max_cells=max_cells, deadline=deadline
+            )
+        )
+        return sorted(cells)
+
+    return _enumerate_parallel(
+        A, c, base, n,
+        max_cells=max_cells,
+        epsilon=epsilon,
+        deadline=deadline,
+        num_workers=num_workers,
+    )
+
+
+def _enumerate_parallel(
+    A: np.ndarray,
+    c: np.ndarray,
+    base: np.ndarray,
+    n: int,
+    *,
+    max_cells: Optional[int],
+    epsilon: float,
+    deadline: Optional[float],
+    num_workers: int,
+) -> List[SignTuple]:
+    """
+    Parallel reverse search: enumerate the base cell's children serially
+    (cheap), then dispatch each child's disjoint subtree to a worker.
+    """
     is_feasible = _make_feasibility_checker(A, c, epsilon=epsilon)
 
-    seen: Set[SignTuple] = {tuple(start.tolist())}
-    queue: deque = deque([start])
+    # The base cell's children are exactly its feasible neighbours (each
+    # such neighbour's parent is the base, by the min-index rule, since
+    # they differ from base in a single bit).
+    root_children: List[np.ndarray] = []
+    for i in range(n):
+        child = base.copy()
+        child[i] = -child[i]
+        if is_feasible(child):
+            root_children.append(child)
 
-    while queue:
-        sig = queue.popleft()
-        for i in range(n):
-            flipped = sig.copy()
-            flipped[i] = -flipped[i]
-            key = tuple(flipped.tolist())
-            if key in seen:
-                continue
-            if is_feasible(flipped):
-                seen.add(key)
-                queue.append(flipped)
-                if len(seen) > max_cells:
+    if len(root_children) < 2:
+        # Nothing to parallelise — fall back to a single serial sweep.
+        cells = list(
+            _reverse_search_iter(
+                base, base, is_feasible, n, max_cells=max_cells, deadline=deadline
+            )
+        )
+        return sorted(cells)
+
+    tasks = [
+        (A, c, base, child, epsilon, max_cells, deadline) for child in root_children
+    ]
+    # 'spawn' would re-import; 'fork' (default on Linux/WSL) is cheap and
+    # lets workers inherit the imported modules.
+    ctx = get_context()
+    collected = {tuple(base.tolist())}
+    with ctx.Pool(processes=min(num_workers, len(tasks))) as pool:
+        try:
+            for subtree in pool.imap_unordered(_subtree_worker, tasks):
+                collected.update(subtree)
+                if max_cells is not None and len(collected) > max_cells:
                     raise RuntimeError(
                         f"Cell enumeration exceeded max_cells={max_cells}"
                     )
-    return sorted(seen)
+        except BaseException:
+            pool.terminate()
+            raise
+    return sorted(collected)

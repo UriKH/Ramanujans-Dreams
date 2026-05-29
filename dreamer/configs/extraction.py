@@ -40,6 +40,40 @@ class ExtractionConfig(Configurable):
             )
         },
     )
+    LOAD_SHARD_CACHE: bool = field(
+        default=False,
+        metadata={
+            "description": (
+                "If True and a '<cmf>__shards.jsonl' file already exists for "
+                "the CMF under EXPORT_CMFS, load those shards (encoding + "
+                "interior point) and skip the expensive shard extraction. "
+                "Newly found shards are still appended to the same file."
+            )
+        },
+    )
+    EXACT_UNBOUNDED_CHECK: str = field(
+        default="lp",
+        metadata={
+            "description": (
+                "Backend for the exact strategy's per-cell unbounded check: "
+                "'lp' (default) uses an in-process recession-cone LP (~0.5ms, "
+                "no external dependency); 'lrs' spawns the lrslib binary "
+                "(~30x slower per cell, authoritative cross-check)."
+            )
+        },
+    )
+    EXACT_NUM_WORKERS: int = field(
+        default=1,
+        metadata={
+            "description": (
+                "Process count for the exact strategy's parallel reverse "
+                "search.  >1 dispatches disjoint cell subtrees across "
+                "processes (each enumerates + classifies + locates its own "
+                "subtree, and salvages partial results on timeout).  1 "
+                "(default) runs serially.  Forces the 'lp' unbounded check."
+            )
+        },
+    )
 
 
 extraction_config: ExtractionConfig = ExtractionConfig()

@@ -8,6 +8,7 @@ is skipped automatically.
 from __future__ import annotations
 
 import subprocess
+import time
 from unittest.mock import patch
 
 import numpy as np
@@ -233,10 +234,16 @@ class TestEnumerateCells:
         # 3 lines in general position -> 7 cells (one bounded triangle + 6 unbounded).
         assert len(found) == 7
 
-    def test_respects_max_cells(self):
+    def test_respects_max_cells_when_set(self):
         A, c = BaseExtractor.hyperplanes_to_matrix(_hps_triangle_2d())
         with pytest.raises(RuntimeError, match="max_cells"):
             cells.enumerate_cells(A, c, seed=0, max_cells=2)
+
+    def test_max_cells_none_does_not_cap(self):
+        """Default max_cells is None -> the timeout, not a count, stops."""
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_triangle_2d())
+        found = cells.enumerate_cells(A, c, seed=0)  # default max_cells=None
+        assert len(found) == 7  # full arrangement enumerated, no cap raised
 
     def test_scipy_fallback_matches_mip(self, monkeypatch):
         """With python-mip force-disabled, enumeration must fall back to
@@ -279,6 +286,78 @@ class TestEnumerateCells:
         assert solver.feasible(np.array([-1, 1], dtype=np.int64)) is False
         assert solver.feasible(np.array([-1, -1], dtype=np.int64)) is True
 
+    def test_reverse_search_higher_dim_matches_bruteforce(self):
+        """Reverse search must find every non-empty cell.  Cross-check
+        against an independent brute-force feasibility sweep on a small
+        arrangement where 2^N enumeration is affordable."""
+        rng = np.random.default_rng(3)
+        A = rng.integers(-2, 3, size=(8, 4)).astype(np.int64)
+        c = rng.integers(-2, 3, size=8).astype(np.int64)
+        found = set(cells.enumerate_cells(A, c, seed=0))
+
+        # Independent ground truth: test all 2^8 sign patterns directly.
+        import itertools
+        checker = cells._make_feasibility_checker(A, c, epsilon=1e-6)
+        truth = set()
+        for signs in itertools.product((-1, 1), repeat=8):
+            if checker(np.array(signs, dtype=np.int64)):
+                truth.add(signs)
+        assert found == truth
+
+    def test_deadline_raises_extraction_timeout(self):
+        """A deadline already in the past must abort with ExtractionTimeout."""
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_triangle_2d())
+        with pytest.raises(cells.ExtractionTimeout):
+            cells.enumerate_cells(A, c, seed=0, deadline=time.time() - 1.0)
+
+    def test_parallel_matches_serial(self):
+        """num_workers>1 (reverse-search subtree dispatch) must yield the
+        same cell set as the serial sweep."""
+        rng = np.random.default_rng(11)
+        A = rng.integers(-2, 3, size=(9, 4)).astype(np.int64)
+        c = rng.integers(-2, 3, size=9).astype(np.int64)
+        serial = cells.enumerate_cells(A, c, seed=0, num_workers=1)
+        parallel = cells.enumerate_cells(A, c, seed=0, num_workers=4)
+        assert sorted(parallel) == sorted(serial)
+
+
+# ----------------------------------------------------------------------
+# Recession-cone unbounded check
+# ----------------------------------------------------------------------
+
+
+class TestUnboundedChecker:
+    def test_all_quadrants_unbounded(self):
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_axes_2d())
+        check = cells.make_unbounded_checker(A)
+        for sign in [(1, 1), (1, -1), (-1, 1), (-1, -1)]:
+            assert check(np.array(sign, dtype=np.int64)) is True
+
+    def test_triangle_inner_cell_is_bounded(self):
+        # The bounded inner triangle of y>0, x>0, x+y<4 has sign
+        # (+1, +1, -1) on [y, x, x+y-4]; it must read as bounded.
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_triangle_2d())
+        check = cells.make_unbounded_checker(A)
+        # Find the inner (bounded) cell among the 7 and confirm it's the
+        # only bounded one.
+        all_cells = cells.enumerate_cells(A, c, seed=0)
+        bounded = [s for s in all_cells if not check(np.array(s, dtype=np.int64))]
+        assert len(bounded) == 1  # exactly the inner triangle
+
+    def test_scipy_fallback_matches_mip(self, monkeypatch):
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_triangle_2d())
+        all_cells = cells.enumerate_cells(A, c, seed=0)
+
+        mip_check = cells.make_unbounded_checker(A)
+        mip_unb = {s for s in all_cells if mip_check(np.array(s, dtype=np.int64))}
+
+        monkeypatch.setattr(cells, "_HAS_MIP", False)
+        scipy_check = cells.make_unbounded_checker(A)
+        scipy_unb = {s for s in all_cells if scipy_check(np.array(s, dtype=np.int64))}
+
+        assert mip_unb == scipy_unb
+        assert len(mip_unb) == 6  # 6 unbounded, 1 bounded
+
 
 # ----------------------------------------------------------------------
 # RayShootingExtractor
@@ -307,6 +386,10 @@ class TestRayShootingExtractor:
             RayShootingExtractor(num_rays=0)
         with pytest.raises(ValueError):
             RayShootingExtractor(max_coord=0)
+        with pytest.raises(ValueError):
+            RayShootingExtractor(batch_size=0)
+        with pytest.raises(ValueError):
+            RayShootingExtractor(plateau_ratio=1.5)
 
     def test_no_scipy_dependency(self):
         """The rewrite must be solver-free -- module must not import scipy."""
@@ -383,30 +466,62 @@ class TestRayShootingExtractor:
         This is what guarantees witness points stay close to origin."""
         extractor = RayShootingExtractor(num_rays=2_000, max_coord=6, seed=7)
         rng = np.random.default_rng(extractor.seed)
-        V = extractor._sample_rays(rng, d=5)
+        V = extractor._sample_rays(rng, d=5, n_rays=2_000)
         # gcd of absolute coords must be 1 for every row.
         gcds = np.gcd.reduce(np.abs(V), axis=1)
         assert (gcds == 1).all(), f"non-primitive rows: {(gcds != 1).sum()}"
-
-    def test_default_num_rays_is_100k(self):
-        """Default raised to 100_000 per FIX_RAY_SHOOTING_SPEC."""
-        assert RayShootingExtractor().num_rays == 100_000
 
     def test_vectorised_runs_fast(self):
         """Heuristic on a non-trivial arrangement must complete in
         well under a second -- the whole point of the rewrite."""
         import sympy as sp
-        import time
+        import time as _time
         syms = list(sp.symbols("a b c d e"))
         hps = [Hyperplane(s, syms) for s in syms]
         extractor = RayShootingExtractor(num_rays=10_000, max_coord=4, seed=0)
+        t0 = _time.perf_counter()
+        result = extractor.extract(hps)
+        elapsed = _time.perf_counter() - t0
+        assert elapsed < 1.0, f"too slow: {elapsed:.3f}s"
+        assert result  # found at least one cell
+
+    def test_adaptive_stops_early_on_plateau(self):
+        """On a trivial arrangement the heuristic should plateau quickly
+        and not shoot the full num_rays budget."""
+        import sympy as sp
+        x, y = sp.symbols("x y")
+        hps = [Hyperplane(x, [x, y]), Hyperplane(y, [x, y])]  # 4 quadrants
+        # Huge cap, small batch: must find all 4 then stop on plateau
+        # well before exhausting the (effectively unbounded) budget.
+        extractor = RayShootingExtractor(
+            num_rays=10_000_000, batch_size=1_000, plateau_ratio=1e-2, seed=0
+        )
         t0 = time.perf_counter()
         result = extractor.extract(hps)
         elapsed = time.perf_counter() - t0
-        # Loose ceiling -- 10k rays through a (5,)-dim arrangement in
-        # pure NumPy should be tens of ms, not seconds.
-        assert elapsed < 1.0, f"too slow: {elapsed:.3f}s"
-        assert result  # found at least one cell
+        assert len(result) == 4
+        assert elapsed < 1.0  # plateaued fast, didn't shoot 10M rays
+
+    def test_plateau_disabled_runs_full_budget(self):
+        """plateau_ratio=0 disables early stopping."""
+        import sympy as sp
+        x, y = sp.symbols("x y")
+        hps = [Hyperplane(x, [x, y]), Hyperplane(y, [x, y])]
+        extractor = RayShootingExtractor(
+            num_rays=2_000, batch_size=500, plateau_ratio=0.0, seed=0
+        )
+        # Still correct (4 quadrants); just doesn't bail early.
+        assert len(extractor.extract(hps)) == 4
+
+    def test_deadline_stops_batches(self):
+        """An expired deadline must stop the batch loop promptly."""
+        import sympy as sp
+        x, y = sp.symbols("x y")
+        hps = [Hyperplane(x, [x, y]), Hyperplane(y, [x, y])]
+        extractor = RayShootingExtractor(num_rays=10_000_000, batch_size=1_000)
+        # Past deadline -> returns (possibly empty) without shooting 10M.
+        out = extractor.extract(hps, deadline=time.time() - 1.0)
+        assert isinstance(out, dict)
 
 
 # ----------------------------------------------------------------------
@@ -420,27 +535,66 @@ lrs_required = pytest.mark.skipif(
 
 
 class TestLrslibExtractor:
-    def test_constructor_raises_without_binary(self):
+    def test_default_lp_mode_needs_no_lrs_binary(self):
+        """The default 'lp' backend must construct even when lrs is absent."""
+        with patch("dreamer.extraction.v2.lrs_extractor.lrs_available", return_value=False):
+            ext = LrslibExtractor()  # default unbounded_check='lp'
+        assert ext.unbounded_check == "lp"
+
+    def test_lrs_mode_raises_without_binary(self):
         with patch("dreamer.extraction.v2.lrs_extractor.lrs_available", return_value=False):
             with pytest.raises(FileNotFoundError, match="lrs"):
-                LrslibExtractor()
+                LrslibExtractor(unbounded_check="lrs")
 
-    def test_is_unbounded_dispatch(self):
-        """Even without the binary we can exercise the parse path with a fake stdout."""
+    def test_rejects_unknown_unbounded_check(self):
+        with pytest.raises(ValueError, match="lp.*lrs"):
+            LrslibExtractor(unbounded_check="bogus")
+
+    def test_lrs_is_unbounded_dispatch(self):
+        """Exercise the lrs parse path with a fake stdout."""
         with patch("dreamer.extraction.v2.lrs_extractor.lrs_available", return_value=True):
-            extractor = LrslibExtractor()
+            extractor = LrslibExtractor(unbounded_check="lrs")
         A = np.array([[1, 0]], dtype=np.int64)
         c = np.array([0], dtype=np.int64)
         bounded_vrep = "V-representation\nbegin\n1 3 rational\n 1 0 0\nend\n"
         with patch("dreamer.extraction.v2.lrs_extractor.run_lrs", return_value=bounded_vrep):
-            assert extractor._is_unbounded(A, c, np.array([1])) is False
+            assert extractor._is_unbounded_lrs(A, c, np.array([1])) is False
         unbounded_vrep = "V-representation\nbegin\n1 3 rational\n 0 1 0\nend\n"
         with patch("dreamer.extraction.v2.lrs_extractor.run_lrs", return_value=unbounded_vrep):
-            assert extractor._is_unbounded(A, c, np.array([1])) is True
+            assert extractor._is_unbounded_lrs(A, c, np.array([1])) is True
 
-    def test_timeout_is_wrapped(self):
+    def test_extract_salvages_partial_on_timeout(self, monkeypatch):
+        """Serial interleaved extract: a timeout mid-stream must re-raise
+        an ExtractionTimeout carrying the shards classified so far."""
+        ext = LrslibExtractor(num_workers=1)  # default LP, no lrs needed
+
+        def fake_iter(A, c, **kwargs):
+            yield (1, 1)
+            yield (-1, -1)
+            raise cells.ExtractionTimeout("enumeration deadline")  # no payload
+
+        monkeypatch.setattr(
+            "dreamer.extraction.v2.lrs_extractor.iter_cells", fake_iter
+        )
+        # Force every cell unbounded by stubbing the checker factory.
+        monkeypatch.setattr(
+            "dreamer.extraction.v2.lrs_extractor.make_unbounded_checker",
+            lambda A: (lambda s: True),
+        )
+        monkeypatch.setattr(
+            "dreamer.extraction.v2.lrs_extractor.find_integer_point",
+            lambda A, c, s, bound: np.asarray(s),
+        )
+
+        with pytest.raises(cells.ExtractionTimeout) as ei:
+            ext.extract(_hps_axes_2d(), deadline=time.time() + 100)
+
+        partial = ei.value.partial
+        assert set(partial.keys()) == {(1, 1), (-1, -1)}
+
+    def test_lrs_timeout_is_wrapped(self):
         with patch("dreamer.extraction.v2.lrs_extractor.lrs_available", return_value=True):
-            extractor = LrslibExtractor(per_call_timeout=0.1)
+            extractor = LrslibExtractor(unbounded_check="lrs", per_call_timeout=0.1)
         A = np.array([[1, 0]], dtype=np.int64)
         c = np.array([0], dtype=np.int64)
         with patch(
@@ -448,25 +602,62 @@ class TestLrslibExtractor:
             side_effect=subprocess.TimeoutExpired(cmd="lrs", timeout=0.1),
         ):
             with pytest.raises(RuntimeError, match="timed out"):
-                extractor._is_unbounded(A, c, np.array([1]))
+                extractor._is_unbounded_lrs(A, c, np.array([1]))
 
-    @lrs_required
-    def test_end_to_end_axes(self):
+    def test_end_to_end_axes_lp(self):
+        """Default LP backend, no lrs binary required."""
         extractor = LrslibExtractor()
         result = extractor.extract(_hps_axes_2d())
-        # All 4 quadrants of R^2 are unbounded.
-        assert len(result) == 4
+        assert len(result) == 4  # all 4 quadrants unbounded
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_axes_2d())
         for sig, pt in result.items():
-            A, c = BaseExtractor.hyperplanes_to_matrix(_hps_axes_2d())
             vals = A @ pt + c
             assert tuple(np.where(vals > 0, 1, -1).tolist()) == sig
 
-    @lrs_required
-    def test_end_to_end_triangle_drops_bounded(self):
+    def test_end_to_end_triangle_drops_bounded_lp(self):
         extractor = LrslibExtractor()
         result = extractor.extract(_hps_triangle_2d())
-        # 7 cells total but the inner triangle is bounded, so 6 survive.
+        # 7 cells total, inner triangle bounded -> 6 unbounded survive.
         assert len(result) == 6
+
+    @lrs_required
+    def test_lp_matches_lrs_end_to_end(self):
+        """The LP backend must agree with the lrs backend on which cells
+        are unbounded -- same shard set for both."""
+        for hps in (_hps_axes_2d(), _hps_triangle_2d(), _hps_strip_2d()):
+            lp = set(LrslibExtractor(unbounded_check="lp").extract(hps).keys())
+            lrs = set(LrslibExtractor(unbounded_check="lrs").extract(hps).keys())
+            assert lp == lrs
+
+    def test_parallel_matches_serial(self):
+        """Salvage-aware parallel workers must find the same shard set as
+        the serial sweep (encodings and points)."""
+        import sympy as sp
+        syms = list(sp.symbols("a b c d"))
+        # An arrangement with enough cells to exercise multiple subtrees.
+        hps = [Hyperplane(s, syms) for s in syms] + [
+            Hyperplane(syms[0] - syms[1], syms),
+            Hyperplane(syms[2] - syms[3], syms),
+        ]
+        serial = LrslibExtractor(num_workers=1).extract(hps)
+        parallel = LrslibExtractor(num_workers=4).extract(hps)
+        assert set(parallel.keys()) == set(serial.keys())
+        for k in serial:
+            assert np.array_equal(parallel[k], serial[k])
+
+    def test_parallel_salvages_partial_on_timeout(self):
+        """A past deadline in parallel mode must raise ExtractionTimeout
+        carrying whatever shards the workers completed (possibly empty),
+        not hang or lose everything."""
+        import sympy as sp
+        syms = list(sp.symbols("a b c d"))
+        hps = [Hyperplane(s, syms) for s in syms] + [
+            Hyperplane(syms[0] - syms[1], syms),
+        ]
+        ext = LrslibExtractor(num_workers=4)
+        with pytest.raises(cells.ExtractionTimeout) as ei:
+            ext.extract(hps, deadline=time.time() - 1.0)  # already expired
+        assert isinstance(ei.value.partial, dict)
 
 
 # ----------------------------------------------------------------------
@@ -477,15 +668,12 @@ class TestLrslibExtractor:
 class _FakeExact(BaseExtractor):
     name = "exact"
 
-    def __init__(self, returns=None, raises=None, sleep=0.0):
+    def __init__(self, returns=None, raises=None):
         self._returns = returns or {}
         self._raises = raises
-        self._sleep = sleep
 
-    def extract(self, hyperplanes):
-        if self._sleep:
-            import time as _time
-            _time.sleep(self._sleep)
+    def extract(self, hyperplanes, *, deadline=None):
+        self.seen_deadline = deadline
         if self._raises:
             raise self._raises
         return self._returns
@@ -497,7 +685,7 @@ class _FakeHeuristic(BaseExtractor):
     def __init__(self, returns=None):
         self._returns = returns or {}
 
-    def extract(self, hyperplanes):
+    def extract(self, hyperplanes, *, deadline=None):
         return self._returns
 
 
@@ -526,14 +714,63 @@ class TestExtractionManager:
         out = mgr.extract([])
         assert (1,) in out
 
+    def test_auto_passes_deadline_to_exact(self):
+        """Manager must hand the exact extractor an absolute deadline so
+        it can self-abort cooperatively (no killing threads)."""
+        exact = _FakeExact(returns={(1,): np.array([1])})
+        mgr = ExtractionManager(
+            strategy="auto", exact=exact,
+            heuristic=_FakeHeuristic(), timeout_seconds=30.0,
+        )  # type: ignore[arg-type]
+        t_before = __import__("time").time()
+        mgr.extract([])
+        assert exact.seen_deadline is not None
+        # Deadline must be ~now + timeout_seconds.
+        assert t_before + 29 <= exact.seen_deadline <= t_before + 31
+
     def test_auto_falls_back_on_timeout(self):
-        exact = _FakeExact(returns={(1,): np.array([1])}, sleep=1.0)
+        # The exact extractor signals a timeout by raising ExtractionTimeout
+        # (what the real one does when it passes its cooperative deadline).
+        exact = _FakeExact(raises=cells.ExtractionTimeout("deadline"))
         heur = _FakeHeuristic(returns={(-1,): np.array([-1])})
         mgr = ExtractionManager(
             strategy="auto", exact=exact, heuristic=heur, timeout_seconds=0.05
         )  # type: ignore[arg-type]
         out = mgr.extract([])
         assert (-1,) in out
+
+    def test_auto_unions_partial_exact_with_heuristic(self):
+        """On exact timeout the manager must union exact's salvaged
+        shards with the heuristic's, preferring exact's point on overlap."""
+        exact_pt = np.array([2, 2], dtype=np.int64)
+        heur_same = np.array([9, 9], dtype=np.int64)
+        heur_other = np.array([-1, -1], dtype=np.int64)
+        exact = _FakeExact(
+            raises=cells.ExtractionTimeout("deadline", partial={(1, 1): exact_pt})
+        )
+        heur = _FakeHeuristic(returns={(1, 1): heur_same, (-1, -1): heur_other})
+        mgr = ExtractionManager(
+            strategy="auto", exact=exact, heuristic=heur, timeout_seconds=0.01
+        )  # type: ignore[arg-type]
+        out = mgr.extract([])
+        assert set(out.keys()) == {(1, 1), (-1, -1)}
+        # Exact's MILP point wins for the cell both found.
+        assert np.array_equal(out[(1, 1)], exact_pt)
+        assert np.array_equal(out[(-1, -1)], heur_other)
+
+    def test_auto_does_not_stall_on_slow_then_timeout(self):
+        """Regression: the fallback must run promptly, not block waiting
+        on a runaway exact thread (the old ThreadPoolExecutor bug)."""
+        import time as _time
+        exact = _FakeExact(raises=cells.ExtractionTimeout("deadline"))
+        heur = _FakeHeuristic(returns={(-1,): np.array([-1])})
+        mgr = ExtractionManager(
+            strategy="auto", exact=exact, heuristic=heur, timeout_seconds=0.01
+        )  # type: ignore[arg-type]
+        t0 = _time.perf_counter()
+        out = mgr.extract([])
+        assert (-1,) in out
+        assert _time.perf_counter() - t0 < 1.0  # no multi-second stall
 
     def test_auto_falls_back_on_exception(self):
         exact = _FakeExact(raises=RuntimeError("explode"))

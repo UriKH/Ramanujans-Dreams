@@ -125,9 +125,12 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
     captured = {}
 
     class _Spy:
-        def __init__(self, strategy, timeout_seconds):
+        def __init__(self, strategy, timeout_seconds, exact_unbounded_check="lp",
+                     exact_num_workers=1):
             captured["strategy"] = strategy
             captured["timeout_seconds"] = timeout_seconds
+            captured["exact_unbounded_check"] = exact_unbounded_check
+            captured["exact_num_workers"] = exact_num_workers
 
         def extract(self, hyperplanes):
             captured["num_hps"] = len(hyperplanes)
@@ -141,6 +144,7 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
 
     assert captured["strategy"] == "auto"
     assert captured["timeout_seconds"] == extraction_config.STRATEGY_TIMEOUT_SECONDS
+    assert captured["exact_unbounded_check"] == extraction_config.EXACT_UNBOUNDED_CHECK
     assert captured["num_hps"] == 1
     assert len(shards) == 1
     assert tuple(shards[0].encoding) == (1,)
@@ -168,3 +172,124 @@ def test_extract_via_v2_warns_on_pfq_dedup(monkeypatch, capsys, _restore_strateg
     out = capsys.readouterr().out
     assert "IGNORE_DUPLICATE_SEARCHABLES" in out
     assert "WARNING" in out
+
+
+def test_apply_shift_hoist_matches_per_shard(monkeypatch):
+    """Passing pre-shifted hyperplanes (hyperplanes_already_shifted=True)
+    must yield identical A/b to letting Shard.__init__ shift internally."""
+    import numpy as np
+    from dreamer.extraction.shard import Shard
+
+    cmf = rt_pFq(1, 1, sp.Integer(1))
+    syms = list(cmf.matrices.keys())
+    shift = Position({syms[0]: sp.Integer(1), syms[1]: sp.Integer(2)})  # nonzero
+    cmf_data = CMFData(cmf=cmf, shift=shift)
+    hps = [Hyperplane(syms[0], symbols=syms), Hyperplane(syms[1], symbols=syms)]
+    enc = [1, -1]
+
+    s_raw = Shard.from_cmf_data(cmf_data, e, hps, enc)
+    shifted = [hp.apply_shift(shift) for hp in hps]
+    s_hoist = Shard.from_cmf_data(
+        cmf_data, e, shifted, enc, hyperplanes_already_shifted=True
+    )
+    assert np.array_equal(s_raw.A, s_hoist.A)
+    assert np.array_equal(s_raw.b, s_hoist.b)
+    assert s_raw.symbols == s_hoist.symbols
+
+
+# ----------------------------------------------------------------------
+# Task 2: shard-cache load/skip
+# ----------------------------------------------------------------------
+
+
+def _boom(*_a, **_k):
+    raise AssertionError("discovery should have been skipped (cache hit)")
+
+
+def _write_cache(tmp_path, cmf_data, hps, encodings):
+    """Build shards for the given encodings and persist them as the
+    <cmf>__shards.jsonl cache under tmp_path."""
+    from dreamer.utils.storage.atlas_writer import write_shard_records
+    from dreamer.extraction.shard import Shard
+
+    symbols = list(hps)[0].symbols
+    shards = []
+    for enc in encodings:
+        pt = Position({s: v for s, v in zip(symbols, enc)})  # any interior witness
+        shards.append(Shard.from_cmf_data(cmf_data, e, list(hps), list(enc), pt))
+    write_shard_records(str(tmp_path), e, cmf_data.cmf_name, shards)
+
+
+def test_load_shard_cache_skips_extraction(monkeypatch, tmp_path):
+    from dreamer.configs import sys_config
+
+    cmf_data = _shift_cmf()
+    symbols = list(cmf_data.cmf.matrices.keys())
+    hps = [
+        Hyperplane(symbols[0], symbols=symbols),
+        Hyperplane(symbols[1], symbols=symbols),
+    ]
+    monkeypatch.setattr(sys_config, "EXPORT_CMFS", str(tmp_path))
+    _write_cache(tmp_path, cmf_data, hps, [(1, 1), (-1, -1)])
+
+    extractor = ShardExtractor(e, cmf_data)
+    monkeypatch.setattr(extractor, "_extract_cmf_hps", lambda: hps)
+    # Prove discovery is bypassed entirely.
+    monkeypatch.setattr(extractor, "_discover_via_v2", _boom)
+    monkeypatch.setattr(extractor, "_discover_via_legacy", _boom)
+    monkeypatch.setattr(extraction_config, "LOAD_SHARD_CACHE", True)
+
+    shards = extractor.extract(call_number=1)
+
+    assert {tuple(s.encoding) for s in shards} == {(1, 1), (-1, -1)}
+    for s in shards:
+        assert s.get_interior_point() is not None
+
+
+def test_cache_ignored_when_flag_off(monkeypatch, tmp_path):
+    from dreamer.configs import sys_config
+
+    cmf_data = _shift_cmf()
+    symbols = list(cmf_data.cmf.matrices.keys())
+    hps = [Hyperplane(symbols[0], symbols=symbols),
+           Hyperplane(symbols[1], symbols=symbols)]
+    monkeypatch.setattr(sys_config, "EXPORT_CMFS", str(tmp_path))
+    _write_cache(tmp_path, cmf_data, hps, [(1, 1)])
+
+    extractor = ShardExtractor(e, cmf_data)
+    monkeypatch.setattr(extractor, "_extract_cmf_hps", lambda: hps)
+    monkeypatch.setattr(extraction_config, "LOAD_SHARD_CACHE", False)
+    # Cache exists but flag is off -> discovery must run.
+    sentinel = {(-1, 1): Position({symbols[0]: -1, symbols[1]: 1})}
+    monkeypatch.setattr(extractor, "_discover_via_v2", lambda *a, **k: dict(sentinel))
+    extraction_config.STRATEGY = "auto"
+
+    shards = extractor.extract(call_number=1)
+    assert {tuple(s.encoding) for s in shards} == {(-1, 1)}
+
+
+def test_stale_cache_falls_back_to_extraction(monkeypatch, tmp_path):
+    """A cache whose encodings don't match the current hyperplane count
+    must be ignored (forces fresh extraction), not mis-aligned."""
+    from dreamer.configs import sys_config
+
+    cmf_data = _shift_cmf()
+    symbols = list(cmf_data.cmf.matrices.keys())
+    # Cache written for TWO hyperplanes...
+    hps2 = [Hyperplane(symbols[0], symbols=symbols),
+            Hyperplane(symbols[1], symbols=symbols)]
+    monkeypatch.setattr(sys_config, "EXPORT_CMFS", str(tmp_path))
+    _write_cache(tmp_path, cmf_data, hps2, [(1, 1), (-1, -1)])
+
+    # ...but this run sees only ONE hyperplane -> stale.
+    hps1 = [Hyperplane(symbols[0], symbols=symbols)]
+    extractor = ShardExtractor(e, cmf_data)
+    monkeypatch.setattr(extractor, "_extract_cmf_hps", lambda: hps1)
+    monkeypatch.setattr(extraction_config, "LOAD_SHARD_CACHE", True)
+    extraction_config.STRATEGY = "auto"
+    sentinel = {(1,): Position({symbols[0]: 1, symbols[1]: 0})}
+    monkeypatch.setattr(extractor, "_discover_via_v2", lambda *a, **k: dict(sentinel))
+
+    shards = extractor.extract(call_number=1)
+    # Came from discovery, not the stale 2-bit cache.
+    assert {tuple(s.encoding) for s in shards} == {(1,)}

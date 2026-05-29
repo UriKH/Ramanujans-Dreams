@@ -283,6 +283,19 @@ def update_cmf_hyperplanes(
     return updated
 
 
+def shard_records_path(root: str, const: Constant, cmf_name: str) -> str:
+    """Return the ``<root>/<const>/<cmf>__shards.jsonl`` path for a CMF.
+
+    Centralises the safe-name munging shared by the writer and reader so
+    they can never drift apart.
+    """
+    safe_const = "".join(c for c in const.name if c.isalnum() or c in ("-", "_"))
+    safe_cmf = "".join(
+        c if c.isalnum() or c in ("-", "_") else "_" for c in str(cmf_name)
+    ).strip("_") or "unknown"
+    return os.path.join(root, safe_const, f"{safe_cmf}__shards.jsonl")
+
+
 def write_shard_records(
     root: str,
     const: Constant,
@@ -293,12 +306,35 @@ def write_shard_records(
 
     Returns the number of new records appended (existing ids are skipped).
     """
-    safe_const = "".join(c for c in const.name if c.isalnum() or c in ("-", "_"))
-    const_path = os.path.join(root, safe_const)
-    os.makedirs(const_path, exist_ok=True)
-
-    safe_cmf = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(cmf_name)).strip("_") or "unknown"
-    path = os.path.join(const_path, f"{safe_cmf}__shards.jsonl")
-
+    path = shard_records_path(root, const, cmf_name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     shard_dtos = [build_shard_dto(s) for s in shards]
     return append_dtos_jsonl(path, shard_dtos, "shard_id")
+
+
+def read_shard_records(
+    root: str,
+    const: Constant,
+    cmf_name: str,
+) -> List[ShardDTO]:
+    """Read the cached ShardDTOs for one CMF, or ``[]`` if none on disk.
+
+    The inverse of :func:`write_shard_records`: lets the extraction stage
+    reload previously-computed shards (encoding + interior point) and
+    skip re-running the expensive enumeration.  Malformed lines are
+    skipped rather than aborting the load.
+    """
+    path = shard_records_path(root, const, cmf_name)
+    if not os.path.isfile(path):
+        return []
+    out: List[ShardDTO] = []
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(ShardDTO.from_dict(json.loads(line)))
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue
+    return out

@@ -26,7 +26,8 @@ class Shard(Searchable, JSONable):
                  shift: Position,
                  interior_point: Optional[Position] = None,
                  use_inv_t: Optional[bool] = None,
-                 cmf_name: str = 'UnknownCMF'
+                 cmf_name: str = 'UnknownCMF',
+                 hyperplanes_already_shifted: bool = False
                  ):
         """
         :param cmf: The CMF this shard is a part of
@@ -37,6 +38,12 @@ class Shard(Searchable, JSONable):
         :param interior_point: A point within the shard
         :param use_inv_t: Whether to use inverse transpose when preforming walk or not
         :param cmf_name: The name of the CMF
+        :param hyperplanes_already_shifted: When True, ``hyperplanes`` are
+            already in shifted coordinates, so the (expensive, sympy)
+            per-hyperplane ``apply_shift`` is skipped.  The shift is the
+            same for every shard of a CMF, so the caller can shift once
+            and reuse the result across all shards instead of re-shifting
+            in each ``Shard.__init__``.
         """
         use_inv_t_value: bool = bool(config.search.DEFAULT_USES_INV_T if use_inv_t is None else use_inv_t)
 
@@ -51,7 +58,10 @@ class Shard(Searchable, JSONable):
 
         if hyperplanes:
             # Work in shifted coordinates, then translate tested points back by `shift`.
-            shifted_hyperplanes = [hp.apply_shift(shift) for hp in hyperplanes]
+            if hyperplanes_already_shifted:
+                shifted_hyperplanes = hyperplanes
+            else:
+                shifted_hyperplanes = [hp.apply_shift(shift) for hp in hyperplanes]
             self.A, self.b, self.symbols = self.generate_matrices(shifted_hyperplanes, encoding)
         self.start_coord = interior_point
         self.is_whole_space = self.A is None or self.b is None
@@ -59,10 +69,12 @@ class Shard(Searchable, JSONable):
     @classmethod
     def from_cmf_data(cls, cmf_data: CMFData, constant: Constant,
                       hyperplanes: List[Hyperplane], encoding: List[int],
-                      interior_point: Optional[Position] = None, *args, **kwargs) -> Shard:
+                      interior_point: Optional[Position] = None, *args,
+                      hyperplanes_already_shifted: bool = False, **kwargs) -> Shard:
         return cls(
             cmf_data.cmf, constant, hyperplanes, encoding, cmf_data.shift,
-            interior_point, cmf_data.use_inv_t, cmf_data.cmf_name
+            interior_point, cmf_data.use_inv_t, cmf_data.cmf_name,
+            hyperplanes_already_shifted=hyperplanes_already_shifted,
         )
 
     @classmethod
