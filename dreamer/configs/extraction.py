@@ -78,12 +78,35 @@ class ExtractionConfig(Configurable):
         default=False,
         metadata={
             "description": (
-                "If True, the heuristic ray-shooter post-processes each "
-                "discovered shard with an MILP to return the L1-minimal "
+                "If True, the heuristic ray-shooter post-processes far-out "
+                "shards with an MILP to return the L1-minimal "
                 "(closest-to-origin) integer start point instead of the raw "
-                "ray witness.  Costs ~2ms/shard; default False keeps the "
-                "solver-free fast path.  Also applies to the heuristic "
-                "top-up under STRATEGY='auto'."
+                "ray witness.  Only witnesses with L1 norm above "
+                "HEURISTIC_REFINE_L1_THRESHOLD are recomputed.  Default False "
+                "keeps the solver-free fast path.  Also applies to the "
+                "heuristic top-up under STRATEGY='auto'."
+            )
+        },
+    )
+    HEURISTIC_REFINE_L1_THRESHOLD: float = field(
+        default=50.0,
+        metadata={
+            "description": (
+                "When HEURISTIC_REFINE_WITNESSES is on, only ray witnesses "
+                "whose L1 norm (sum of |coordinates|) exceeds this are "
+                "recomputed via MILP; smaller witnesses are already close "
+                "enough to the origin and kept as-is.  0 refines every "
+                "shard.  Default 50."
+            )
+        },
+    )
+    HEURISTIC_REFINE_WORKERS: int = field(
+        default=1,
+        metadata={
+            "description": (
+                "Process count for the heuristic's MILP witness refinement "
+                "(the per-shard MILPs are independent).  >1 dispatches them "
+                "across processes; 1 (default) runs serially."
             )
         },
     )

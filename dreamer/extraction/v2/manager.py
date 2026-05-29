@@ -54,7 +54,11 @@ class ExtractionManager:
         :class:`LrslibExtractor` (``"lp"`` or ``"lrs"``).
     :param heuristic_refine: Forwarded to a lazily-built
         :class:`RayShootingExtractor` as ``refine_witnesses`` -- MILP-polish
-        each shard's witness to the L1-minimal integer point.
+        far-out shard witnesses to the L1-minimal integer point.
+    :param heuristic_refine_threshold: Forwarded as ``refine_l1_threshold``
+        -- only witnesses with L1 norm above this are refined.
+    :param heuristic_refine_workers: Forwarded as ``refine_workers`` --
+        process count for the refinement MILPs.
     :raises ValueError: If ``strategy`` is unknown.
     """
 
@@ -68,6 +72,8 @@ class ExtractionManager:
         exact_unbounded_check: str = "lp",
         exact_num_workers: int = 1,
         heuristic_refine: bool = False,
+        heuristic_refine_threshold: float = 50.0,
+        heuristic_refine_workers: int = 1,
     ):
         if strategy not in ("auto", "exact", "heuristic"):
             raise ValueError(
@@ -78,6 +84,8 @@ class ExtractionManager:
         self._exact_unbounded_check = exact_unbounded_check
         self._exact_num_workers = exact_num_workers
         self._heuristic_refine = heuristic_refine
+        self._heuristic_refine_threshold = heuristic_refine_threshold
+        self._heuristic_refine_workers = heuristic_refine_workers
         self.timeout_seconds = timeout_seconds
         self._exact = exact
         self._heuristic = heuristic
@@ -152,6 +160,8 @@ class ExtractionManager:
     def _get_heuristic(self) -> RayShootingExtractor:
         if self._heuristic is None:
             self._heuristic = RayShootingExtractor(
-                refine_witnesses=self._heuristic_refine
+                refine_witnesses=self._heuristic_refine,
+                refine_l1_threshold=self._heuristic_refine_threshold,
+                refine_workers=self._heuristic_refine_workers,
             )
         return self._heuristic

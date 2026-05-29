@@ -414,20 +414,60 @@ class TestRayShootingExtractor:
             assert out[(1, 1)].tolist() == [1, 1]
 
     def test_refine_witnesses_returns_milp_minimal(self):
-        """With refine_witnesses=True each shard's point is the MILP
-        L1-minimal integer point of its cell -- same cells discovered, and
-        the witness is never worse than the raw ray witness."""
+        """With refine_witnesses=True (threshold 0 -> refine all) each
+        shard's point is the MILP L1-minimal integer point of its cell --
+        same cells discovered, and never worse than the raw ray witness."""
         hps = _hps_axes_2d()
         A, c = BaseExtractor.hyperplanes_to_matrix(hps)
         raw = RayShootingExtractor(num_rays=500, max_coord=5, seed=0).extract(hps)
         refined = RayShootingExtractor(
-            num_rays=500, max_coord=5, seed=0, refine_witnesses=True
+            num_rays=500, max_coord=5, seed=0,
+            refine_witnesses=True, refine_l1_threshold=0,
         ).extract(hps)
         assert set(raw) == set(refined)  # refinement never changes which cells
         for sig, pt in refined.items():
             expected = milp.find_integer_point(A, c, np.asarray(sig, dtype=np.int64))
             assert pt.tolist() == expected.tolist()
             assert np.abs(pt).sum() <= np.abs(raw[sig]).sum()
+
+    def test_refine_only_above_threshold(self):
+        """Only witnesses with L1 norm above refine_l1_threshold are
+        recomputed; smaller ones are left exactly as the ray found them."""
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_axes_2d())
+        ext = RayShootingExtractor(refine_witnesses=True, refine_l1_threshold=50)
+        # Far-out witness (L1 = 200 > 50) -> refined to the MILP minimum (1, 1).
+        far = {(1, 1): np.array([100, 100], dtype=np.int64)}
+        ext._refine_witnesses(A, c, far)
+        assert far[(1, 1)].tolist() == [1, 1]
+        # Small witness (L1 = 6 < 50) -> left untouched.
+        near = {(1, 1): np.array([3, 3], dtype=np.int64)}
+        ext._refine_witnesses(A, c, near)
+        assert near[(1, 1)].tolist() == [3, 3]
+
+    def test_refine_parallel_matches_serial(self):
+        """Parallel refinement must produce the identical (MILP-minimal)
+        witnesses as the serial path."""
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_axes_2d())
+        big = {
+            (1, 1): np.array([90, 90], dtype=np.int64),
+            (1, -1): np.array([90, -90], dtype=np.int64),
+            (-1, 1): np.array([-90, 90], dtype=np.int64),
+            (-1, -1): np.array([-90, -90], dtype=np.int64),
+        }
+        serial = {k: v.copy() for k, v in big.items()}
+        RayShootingExtractor(
+            refine_witnesses=True, refine_l1_threshold=0
+        )._refine_witnesses(A, c, serial)
+        par = {k: v.copy() for k, v in big.items()}
+        RayShootingExtractor(
+            refine_witnesses=True, refine_l1_threshold=0, refine_workers=2
+        )._refine_parallel(A, c, par, list(par.keys()))
+        assert {k: v.tolist() for k, v in serial.items()} == {
+            k: v.tolist() for k, v in par.items()
+        }
+        for k in par:
+            exp = milp.find_integer_point(A, c, np.asarray(k, dtype=np.int64))
+            assert par[k].tolist() == exp.tolist()
 
     def test_rejects_bad_params(self):
         with pytest.raises(ValueError):
@@ -748,12 +788,17 @@ class TestExtractionManager:
         assert mgr.extract([]) == {(1,): heur._returns[(1,)]}
 
     def test_heuristic_refine_forwarded(self):
-        """heuristic_refine must reach the lazily-built RayShootingExtractor."""
+        """heuristic refine knobs must reach the lazily-built extractor."""
         built = ExtractionManager(
-            strategy="heuristic", heuristic_refine=True
+            strategy="heuristic",
+            heuristic_refine=True,
+            heuristic_refine_threshold=80.0,
+            heuristic_refine_workers=4,
         )._get_heuristic()
         assert isinstance(built, RayShootingExtractor)
         assert built.refine_witnesses is True
+        assert built.refine_l1_threshold == 80.0
+        assert built.refine_workers == 4
         # Default leaves the solver-free path on.
         assert (
             ExtractionManager(strategy="heuristic")._get_heuristic().refine_witnesses

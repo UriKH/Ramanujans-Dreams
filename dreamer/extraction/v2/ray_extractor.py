@@ -25,6 +25,7 @@ max for ``t_escape``.  No Python loop over rays, no scipy.
 from __future__ import annotations
 
 import time
+from multiprocessing import get_context
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -35,6 +36,18 @@ from .milp import find_integer_point
 
 
 SignTuple = Tuple[int, ...]
+
+
+def _refine_worker(args):
+    """Top-level (picklable) MILP refinement of one cell, for the pool.
+
+    Returns ``(key, point_or_None)``; ``None`` means the MILP found no
+    integer point (should not happen for a cell that already has a ray
+    witness, but the caller keeps the old witness if so).
+    """
+    A, c, key = args
+    pt = find_integer_point(A, c, np.asarray(key, dtype=np.int64))
+    return key, pt
 
 
 class RayShootingExtractor(BaseExtractor):
@@ -52,18 +65,30 @@ class RayShootingExtractor(BaseExtractor):
         provided at least one full batch has been shot.  ``0`` disables
         early stopping (always shoot the full ``num_rays``).
     :param seed: RNG seed for reproducibility.
-    :param refine_witnesses: When ``True``, after discovery replace each
-        cell's ray witness with the **L1-minimal** integer point of that
-        cell, found by the same MILP the exact extractor uses
-        (:func:`dreamer.extraction.v2.milp.find_integer_point`).  Ray
-        shooting lands *some* integer point per cell; this upgrades it to
-        the provably closest-to-origin one, at ~2 ms/cell.  Default
-        ``False`` keeps the solver-free fast path.
+    :param refine_witnesses: When ``True``, after discovery polish the ray
+        witnesses with the same MILP the exact extractor uses
+        (:func:`dreamer.extraction.v2.milp.find_integer_point`), which
+        returns the **L1-minimal** integer point of a cell.  To stay cheap
+        this is applied **selectively**: only cells whose ray witness has
+        ``L1 norm > refine_l1_threshold`` are recomputed (the rest are
+        already small enough), so the MILP runs on the few far-out
+        witnesses instead of all of them.  Default ``False`` keeps the
+        solver-free fast path.
+    :param refine_l1_threshold: Only ray witnesses with L1 norm strictly
+        greater than this are refined (when ``refine_witnesses=True``).
+        ``0`` refines every cell.  Default ``50``.
+    :param refine_workers: Process count for the refinement MILPs (they are
+        independent per cell).  ``>1`` dispatches them across processes;
+        ``1`` (default) runs serially.
     :raises ValueError: For non-positive ``num_rays``/``max_coord``/
         ``batch_size`` or a ``plateau_ratio`` outside ``[0, 1]``.
     """
 
     name = "heuristic"
+
+    # Below this many cells to refine, the process-pool overhead outweighs
+    # the parallel speedup -- just refine serially.
+    _PARALLEL_MIN = 200
 
     def __init__(
         self,
@@ -74,6 +99,8 @@ class RayShootingExtractor(BaseExtractor):
         plateau_ratio: float = 1e-3,
         seed: Optional[int] = 0,
         refine_witnesses: bool = False,
+        refine_l1_threshold: float = 50.0,
+        refine_workers: int = 1,
     ):
         if num_rays <= 0:
             raise ValueError(f"num_rays must be positive, got {num_rays}")
@@ -83,12 +110,18 @@ class RayShootingExtractor(BaseExtractor):
             raise ValueError(f"batch_size must be positive, got {batch_size}")
         if not 0.0 <= plateau_ratio <= 1.0:
             raise ValueError(f"plateau_ratio must be in [0, 1], got {plateau_ratio}")
+        if refine_l1_threshold < 0:
+            raise ValueError(
+                f"refine_l1_threshold must be >= 0, got {refine_l1_threshold}"
+            )
         self.num_rays = num_rays
         self.max_coord = max_coord
         self.batch_size = batch_size
         self.plateau_ratio = plateau_ratio
         self.seed = seed
         self.refine_witnesses = refine_witnesses
+        self.refine_l1_threshold = refine_l1_threshold
+        self.refine_workers = refine_workers
 
     # ------------------------------------------------------------------
     # Public API
@@ -148,22 +181,59 @@ class RayShootingExtractor(BaseExtractor):
         deadline: Optional[float] = None,
     ) -> None:
         """
-        Replace each discovered cell's ray witness with the L1-minimal
-        integer point of that cell (in place).
+        Replace **far-out** ray witnesses with the L1-minimal integer point
+        of their cell (in place).
 
-        Every cell in ``out`` already contains an integer point (its ray
+        Only cells whose ray witness has L1 norm ``> refine_l1_threshold``
+        are recomputed -- the rest are already close enough to the origin,
+        so the expensive MILP runs on the few outliers instead of every
+        cell.  Every refined cell already contains an integer point (its ray
         witness), so the MILP is feasible and returns the closest-to-origin
-        integer point -- never worse than what we had.  A ``None`` result
-        (should not happen) or a passed ``deadline`` leaves the existing
-        witness untouched, so refinement can only improve the map.
+        point -- never worse than what we had; a ``None`` result leaves the
+        old witness untouched, so refinement can only improve the map.
+
+        When ``refine_workers > 1`` and there are enough cells to amortise
+        the pool, the (independent) MILPs are dispatched across processes.
         """
-        for key in list(out.keys()):
+        to_refine = [
+            key for key, pt in out.items()
+            if np.abs(pt).sum() > self.refine_l1_threshold
+        ]
+        if not to_refine:
+            return
+
+        if (
+            self.refine_workers
+            and self.refine_workers > 1
+            and len(to_refine) >= self._PARALLEL_MIN
+        ):
+            self._refine_parallel(A, c, out, to_refine)
+            return
+
+        for key in to_refine:
             if deadline is not None and time.time() > deadline:
                 break
-            sign = np.asarray(key, dtype=np.int64)
-            pt = find_integer_point(A, c, sign)
+            pt = find_integer_point(A, c, np.asarray(key, dtype=np.int64))
             if pt is not None:
                 out[key] = pt
+
+    def _refine_parallel(
+        self,
+        A: np.ndarray,
+        c: np.ndarray,
+        out: ShardMapping,
+        keys: List[SignTuple],
+    ) -> None:
+        """Refine ``keys`` across a process pool (each MILP is independent)."""
+        tasks = [(A, c, key) for key in keys]
+        chunksize = max(1, len(tasks) // (self.refine_workers * 4))
+        ctx = get_context()
+        with ctx.Pool(processes=min(self.refine_workers, len(tasks))) as pool:
+            for key, pt in pool.imap_unordered(
+                _refine_worker, tasks, chunksize=chunksize
+            ):
+                if pt is not None:
+                    out[key] = pt
 
     # ------------------------------------------------------------------
     # Internals -- all pure NumPy, no Python loops over rays
