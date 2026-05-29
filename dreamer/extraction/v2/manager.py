@@ -59,6 +59,11 @@ class ExtractionManager:
         -- only witnesses with L1 norm above this are refined.
     :param heuristic_refine_workers: Forwarded as ``refine_workers`` --
         process count for the refinement MILPs.
+    :param heuristic_num_rays: Forwarded as ``num_rays`` (hard ray ceiling).
+    :param heuristic_max_seconds: Forwarded as ``max_seconds`` (wall-clock
+        budget for the shoot; ``None`` = no cap).
+    :param heuristic_rel_improvement: Forwarded as ``rel_improvement`` (the
+        marginal-gain stop threshold).
     :raises ValueError: If ``strategy`` is unknown.
     """
 
@@ -74,6 +79,9 @@ class ExtractionManager:
         heuristic_refine: bool = False,
         heuristic_refine_threshold: float = 50.0,
         heuristic_refine_workers: int = 1,
+        heuristic_num_rays: int = 2_000_000,
+        heuristic_max_seconds: Optional[float] = None,
+        heuristic_rel_improvement: float = 5e-4,
     ):
         if strategy not in ("auto", "exact", "heuristic"):
             raise ValueError(
@@ -86,6 +94,9 @@ class ExtractionManager:
         self._heuristic_refine = heuristic_refine
         self._heuristic_refine_threshold = heuristic_refine_threshold
         self._heuristic_refine_workers = heuristic_refine_workers
+        self._heuristic_num_rays = heuristic_num_rays
+        self._heuristic_max_seconds = heuristic_max_seconds
+        self._heuristic_rel_improvement = heuristic_rel_improvement
         self.timeout_seconds = timeout_seconds
         self._exact = exact
         self._heuristic = heuristic
@@ -160,6 +171,9 @@ class ExtractionManager:
     def _get_heuristic(self) -> RayShootingExtractor:
         if self._heuristic is None:
             self._heuristic = RayShootingExtractor(
+                num_rays=self._heuristic_num_rays,
+                max_seconds=self._heuristic_max_seconds,
+                rel_improvement=self._heuristic_rel_improvement,
                 refine_witnesses=self._heuristic_refine,
                 refine_l1_threshold=self._heuristic_refine_threshold,
                 refine_workers=self._heuristic_refine_workers,

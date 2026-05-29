@@ -390,6 +390,9 @@ class ShardExtractor(ExtractionScheme):
             heuristic_refine=config.extraction.HEURISTIC_REFINE_WITNESSES,
             heuristic_refine_threshold=config.extraction.HEURISTIC_REFINE_L1_THRESHOLD,
             heuristic_refine_workers=config.extraction.HEURISTIC_REFINE_WORKERS,
+            heuristic_num_rays=config.extraction.HEURISTIC_NUM_RAYS,
+            heuristic_max_seconds=config.extraction.HEURISTIC_MAX_SECONDS,
+            heuristic_rel_improvement=config.extraction.HEURISTIC_REL_IMPROVEMENT,
         )
         mapping = manager.extract(shifted_hps)
 

@@ -1,4 +1,6 @@
 from dataclasses import dataclass, field
+from typing import Optional
+
 from .configurable import Configurable
 
 
@@ -107,6 +109,41 @@ class ExtractionConfig(Configurable):
                 "Process count for the heuristic's MILP witness refinement "
                 "(the per-shard MILPs are independent).  >1 dispatches them "
                 "across processes; 1 (default) runs serially."
+            )
+        },
+    )
+    HEURISTIC_NUM_RAYS: int = field(
+        default=2_000_000,
+        metadata={
+            "description": (
+                "Hard ceiling on rays sampled by the heuristic (safety cap). "
+                "The relative-improvement stop usually fires first; for a long "
+                "high-D scan (e.g. 6F5/11D) raise this together with "
+                "HEURISTIC_MAX_SECONDS."
+            )
+        },
+    )
+    HEURISTIC_MAX_SECONDS: Optional[float] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Optional wall-clock budget (seconds) for the heuristic shoot. "
+                "None (default) = no time cap; the relative-improvement stop "
+                "and HEURISTIC_NUM_RAYS govern.  Set it (e.g. 7200 for a 2h "
+                "high-D scan) so the run uses its time and stops early only "
+                "when marginal gains saturate."
+            )
+        },
+    )
+    HEURISTIC_REL_IMPROVEMENT: float = field(
+        default=5e-4,
+        metadata={
+            "description": (
+                "Stop the heuristic once each batch's marginal gain "
+                "(new_cells / total_found) stays below this fraction for a few "
+                "consecutive batches.  Scale-invariant across dimensions. "
+                "Default 5e-4 (~0.05% marginal gain).  Lower = more coverage / "
+                "longer runs; 0 disables early stopping."
             )
         },
     )

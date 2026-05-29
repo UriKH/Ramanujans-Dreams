@@ -127,7 +127,9 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
     class _Spy:
         def __init__(self, strategy, timeout_seconds, exact_unbounded_check="lp",
                      exact_num_workers=1, heuristic_refine=False,
-                     heuristic_refine_threshold=50.0, heuristic_refine_workers=1):
+                     heuristic_refine_threshold=50.0, heuristic_refine_workers=1,
+                     heuristic_num_rays=2_000_000, heuristic_max_seconds=None,
+                     heuristic_rel_improvement=5e-4):
             captured["strategy"] = strategy
             captured["timeout_seconds"] = timeout_seconds
             captured["exact_unbounded_check"] = exact_unbounded_check
@@ -135,6 +137,9 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
             captured["heuristic_refine"] = heuristic_refine
             captured["heuristic_refine_threshold"] = heuristic_refine_threshold
             captured["heuristic_refine_workers"] = heuristic_refine_workers
+            captured["heuristic_num_rays"] = heuristic_num_rays
+            captured["heuristic_max_seconds"] = heuristic_max_seconds
+            captured["heuristic_rel_improvement"] = heuristic_rel_improvement
 
         def extract(self, hyperplanes):
             captured["num_hps"] = len(hyperplanes)

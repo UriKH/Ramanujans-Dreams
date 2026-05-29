@@ -477,9 +477,11 @@ class TestRayShootingExtractor:
         with pytest.raises(ValueError):
             RayShootingExtractor(batch_size=0)
         with pytest.raises(ValueError):
-            RayShootingExtractor(plateau_ratio=1.5)
+            RayShootingExtractor(rel_improvement=1.5)
         with pytest.raises(ValueError):
             RayShootingExtractor(plateau_patience=0)
+        with pytest.raises(ValueError):
+            RayShootingExtractor(max_seconds=0)
 
     def test_plateau_patience_needs_consecutive_low_batches(self):
         """patience>1 must NOT stop on a single low-yield batch -- it keeps
@@ -488,7 +490,7 @@ class TestRayShootingExtractor:
         import sympy as sp
         syms = list(sp.symbols("a b c d"))      # 4-D axes: 16 unbounded cells
         hps = [Hyperplane(s, syms) for s in syms]
-        kw = dict(num_rays=200_000, batch_size=2_000, plateau_ratio=1e-2, seed=0)
+        kw = dict(num_rays=200_000, batch_size=2_000, rel_improvement=1e-2, seed=0)
         eager = RayShootingExtractor(plateau_patience=1, **kw).extract(hps)
         patient = RayShootingExtractor(plateau_patience=5, **kw).extract(hps)
         assert len(patient) >= len(eager)
@@ -593,10 +595,10 @@ class TestRayShootingExtractor:
         import sympy as sp
         x, y = sp.symbols("x y")
         hps = [Hyperplane(x, [x, y]), Hyperplane(y, [x, y])]  # 4 quadrants
-        # Huge cap, small batch: must find all 4 then stop on plateau
-        # well before exhausting the (effectively unbounded) budget.
+        # Huge cap, small batch: must find all 4 then stop on the marginal-
+        # gain plateau well before exhausting the (effectively unbounded) budget.
         extractor = RayShootingExtractor(
-            num_rays=10_000_000, batch_size=1_000, plateau_ratio=1e-2, seed=0
+            num_rays=10_000_000, batch_size=1_000, rel_improvement=1e-2, seed=0
         )
         t0 = time.perf_counter()
         result = extractor.extract(hps)
@@ -604,13 +606,28 @@ class TestRayShootingExtractor:
         assert len(result) == 4
         assert elapsed < 1.0  # plateaued fast, didn't shoot 10M rays
 
+    def test_max_seconds_caps_the_shoot(self):
+        """A tiny max_seconds budget must stop the loop promptly even when
+        the relative stop hasn't fired and num_rays is huge."""
+        import sympy as sp
+        syms = list(sp.symbols("a b c d e"))
+        hps = [Hyperplane(s, syms) for s in syms]
+        extractor = RayShootingExtractor(
+            num_rays=10_000_000, batch_size=1_000,
+            rel_improvement=0.0, max_seconds=0.2, seed=0,
+        )
+        t0 = time.perf_counter()
+        out = extractor.extract(hps)
+        assert time.perf_counter() - t0 < 2.0  # respected the ~0.2s budget
+        assert isinstance(out, dict)
+
     def test_plateau_disabled_runs_full_budget(self):
-        """plateau_ratio=0 disables early stopping."""
+        """rel_improvement=0 disables early stopping."""
         import sympy as sp
         x, y = sp.symbols("x y")
         hps = [Hyperplane(x, [x, y]), Hyperplane(y, [x, y])]
         extractor = RayShootingExtractor(
-            num_rays=2_000, batch_size=500, plateau_ratio=0.0, seed=0
+            num_rays=2_000, batch_size=500, rel_improvement=0.0, seed=0
         )
         # Still correct (4 quadrants); just doesn't bail early.
         assert len(extractor.extract(hps)) == 4
@@ -801,18 +818,24 @@ class TestExtractionManager:
         mgr = ExtractionManager(strategy="heuristic", heuristic=heur)  # type: ignore[arg-type]
         assert mgr.extract([]) == {(1,): heur._returns[(1,)]}
 
-    def test_heuristic_refine_forwarded(self):
-        """heuristic refine knobs must reach the lazily-built extractor."""
+    def test_heuristic_knobs_forwarded(self):
+        """heuristic refine + budget knobs must reach the lazily-built extractor."""
         built = ExtractionManager(
             strategy="heuristic",
             heuristic_refine=True,
             heuristic_refine_threshold=80.0,
             heuristic_refine_workers=4,
+            heuristic_num_rays=123_456,
+            heuristic_max_seconds=99.0,
+            heuristic_rel_improvement=1e-3,
         )._get_heuristic()
         assert isinstance(built, RayShootingExtractor)
         assert built.refine_witnesses is True
         assert built.refine_l1_threshold == 80.0
         assert built.refine_workers == 4
+        assert built.num_rays == 123_456
+        assert built.max_seconds == 99.0
+        assert built.rel_improvement == 1e-3
         # Default leaves the solver-free path on.
         assert (
             ExtractionManager(strategy="heuristic")._get_heuristic().refine_witnesses
