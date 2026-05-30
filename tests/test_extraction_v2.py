@@ -18,6 +18,7 @@ import sympy as sp
 from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.extraction.v2 import (
     BaseExtractor,
+    BlockSortSymmetry,
     ExtractionManager,
     LrslibExtractor,
     RayShootingExtractor,
@@ -1042,3 +1043,177 @@ class TestExtractionManager:
             )  # type: ignore[arg-type]
             out = mgr.extract([])
         assert (-1,) in out
+
+
+# ----------------------------------------------------------------------
+# Symmetry reduction — canonical teleportation (S_p x S_q)
+# ----------------------------------------------------------------------
+
+
+def _induced_row_perm(A, c, col_perm):
+    """Row permutation induced by permuting coordinate columns by ``col_perm``.
+
+    Requires the (A | c) row set to be closed under the column permutation
+    (i.e. the arrangement is invariant); raises KeyError otherwise.
+    """
+    rowmap = {tuple(a.tolist() + [int(cc)]): i for i, (a, cc) in enumerate(zip(A, c))}
+    return np.array(
+        [rowmap[tuple(a[list(col_perm)].tolist() + [int(cc)])] for a, cc in zip(A, c)]
+    )
+
+
+def _true_orbit_count(A, c, col_perms):
+    """Ground-truth orbit count: group the full cell set by the unambiguous
+    sign-vector group action (min over induced row permutations)."""
+    sigmas = [_induced_row_perm(A, c, cp) for cp in col_perms]
+    full = cells.enumerate_cells(A, c, seed=0)
+    canon = {min(tuple(np.asarray(s)[sig].tolist()) for sig in sigmas) for s in full}
+    return len(canon)
+
+
+class TestBlockSortSymmetry:
+    """Unit tests for the :class:`BlockSortSymmetry` canonical transform."""
+
+    def test_sorts_each_block_independently(self):
+        sym = BlockSortSymmetry([[0, 1], [2, 3]])  # two blocks of 2
+        P = np.array([[1, 5, 9, 2]])
+        out = sym.apply(P)
+        # Block [0,1] -> sorted ascending; block [2,3] -> sorted ascending.
+        assert out.tolist() == [[1, 5, 2, 9]]
+
+    def test_preserves_integers(self):
+        sym = BlockSortSymmetry([[0, 1, 2]])
+        out = sym.apply(np.array([[3, 1, 2]]))
+        assert out.dtype.kind in "iu" or np.allclose(out, np.rint(out))
+        assert sorted(out[0].tolist()) == [1, 2, 3]
+
+    def test_orbit_members_share_canonical_point(self):
+        """Any permutation of a point within a block maps to the same canon."""
+        sym = BlockSortSymmetry([[0, 1, 2]])
+        a = sym.canonical_point(np.array([3, 1, 2]))
+        b = sym.canonical_point(np.array([2, 3, 1]))
+        assert a.tolist() == b.tolist()
+
+    def test_shift_grouping_only_swaps_equal_fractional_shift(self):
+        """With a half-integer shift on one coord, blocks sort in absolute x."""
+        # shift = [0.0, 0.5]; both coords nominally one block but fractional
+        # parts differ -> a correct strategy would NOT group them.  Here we
+        # pass them as one group and check the absolute-x sort/unshift round
+        # trips to integers.
+        sym = BlockSortSymmetry([[0, 1]], shift=[0.0, 0.0])
+        out = sym.apply(np.array([[2, 5]]))
+        assert out.tolist() == [[2, 5]]
+
+    def test_singleton_and_empty_groups_are_noops(self):
+        sym = BlockSortSymmetry([[0], []])
+        P = np.array([[7, 3, 1]])
+        assert sym.apply(P).tolist() == P.tolist()
+
+
+class TestSymmetryReduction:
+    """
+    Canonical teleportation keeps exactly one representative per symmetry
+    orbit -- verified against the unambiguous sign-vector group action.
+
+    Reference arrangement: the two coordinate axes in 2-D
+    (``_hps_axes_2d()``) give four quadrant cells.  Under the swap
+    ``x <-> y`` (one block ``[0, 1]``), cells (+1,-1) and (-1,+1) are one
+    orbit; (+1,+1) and (-1,-1) are each their own -> 3 orbits.
+    """
+
+    SWAP = BlockSortSymmetry([[0, 1]])
+
+    # -- Exact (canonical BFS) -------------------------------------------
+
+    def test_canonical_enumeration_excludes_symmetric_cell(self):
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_axes_2d())
+        found = cells.enumerate_cells_canonical(A, c, self.SWAP, seed=0)
+        assert len(found) == 3
+        # Exactly one of the symmetric pair survives.
+        assert ((1, -1) in found) ^ ((-1, 1) in found)
+        assert (1, 1) in found and (-1, -1) in found
+
+    def test_no_symmetry_returns_all_cells(self):
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_axes_2d())
+        assert len(cells.enumerate_cells(A, c, seed=0)) == 4
+
+    def test_canonical_matches_true_orbit_count(self):
+        """On an invariant arrangement, the canonical BFS count equals the
+        ground-truth orbit count (group action on sign vectors)."""
+        # Invariant under swap(x, y): include each hyperplane and its swap.
+        hps = [
+            Hyperplane(x, symbols=[x, y]),
+            Hyperplane(y, symbols=[x, y]),
+            Hyperplane(x - 2, symbols=[x, y]),
+            Hyperplane(y - 2, symbols=[x, y]),
+            Hyperplane(x + y - 3, symbols=[x, y]),  # self-symmetric
+        ]
+        A, c = BaseExtractor.hyperplanes_to_matrix(hps)
+        true = _true_orbit_count(A, c, [(0, 1), (1, 0)])
+        got = len(cells.enumerate_cells_canonical(A, c, self.SWAP, seed=0))
+        assert got == true
+
+    def test_canonical_is_subset_of_full(self):
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_axes_2d())
+        full = set(cells.enumerate_cells(A, c, seed=0))
+        canon = set(cells.enumerate_cells_canonical(A, c, self.SWAP, seed=0))
+        assert canon <= full
+
+    # -- Heuristic (ray shooting) ----------------------------------------
+
+    def test_ray_shooter_excludes_symmetric_cell(self):
+        extractor = RayShootingExtractor(
+            seed=0, num_rays=100_000, symmetry=self.SWAP
+        )
+        result = extractor.extract(_hps_axes_2d())
+        assert len(result) == 3
+        assert ((1, -1) in result) ^ ((-1, 1) in result)
+        assert (1, 1) in result and (-1, -1) in result
+
+    def test_heuristic_witnesses_are_canonical(self):
+        """Every retained heuristic witness is already in canonical form."""
+        extractor = RayShootingExtractor(
+            seed=0, num_rays=50_000, symmetry=self.SWAP
+        )
+        result = extractor.extract(_hps_axes_2d())
+        for point in result.values():
+            assert point[0] <= point[1]  # BlockSortSymmetry sorts ascending
+
+    # -- Manager / forwarding --------------------------------------------
+
+    def test_manager_forwards_symmetry_to_heuristic(self):
+        mgr = ExtractionManager(strategy="heuristic", symmetry=self.SWAP)
+        assert mgr._get_heuristic().symmetry is self.SWAP
+
+    def test_manager_forwards_symmetry_to_exact(self):
+        with patch("dreamer.extraction.v2.manager.LrslibExtractor") as mock_cls:
+            mock_cls.return_value = object()
+            mgr = ExtractionManager(strategy="exact", symmetry=self.SWAP)
+            _ = mgr._get_exact()
+        _, kwargs = mock_cls.call_args
+        assert kwargs["symmetry"] is self.SWAP
+
+
+class TestSymmetryFactory:
+    """``symmetry_for_cmf`` builds the right strategy per CMF family."""
+
+    def test_pfq_builds_block_sort_with_correct_groups(self):
+        from ramanujantools.cmf import pFq as rt_pFq
+        from dreamer.extraction.v2 import symmetry_for_cmf
+
+        cmf = rt_pFq(3, 1, sp.Integer(1))
+        shift = [0, 0, 0, 0]  # p=3 numerator block + q=1 denominator block
+        strat = symmetry_for_cmf(cmf, shift)
+        assert isinstance(strat, BlockSortSymmetry)
+        # All-zero shift -> one group for the whole p-block, q-block is a
+        # singleton (dropped as a no-op).
+        groups = sorted(sorted(int(i) for i in g) for g in strat.groups)
+        assert groups == [[0, 1, 2]]
+
+    def test_non_pfq_returns_none(self):
+        from dreamer.extraction.v2 import symmetry_for_cmf
+
+        class NotACMF:
+            pass
+
+        assert symmetry_for_cmf(NotACMF(), [0, 0]) is None

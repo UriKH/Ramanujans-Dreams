@@ -55,11 +55,14 @@ from __future__ import annotations
 
 import os
 import time
+from collections import deque
 from multiprocessing import get_context
 from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 from scipy.optimize import linprog
+
+from .symmetry import SymmetryStrategy
 
 try:  # Optional fast path — see module docstring.
     import mip
@@ -164,6 +167,36 @@ class _StatefulFeasibilitySolver:
 # Fallback: per-call scipy LP (used when python-mip is unavailable)
 # ---------------------------------------------------------------------------
 
+def _solve_interior(
+    A: np.ndarray,
+    c: np.ndarray,
+    sign_vector: np.ndarray,
+    *,
+    bound: float = 1e6,
+):
+    """
+    Maximise the interior slack of a cell.
+
+    Returns ``(slack, x)`` where ``slack`` is the maximum Chebyshev-style
+    slack (``-inf`` if the LP fails) and ``x`` is the slack-maximising
+    interior point (``None`` on failure).  ``x`` is strictly inside the
+    open cell whenever ``slack > 0``.
+    """
+    n, d = A.shape
+    obj = np.zeros(d + 1, dtype=np.float64)
+    obj[-1] = -1.0
+    A_ub = np.zeros((n, d + 1), dtype=np.float64)
+    A_ub[:, :d] = -(sign_vector[:, None] * A)
+    A_ub[:, -1] = 1.0
+    b_ub = (sign_vector * c).astype(np.float64)
+
+    bounds = [(-bound, bound)] * d + [(None, None)]
+    res = linprog(obj, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
+    if not res.success or res.x is None:
+        return float("-inf"), None
+    return float(res.x[-1]), np.asarray(res.x[:d], dtype=np.float64)
+
+
 def _interior_slack(
     A: np.ndarray,
     c: np.ndarray,
@@ -176,18 +209,7 @@ def _interior_slack(
     fails.  Kept as the fallback feasibility backend for environments
     without ``python-mip``.
     """
-    n, d = A.shape
-    obj = np.zeros(d + 1, dtype=np.float64)
-    obj[-1] = -1.0
-    A_ub = np.zeros((n, d + 1), dtype=np.float64)
-    A_ub[:, :d] = -(sign_vector[:, None] * A)
-    A_ub[:, -1] = 1.0
-    b_ub = (sign_vector * c).astype(np.float64)
-    bounds = [(-bound, bound)] * d + [(None, None)]
-    res = linprog(obj, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
-    if not res.success or res.x is None:
-        return float("-inf")
-    return float(res.x[-1])
+    return _solve_interior(A, c, sign_vector, bound=bound)[0]
 
 
 def _make_feasibility_checker(
@@ -207,6 +229,50 @@ def _make_feasibility_checker(
         solver = _StatefulFeasibilitySolver(A, c, bound=bound, epsilon=epsilon)
         return solver.feasible
     return lambda sign_vector: _interior_slack(A, c, sign_vector, bound=bound) > epsilon
+
+
+# Predicate returning a cell's interior point (or ``None`` if empty).
+# Used by the symmetry-aware canonical enumerator, which needs an actual
+# interior point to teleport into the fundamental domain.
+InteriorPointFinder = Callable[[np.ndarray], Optional[np.ndarray]]
+
+
+def _make_interior_point_finder(
+    A: np.ndarray,
+    c: np.ndarray,
+    *,
+    epsilon: float,
+    bound: float = 1e6,
+) -> InteriorPointFinder:
+    """
+    Build a predicate ``sign_vector -> interior point or None``.
+
+    Returns the **slack-maximising** (deep-interior) point of the open
+    cell, or ``None`` if the cell is empty (slack ``<= epsilon``).
+
+    The deep-interior point is essential for the symmetry fingerprint.  A
+    plain feasibility LP (e.g. CBC with a zero objective) returns a
+    *vertex*, which lies on the arrangement's hyperplanes and frequently
+    on a symmetry wall ``x_i = x_j``; teleporting such a degenerate point
+    into the fundamental domain yields an inconsistent canonical signature
+    (it under- or over-counts orbits).  The slack-maximising point is
+    strictly inside every facet, so its teleported signature is a sound
+    orbit invariant — a cell that genuinely straddles a wall ``x_i = x_j``
+    is itself invariant under that swap, so its deep-interior points all
+    teleport to the same canonical cell.
+
+    We always use the scipy slack-maximising LP here (the hot-started CBC
+    feasibility solver maximises no slack).  Symmetry reduction targets
+    moderate arrangements (the exact method is not run on huge CMFs), so
+    the per-call cost is acceptable.
+    """
+    def finder(sign_vector: np.ndarray) -> Optional[np.ndarray]:
+        slack, x = _solve_interior(A, c, sign_vector, bound=bound)
+        if x is None or slack <= epsilon:
+            return None
+        return x
+
+    return finder
 
 
 # ---------------------------------------------------------------------------
@@ -633,8 +699,7 @@ def enumerate_cells(
         heuristic instead of running unbounded.
     :param num_workers: ``> 1`` dispatches disjoint root subtrees across
         that many processes (reverse search needs no shared state).
-        ``1`` (default) runs serially.
-    :return: Sorted list of sign-encoding tuples (``+1`` / ``-1``).
+        ``1`` (default) runs serially.    :return: Sorted list of sign-encoding tuples (``+1`` / ``-1``).
     :raises ExtractionTimeout: If ``deadline`` is passed.
     :raises RuntimeError: If ``max_cells`` is exceeded or no starting
         cell can be found.
@@ -653,12 +718,12 @@ def enumerate_cells(
 
     if num_workers is None or num_workers <= 1:
         is_feasible = _make_feasibility_checker(A, c, epsilon=epsilon)
-        cells = list(
+        result = list(
             _reverse_search_iter(
                 base, base, is_feasible, n, max_cells=max_cells, deadline=deadline
             )
         )
-        return sorted(cells)
+        return sorted(result)
 
     return _enumerate_parallel(
         A, c, base, n,
@@ -698,15 +763,16 @@ def _enumerate_parallel(
 
     if len(root_children) < 2:
         # Nothing to parallelise — fall back to a single serial sweep.
-        cells = list(
+        result = list(
             _reverse_search_iter(
                 base, base, is_feasible, n, max_cells=max_cells, deadline=deadline
             )
         )
-        return sorted(cells)
+        return sorted(result)
 
     tasks = [
-        (A, c, base, child, epsilon, max_cells, deadline) for child in root_children
+        (A, c, base, child, epsilon, max_cells, deadline)
+        for child in root_children
     ]
     # 'spawn' would re-import; 'fork' (default on Linux/WSL) is cheap and
     # lets workers inherit the imported modules.
@@ -724,3 +790,134 @@ def _enumerate_parallel(
             pool.terminate()
             raise
     return sorted(collected)
+
+
+# ---------------------------------------------------------------------------
+# Symmetry-aware enumeration (canonical-teleportation BFS)
+# ---------------------------------------------------------------------------
+#
+# When a SymmetryStrategy is active we want exactly *one* representative
+# cell per symmetry orbit.  Avis-Fukuda reverse search cannot be pruned
+# on the fly — dropping a symmetric branch breaks its spanning tree and
+# silently loses non-symmetric cells reachable only through it.  We
+# therefore switch to a BFS over the (full, unconstrained) cell graph that
+# deduplicates by *canonical signature*:
+#
+#   * For each feasible cell, take a strictly-interior point, teleport it
+#     into the fundamental domain via ``symmetry.apply``, and fingerprint
+#     it as ``sign(A @ canonical_point + c)``.
+#   * If the fingerprint was seen, discard the cell and DO NOT expand it.
+#   * Otherwise record the fingerprint, emit the cell, and queue its
+#     neighbours.
+#
+# Completeness (one representative per orbit, none missed) holds *because*
+# the arrangement is invariant under the symmetry group: a group element
+# mapping cell ``r'`` to the chosen representative ``r`` also maps any
+# neighbour of ``r'`` to a neighbour of ``r``, so every orbit adjacent to
+# ``r``'s orbit is reachable from ``r`` alone.  Verified empirically
+# against brute force on invariant arrangements.  Memory is O(#orbits)
+# (the ``seen`` set), which is the whole point — #orbits << #cells.
+
+
+def _canonical_signature(
+    A: np.ndarray,
+    c: np.ndarray,
+    point: np.ndarray,
+    symmetry: SymmetryStrategy,
+) -> SignTuple:
+    """Fingerprint a cell by the sign vector of its teleported interior point."""
+    canon = symmetry.canonical_point(point)
+    vals = A @ canon + c
+    return tuple(np.sign(vals).astype(np.int64).tolist())
+
+
+def iter_cells_canonical(
+    A: np.ndarray,
+    c: np.ndarray,
+    symmetry: SymmetryStrategy,
+    *,
+    max_cells: Optional[int] = None,
+    seed: Optional[int] = 0,
+    epsilon: float = 1e-6,
+    deadline: Optional[float] = None,
+):
+    """
+    Stream one representative cell per symmetry orbit (canonical-teleport
+    BFS).  Yields each representative's sign-encoding as it is discovered.
+
+    :param symmetry: The CMF family's :class:`SymmetryStrategy`; its
+        ``apply`` maps interior points into a fundamental domain so
+        orbit-equivalent cells share a canonical signature.
+    :raises ExtractionTimeout: If ``deadline`` is passed.
+    :raises RuntimeError: If ``max_cells`` representatives are exceeded.
+    """
+    A = np.asarray(A, dtype=np.int64)
+    c = np.asarray(c, dtype=np.int64)
+    if A.ndim != 2:
+        raise ValueError(f"A must be 2-D, got shape {A.shape}")
+    if c.shape != (A.shape[0],):
+        raise ValueError(f"c shape {c.shape} incompatible with A shape {A.shape}")
+
+    n = A.shape[0]
+    rng = np.random.default_rng(seed)
+    base = _find_start_cell(A, c, rng=rng)
+    point_of = _make_interior_point_finder(A, c, epsilon=epsilon)
+
+    seen = set()  # canonical signatures already represented
+    queue: deque = deque()
+    count = 0
+
+    base_pt = point_of(base)
+    if base_pt is None:  # pragma: no cover - base came from a real point
+        return
+    seen.add(_canonical_signature(A, c, base_pt, symmetry))
+    queue.append(base)
+    yield tuple(base.tolist())
+    count += 1
+
+    while queue:
+        if deadline is not None and time.time() > deadline:
+            raise ExtractionTimeout(
+                f"Canonical cell enumeration passed its deadline after "
+                f"{count} representatives"
+            )
+        sig = queue.popleft()
+        for i in range(n):
+            child = sig.copy()
+            child[i] = -child[i]
+            pt = point_of(child)
+            if pt is None:
+                continue  # empty cell — not a neighbour in the arrangement graph
+            csig = _canonical_signature(A, c, pt, symmetry)
+            if csig in seen:
+                continue  # symmetric duplicate — prune the whole orbit branch
+            seen.add(csig)
+            queue.append(child)
+            yield tuple(child.tolist())
+            count += 1
+            if max_cells is not None and count > max_cells:
+                raise RuntimeError(
+                    f"Canonical enumeration exceeded max_cells={max_cells}"
+                )
+
+
+def enumerate_cells_canonical(
+    A: np.ndarray,
+    c: np.ndarray,
+    symmetry: SymmetryStrategy,
+    *,
+    max_cells: Optional[int] = None,
+    seed: Optional[int] = 0,
+    epsilon: float = 1e-6,
+    deadline: Optional[float] = None,
+) -> List[SignTuple]:
+    """
+    Enumerate one representative per symmetry orbit; sorted list of
+    sign-encodings.  See :func:`iter_cells_canonical`.
+    """
+    return sorted(
+        iter_cells_canonical(
+            A, c, symmetry,
+            max_cells=max_cells, seed=seed, epsilon=epsilon, deadline=deadline,
+        )
+    )

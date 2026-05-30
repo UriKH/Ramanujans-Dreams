@@ -53,6 +53,7 @@ from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.utils.logger import Logger
 from .base import BaseExtractor, ShardMapping
 from .milp import find_integer_point
+from .symmetry import SymmetryStrategy
 
 
 SignTuple = Tuple[int, ...]
@@ -214,6 +215,11 @@ class RayShootingExtractor(BaseExtractor):
     :param refine_workers: Process count for the refinement MILPs (they are
         independent per cell).  ``>1`` dispatches them across processes;
         ``1`` (default) runs serially.
+    :param symmetry: Optional :class:`SymmetryStrategy` (canonical
+        teleportation).  When set, each witness is mapped into the
+        fundamental domain (``symmetry.apply``) before its cell signature
+        is taken, so symmetric shards collapse to one canonical
+        representative.  ``None`` (default) disables symmetry reduction.
     :raises ValueError: For non-positive ``num_rays``/``max_coord``/
         ``batch_size``/``max_seconds``/``face_subsets``/``face_offsets``, a
         ``missing_mass`` outside ``[0, 1]``, or ``plateau_patience < 1``.
@@ -241,6 +247,7 @@ class RayShootingExtractor(BaseExtractor):
         refine_witnesses: bool = False,
         refine_l1_threshold: float = 50.0,
         refine_workers: int = 1,
+        symmetry: Optional[SymmetryStrategy] = None,
     ):
         if num_rays is not None and num_rays <= 0:
             raise ValueError(f"num_rays must be positive or None, got {num_rays}")
@@ -277,6 +284,7 @@ class RayShootingExtractor(BaseExtractor):
         self.refine_witnesses = refine_witnesses
         self.refine_l1_threshold = refine_l1_threshold
         self.refine_workers = refine_workers
+        self.symmetry = symmetry
 
     # ------------------------------------------------------------------
     # Public API
@@ -528,7 +536,8 @@ class RayShootingExtractor(BaseExtractor):
         # defensive belt-and-suspenders against the reroll exhausting.
         gcds = np.gcd.reduce(np.abs(V), axis=1, keepdims=True)
         gcds[gcds == 0] = 1
-        return V // gcds
+        V = V // gcds
+        return V
 
     def _shoot(
         self, V: np.ndarray, A: np.ndarray, c: np.ndarray
@@ -606,6 +615,13 @@ class RayShootingExtractor(BaseExtractor):
         """
         if points.shape[0] == 0:
             return
+        # Canonical teleportation: map every witness into the fundamental
+        # domain so symmetric witnesses collapse to one canonical cell.
+        # ``apply`` preserves integer coordinates (sorting integers), so
+        # the canonical witness is still a valid integer interior point of
+        # its (canonical) cell.  No-op when there is no symmetry.
+        if self.symmetry is not None:
+            points = self.symmetry.apply(points).astype(np.int64)
         # (R, N) sign matrix -- +1 above, -1 below, 0 on the hyperplane.
         vals = points @ A.T + c
         signs = np.sign(vals).astype(np.int64)

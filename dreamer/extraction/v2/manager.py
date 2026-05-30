@@ -35,6 +35,7 @@ from .base import BaseExtractor, ShardMapping
 from .cells import ExtractionTimeout
 from .lrs_extractor import LrslibExtractor
 from .ray_extractor import RayShootingExtractor
+from .symmetry import SymmetryStrategy
 
 
 Strategy = Literal["auto", "exact", "heuristic"]
@@ -69,6 +70,9 @@ class ExtractionManager:
         face-aligned phase to reach tube/slab cells.
     :param heuristic_face_subsets: Forwarded as ``face_subsets``.
     :param heuristic_face_offsets: Forwarded as ``face_offsets``.
+    :param symmetry: Optional :class:`SymmetryStrategy` (canonical
+        teleportation).  Forwarded to both extractors; ``None`` (default)
+        disables symmetry reduction.
     :raises ValueError: If ``strategy`` is unknown.
     """
 
@@ -90,6 +94,7 @@ class ExtractionManager:
         heuristic_face_aligned: bool = False,
         heuristic_face_subsets: int = 200,
         heuristic_face_offsets: int = 50,
+        symmetry: Optional[SymmetryStrategy] = None,
     ):
         if strategy not in ("auto", "exact", "heuristic"):
             raise ValueError(
@@ -108,6 +113,7 @@ class ExtractionManager:
         self._heuristic_face_aligned = heuristic_face_aligned
         self._heuristic_face_subsets = heuristic_face_subsets
         self._heuristic_face_offsets = heuristic_face_offsets
+        self._symmetry = symmetry
         self.timeout_seconds = timeout_seconds
         self._exact = exact
         self._heuristic = heuristic
@@ -176,6 +182,7 @@ class ExtractionManager:
             self._exact = LrslibExtractor(
                 unbounded_check=self._exact_unbounded_check,
                 num_workers=self._exact_num_workers,
+                symmetry=self._symmetry,
             )
         return self._exact
 
@@ -191,5 +198,6 @@ class ExtractionManager:
                 refine_witnesses=self._heuristic_refine,
                 refine_l1_threshold=self._heuristic_refine_threshold,
                 refine_workers=self._heuristic_refine_workers,
+                symmetry=self._symmetry,
             )
         return self._heuristic

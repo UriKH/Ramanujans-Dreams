@@ -20,6 +20,7 @@ from dreamer.configs import config
 from dreamer.utils.types import CMFData
 from .utils import initial_points as init_points
 from .v2 import ExtractionManager, LrslibExtractor, RayShootingExtractor
+from .v2 import symmetry_for_cmf
 
 import os.path
 import sympy as sp
@@ -370,14 +371,15 @@ class ShardExtractor(ExtractionScheme):
 
         :param strategy: One of ``"auto" | "exact" | "heuristic"``.
         """
-        if issubclass(self.cmf_data.cmf.__class__, rt_pFq) and config.extraction.IGNORE_DUPLICATE_SEARCHABLES:
-            Logger(
-                "IGNORE_DUPLICATE_SEARCHABLES=True is ignored under the "
-                f"{strategy!r} strategy (v2 does not yet deduplicate pFq "
-                "symmetric shards). Use STRATEGY='legacy' to keep the "
-                "old dedup behaviour.",
-                level=Logger.Levels.warning,
-            ).log()
+        # Build the CMF family's symmetry strategy (canonical teleportation)
+        # when symmetry reduction is requested.  The strategy operates in the
+        # *shifted* lattice coordinates the v2 module uses (column order =
+        # cmf.matrices.keys()), so it carries the per-coordinate shift.
+        symmetry = None
+        if config.extraction.IGNORE_DUPLICATE_SEARCHABLES:
+            symmetry = symmetry_for_cmf(
+                self.cmf_data.cmf, list(self.cmf_data.shift.values())
+            )
 
         hps_list = list(hps)
         shifted_hps = [hp.apply_shift(self.cmf_data.shift) for hp in hps_list]
@@ -396,6 +398,7 @@ class ShardExtractor(ExtractionScheme):
             heuristic_face_aligned=config.extraction.HEURISTIC_FACE_ALIGNED,
             heuristic_face_subsets=config.extraction.HEURISTIC_FACE_SUBSETS,
             heuristic_face_offsets=config.extraction.HEURISTIC_FACE_OFFSETS,
+            symmetry=symmetry,
         )
         mapping = manager.extract(shifted_hps)
 

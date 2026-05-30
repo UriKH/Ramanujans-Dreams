@@ -31,10 +31,12 @@ from .base import BaseExtractor, ShardMapping
 from .cells import (
     ExtractionTimeout,
     iter_cells,
+    iter_cells_canonical,
     iter_subtree,
     make_unbounded_checker,
     reverse_search_seeds,
 )
+from .symmetry import SymmetryStrategy
 from .lrs_io import format_hrep, lrs_available, parse_vrep_unbounded, run_lrs
 from .milp import find_integer_point
 
@@ -56,7 +58,7 @@ def _subtree_extract_worker(args) -> Tuple[ShardMapping, bool]:
     out: ShardMapping = {}
     try:
         for sig in iter_subtree(
-            A, c, base, root, max_cells=max_cells, deadline=deadline
+            A, c, base, root, max_cells=max_cells, deadline=deadline,
         ):
             if deadline is not None and time.time() > deadline:
                 return out, True
@@ -89,7 +91,11 @@ class LrslibExtractor(BaseExtractor):
         whose interior is far from the origin.
     :param seed: RNG seed used when picking the starting cell.
     :param num_workers: Process count for parallel reverse-search cell
-        enumeration.  ``1`` (default) runs serially.
+        enumeration.  ``1`` (default) runs serially.  Ignored when a
+        ``symmetry`` is active (the canonical BFS runs serially).
+    :param symmetry: Optional :class:`SymmetryStrategy`.  When set, the
+        extractor enumerates one representative per symmetry orbit via the
+        canonical-teleportation BFS instead of full reverse search.
     :raises FileNotFoundError: If ``unbounded_check="lrs"`` and the
         ``lrs`` binary is not on ``PATH``.
     :raises ValueError: For an unknown ``unbounded_check``.
@@ -107,6 +113,7 @@ class LrslibExtractor(BaseExtractor):
         milp_bound: int = 10**6,
         seed: Optional[int] = 0,
         num_workers: int = 1,
+        symmetry: Optional[SymmetryStrategy] = None,
     ):
         if unbounded_check not in ("lp", "lrs"):
             raise ValueError(
@@ -127,6 +134,7 @@ class LrslibExtractor(BaseExtractor):
         self.milp_bound = milp_bound
         self.seed = seed
         self.num_workers = num_workers
+        self.symmetry = symmetry
 
     def extract(
         self,
@@ -138,14 +146,17 @@ class LrslibExtractor(BaseExtractor):
             return {}
 
         A, c = self.hyperplanes_to_matrix(hyperplanes)
-        # Parallel needs the in-process LP check (lrs runs serially so its
-        # per-cell subprocess is honoured); the LP and lrs backends agree,
-        # so this only affects speed, not the result.
-        if (
+        # Symmetry reduction routes to the canonical-teleportation BFS,
+        # which is inherently serial (it is not subtree-decomposable like
+        # reverse search) — see _extract_serial.
+        if self.symmetry is None and (
             self.num_workers
             and self.num_workers > 1
             and self.unbounded_check != "lrs"
         ):
+            # Parallel needs the in-process LP check (lrs runs serially so
+            # its per-cell subprocess is honoured); the LP and lrs backends
+            # agree, so this only affects speed, not the result.
             return self._extract_parallel(A, c, deadline)
         return self._extract_serial(A, c, deadline)
 
@@ -153,17 +164,27 @@ class LrslibExtractor(BaseExtractor):
         self, A: np.ndarray, c: np.ndarray, deadline: Optional[float]
     ) -> ShardMapping:
         """
-        Stream cells (reverse search) and classify + locate each on the
-        fly.  At any instant ``out`` holds fully-formed unbounded shards;
-        a deadline hit re-raises an ``ExtractionTimeout`` carrying them so
-        the manager can union with the heuristic instead of discarding.
+        Stream cells and classify + locate each on the fly.  At any instant
+        ``out`` holds fully-formed unbounded shards; a deadline hit re-raises
+        an ``ExtractionTimeout`` carrying them so the manager can union with
+        the heuristic instead of discarding.
+
+        With a ``symmetry`` active, cells are streamed by the canonical
+        BFS (one representative per orbit); otherwise by reverse search.
         """
         is_unbounded = self._build_unbounded_checker(A, c)
+        if self.symmetry is not None:
+            cell_stream = iter_cells_canonical(
+                A, c, self.symmetry,
+                max_cells=self.max_cells, seed=self.seed, deadline=deadline,
+            )
+        else:
+            cell_stream = iter_cells(
+                A, c, max_cells=self.max_cells, seed=self.seed, deadline=deadline,
+            )
         out: ShardMapping = {}
         try:
-            for sig in iter_cells(
-                A, c, max_cells=self.max_cells, seed=self.seed, deadline=deadline
-            ):
+            for sig in cell_stream:
                 if deadline is not None and time.time() > deadline:
                     raise ExtractionTimeout(
                         f"cell classification passed its deadline after "

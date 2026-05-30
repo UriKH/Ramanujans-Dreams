@@ -130,7 +130,8 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
                      heuristic_refine_threshold=50.0, heuristic_refine_workers=1,
                      heuristic_num_rays=None, heuristic_max_seconds=None,
                      heuristic_missing_mass=5e-4, heuristic_face_aligned=False,
-                     heuristic_face_subsets=200, heuristic_face_offsets=50):
+                     heuristic_face_subsets=200, heuristic_face_offsets=50,
+                     symmetry=None):
             captured["strategy"] = strategy
             captured["timeout_seconds"] = timeout_seconds
             captured["exact_unbounded_check"] = exact_unbounded_check
@@ -170,28 +171,32 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
     assert tuple(shards[0].encoding) == (1,)
 
 
-def test_extract_via_v2_warns_on_pfq_dedup(monkeypatch, capsys, _restore_strategy):
-    """pFq + IGNORE_DUPLICATE_SEARCHABLES under v2 must warn (no dedup yet)."""
+def test_extract_via_v2_passes_symmetry_for_pfq(monkeypatch, _restore_strategy):
+    """pFq + IGNORE_DUPLICATE_SEARCHABLES must pass a SymmetryStrategy to the manager."""
     import numpy as np
+    from dreamer.extraction.v2 import BlockSortSymmetry
 
     cmf_data = _shift_cmf()
     extractor = ShardExtractor(e, cmf_data)
     symbols = list(cmf_data.cmf.matrices.keys())
     hps = [Hyperplane(symbols[0], symbols=symbols)]
     monkeypatch.setattr(extractor, "_extract_cmf_hps", lambda: hps)
+
+    captured = {}
+
     monkeypatch.setattr(
         "dreamer.extraction.extractor.ExtractionManager",
-        lambda **kw: type(
+        lambda **kw: (captured.update(kw), type(
             "_Stub", (), {"extract": lambda self, hps_: {(1,): np.array([1, 0])}}
-        )(),
+        )())[1],
     )
 
     extraction_config.STRATEGY = "auto"
     extraction_config.IGNORE_DUPLICATE_SEARCHABLES = True
     extractor.extract(call_number=1)
-    out = capsys.readouterr().out
-    assert "IGNORE_DUPLICATE_SEARCHABLES" in out
-    assert "WARNING" in out
+    # pFq symmetry is now implemented as canonical teleportation: a
+    # BlockSortSymmetry strategy must be forwarded to the manager.
+    assert isinstance(captured.get("symmetry"), BlockSortSymmetry)
 
 
 def test_apply_shift_hoist_matches_per_shard(monkeypatch):
