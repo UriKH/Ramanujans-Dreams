@@ -313,7 +313,7 @@ class RayShootingExtractor(BaseExtractor):
         if budget.cap_hit:
             Logger(
                 f"Heuristic hit its ray ceiling of {self.num_rays}; set "
-                "HEURISTIC_MAX_SECONDS to time-budget the shoot instead",
+                "TIMEOUT_SECONDS to time-budget the shoot instead",
                 level=Logger.Levels.info,
             ).log()
 

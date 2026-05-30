@@ -32,13 +32,19 @@ class ExtractionConfig(Configurable):
             )
         },
     )
-    STRATEGY_TIMEOUT_SECONDS: float = field(
+    TIMEOUT_SECONDS: float = field(
         default=3600.0,
         metadata={
             "description": (
-                "Wall-clock cap (seconds) on the exact strategy when "
-                "STRATEGY='auto'; on timeout the ExtractionManager falls back "
-                "to the heuristic ray-shooter."
+                "Wall-clock budget (seconds) for each extraction phase.  "
+                "Under STRATEGY='exact': the total budget for the exact "
+                "extractor.  Under STRATEGY='heuristic': the total budget for "
+                "ray-shooting (all phases).  Under STRATEGY='auto': the exact "
+                "extractor gets this budget first; if it times out, the "
+                "heuristic ray-shooter independently gets the same budget.  "
+                "Default 3600 (1 hour).  For high-D scans (e.g. 6F5/11D) "
+                "where exact never finishes, this controls how long the "
+                "heuristic runs."
             )
         },
     )
@@ -118,20 +124,8 @@ class ExtractionConfig(Configurable):
             "description": (
                 "Optional hard ceiling on samples processed by the heuristic "
                 "(safety cap).  None (default) = unlimited; the missing-mass "
-                "plateau and/or HEURISTIC_MAX_SECONDS govern instead.  Set a "
+                "plateau and/or TIMEOUT_SECONDS govern instead.  Set a "
                 "finite value only to bound a run regardless of saturation."
-            )
-        },
-    )
-    HEURISTIC_MAX_SECONDS: Optional[float] = field(
-        default=None,
-        metadata={
-            "description": (
-                "Optional wall-clock budget (seconds) for the heuristic shoot "
-                "(all phases combined).  None (default) = no time cap; the "
-                "missing-mass plateau governs.  This is the recommended "
-                "primary limiter for high-D scans (e.g. 6F5/11D) where the "
-                "space never saturates -- e.g. 7200 for a 2h scan."
             )
         },
     )
@@ -150,13 +144,13 @@ class ExtractionConfig(Configurable):
         },
     )
     HEURISTIC_FACE_ALIGNED: bool = field(
-        default=False,
+        default=True,
         metadata={
             "description": (
                 "If True, run a second face-aligned shooting phase after "
                 "generic ray shooting to reach unbounded cells with "
                 "lower-dimensional recession cones (tubes/slabs) that origin "
-                "rays structurally miss.  Default False."
+                "rays structurally miss.  Default True."
             )
         },
     )

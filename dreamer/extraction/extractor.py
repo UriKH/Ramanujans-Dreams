@@ -384,14 +384,14 @@ class ShardExtractor(ExtractionScheme):
 
         manager = ExtractionManager(
             strategy=strategy,
-            timeout_seconds=config.extraction.STRATEGY_TIMEOUT_SECONDS,
+            timeout_seconds=config.extraction.TIMEOUT_SECONDS,
             exact_unbounded_check=config.extraction.EXACT_UNBOUNDED_CHECK,
             exact_num_workers=config.extraction.EXACT_NUM_WORKERS,
             heuristic_refine=config.extraction.HEURISTIC_REFINE_WITNESSES,
             heuristic_refine_threshold=config.extraction.HEURISTIC_REFINE_L1_THRESHOLD,
             heuristic_refine_workers=config.extraction.HEURISTIC_REFINE_WORKERS,
             heuristic_num_rays=config.extraction.HEURISTIC_NUM_RAYS,
-            heuristic_max_seconds=config.extraction.HEURISTIC_MAX_SECONDS,
+            heuristic_max_seconds=config.extraction.TIMEOUT_SECONDS,
             heuristic_missing_mass=config.extraction.HEURISTIC_MISSING_MASS,
             heuristic_face_aligned=config.extraction.HEURISTIC_FACE_ALIGNED,
             heuristic_face_subsets=config.extraction.HEURISTIC_FACE_SUBSETS,

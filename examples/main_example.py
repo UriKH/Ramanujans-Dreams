@@ -39,9 +39,10 @@ if __name__ == '__main__':
             #   'exact'     -- lrs + MILP only; raises on failure
             #   'heuristic' -- ray-shooting only
             #   'legacy'    -- the original brute-force lattice scan (initial_points.py)
-            'STRATEGY': 'auto',
-            # Wall-clock cap on the exact strategy when STRATEGY='auto'.
-            'STRATEGY_TIMEOUT_SECONDS': 3600.0,
+            'STRATEGY': 'heuristic',
+            # Wall-clock budget per phase: exact + heuristic each independently
+            # get this many seconds.  Under 'heuristic' alone, controls ray-shooting.
+            'TIMEOUT_SECONDS': 200.0,
         },
         search={
             # number of trajectories to be auto-generated in search if needed by the module

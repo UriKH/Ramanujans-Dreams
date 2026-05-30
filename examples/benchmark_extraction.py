@@ -115,17 +115,16 @@ def main() -> int:
         extraction={
             'INIT_POINT_MAX_COORD': 2,
             'IGNORE_DUPLICATE_SEARCHABLES': False,
-            'STRATEGY_TIMEOUT_SECONDS': 200.0,
-            # Heuristic stop/budget knobs.  HEURISTIC_MISSING_MASS=5e-4 (default)
-            # stops a phase once <0.05% of samples discover a new cell
-            # (Good-Turing f1/n).  num_rays is unlimited by default; for a
-            # high-D scan (e.g. 6F5/11D) the space never saturates, so
-            # HEURISTIC_MAX_SECONDS is the recommended primary limiter.
+            # TIMEOUT_SECONDS is the wall-clock budget for each phase: exact
+            # gets this budget under 'auto', then heuristic also gets it
+            # independently.  Under 'heuristic' alone it governs ray-shooting.
+            'TIMEOUT_SECONDS': 200,
+            # Good-Turing stop: cease a phase when <HEURISTIC_MISSING_MASS
+            # fraction of samples would land in a new cell.
             'HEURISTIC_MISSING_MASS': 1e-4,    # lower => more coverage / longer
-            # 'HEURISTIC_MAX_SECONDS': 7200,   # e.g. 2h for a 6F5 scan (primary)
             # 'HEURISTIC_NUM_RAYS': None,      # None (default) = unlimited
             # Face-aligned phase: reach tube/slab cells generic rays miss.
-            # 'HEURISTIC_FACE_ALIGNED': True,
+            'HEURISTIC_FACE_ALIGNED': True,
         },
         logging={'GENERATE_LOGS': False},
     )
