@@ -392,7 +392,10 @@ class ShardExtractor(ExtractionScheme):
             heuristic_refine_workers=config.extraction.HEURISTIC_REFINE_WORKERS,
             heuristic_num_rays=config.extraction.HEURISTIC_NUM_RAYS,
             heuristic_max_seconds=config.extraction.HEURISTIC_MAX_SECONDS,
-            heuristic_rel_improvement=config.extraction.HEURISTIC_REL_IMPROVEMENT,
+            heuristic_missing_mass=config.extraction.HEURISTIC_MISSING_MASS,
+            heuristic_face_aligned=config.extraction.HEURISTIC_FACE_ALIGNED,
+            heuristic_face_subsets=config.extraction.HEURISTIC_FACE_SUBSETS,
+            heuristic_face_offsets=config.extraction.HEURISTIC_FACE_OFFSETS,
         )
         mapping = manager.extract(shifted_hps)
 

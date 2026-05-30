@@ -477,7 +477,7 @@ class TestRayShootingExtractor:
         with pytest.raises(ValueError):
             RayShootingExtractor(batch_size=0)
         with pytest.raises(ValueError):
-            RayShootingExtractor(rel_improvement=1.5)
+            RayShootingExtractor(missing_mass=1.5)
         with pytest.raises(ValueError):
             RayShootingExtractor(plateau_patience=0)
         with pytest.raises(ValueError):
@@ -490,7 +490,7 @@ class TestRayShootingExtractor:
         import sympy as sp
         syms = list(sp.symbols("a b c d"))      # 4-D axes: 16 unbounded cells
         hps = [Hyperplane(s, syms) for s in syms]
-        kw = dict(num_rays=200_000, batch_size=2_000, rel_improvement=1e-2, seed=0)
+        kw = dict(num_rays=200_000, batch_size=2_000, missing_mass=1e-2, seed=0)
         eager = RayShootingExtractor(plateau_patience=1, **kw).extract(hps)
         patient = RayShootingExtractor(plateau_patience=5, **kw).extract(hps)
         assert len(patient) >= len(eager)
@@ -598,7 +598,7 @@ class TestRayShootingExtractor:
         # Huge cap, small batch: must find all 4 then stop on the marginal-
         # gain plateau well before exhausting the (effectively unbounded) budget.
         extractor = RayShootingExtractor(
-            num_rays=10_000_000, batch_size=1_000, rel_improvement=1e-2, seed=0
+            num_rays=10_000_000, batch_size=1_000, missing_mass=1e-2, seed=0
         )
         t0 = time.perf_counter()
         result = extractor.extract(hps)
@@ -614,7 +614,7 @@ class TestRayShootingExtractor:
         hps = [Hyperplane(s, syms) for s in syms]
         extractor = RayShootingExtractor(
             num_rays=10_000_000, batch_size=1_000,
-            rel_improvement=0.0, max_seconds=0.2, seed=0,
+            missing_mass=0.0, max_seconds=0.2, seed=0,
         )
         t0 = time.perf_counter()
         out = extractor.extract(hps)
@@ -622,12 +622,12 @@ class TestRayShootingExtractor:
         assert isinstance(out, dict)
 
     def test_plateau_disabled_runs_full_budget(self):
-        """rel_improvement=0 disables early stopping."""
+        """missing_mass=0 disables early stopping."""
         import sympy as sp
         x, y = sp.symbols("x y")
         hps = [Hyperplane(x, [x, y]), Hyperplane(y, [x, y])]
         extractor = RayShootingExtractor(
-            num_rays=2_000, batch_size=500, rel_improvement=0.0, seed=0
+            num_rays=2_000, batch_size=500, missing_mass=0.0, seed=0
         )
         # Still correct (4 quadrants); just doesn't bail early.
         assert len(extractor.extract(hps)) == 4
@@ -641,6 +641,112 @@ class TestRayShootingExtractor:
         # Past deadline -> returns (possibly empty) without shooting 10M.
         out = extractor.extract(hps, deadline=time.time() - 1.0)
         assert isinstance(out, dict)
+
+    def test_num_rays_none_is_unlimited_but_plateau_stops(self):
+        """num_rays=None must not be a binding cap; the plateau ends the run."""
+        import sympy as sp
+        x, y = sp.symbols("x y")
+        hps = [Hyperplane(x, [x, y]), Hyperplane(y, [x, y])]
+        ext = RayShootingExtractor(num_rays=None, missing_mass=1e-2, seed=0)
+        out = ext.extract(hps)
+        assert len(out) == 4  # all quadrants, stopped on plateau not a cap
+
+    # -- Good-Turing missing-mass stop -----------------------------------
+
+    def test_good_turing_singletons_drive_missing_mass(self):
+        """f1/n estimates the unseen mass: all-distinct -> ~1; all-repeat -> 0."""
+        from dreamer.extraction.v2.ray_extractor import _GTStats
+        ext = RayShootingExtractor()
+        A, c = BaseExtractor.hyperplanes_to_matrix(_hps_axes_2d())
+
+        # Four distinct cells -> four singletons -> f1/n == 1.
+        fresh = _GTStats()
+        pts = np.array([[1, 1], [1, -1], [-1, 1], [-1, -1]], dtype=np.int64)
+        ext._collect_unique_cells_into(pts, A, c, {}, {}, fresh)
+        assert fresh.f1 == 4 and fresh.n == 4
+
+        # Ten landings all in ONE cell -> not a singleton -> f1/n == 0.
+        plateau = _GTStats()
+        same = np.array([[3, 3]] * 10, dtype=np.int64)
+        ext._collect_unique_cells_into(same, A, c, {}, {}, plateau)
+        assert plateau.n == 10 and plateau.f1 == 0
+
+    def test_good_turing_stops_on_sustained_plateau(self):
+        """A trivial arrangement saturates fast, so f1/n collapses and the
+        Good-Turing stop fires well before any (huge) ray cap."""
+        import sympy as sp
+        x, y = sp.symbols("x y")
+        hps = [Hyperplane(x, [x, y]), Hyperplane(y, [x, y])]
+        ext = RayShootingExtractor(
+            num_rays=10_000_000, batch_size=1_000, missing_mass=1e-2, seed=0
+        )
+        t0 = time.perf_counter()
+        out = ext.extract(hps)
+        assert len(out) == 4
+        assert time.perf_counter() - t0 < 1.0  # stopped early, didn't burn 10M
+
+    # -- Face-aligned shooting (P2) --------------------------------------
+
+    def test_integer_nullspace_primitive(self):
+        """integer_nullspace returns primitive integer vectors annihilating A."""
+        from dreamer.extraction.v2.ray_extractor import integer_nullspace
+        A_sub = np.array([[1, 0, 0]], dtype=np.int64)  # null = span{e1, e2}
+        basis = integer_nullspace(A_sub)
+        assert len(basis) == 2
+        for v in basis:
+            assert (A_sub @ v == 0).all()
+            assert int(np.gcd.reduce(np.abs(v))) == 1  # primitive
+
+    def _strip_arrangement(self):
+        """Two parallel verticals x=0 and x=3 -> a tube cell {0<x<3}.
+
+        Its recession cone is the line {(0, t)} (lower-dimensional), and its
+        sign differs from sign(c), so NO generic origin ray can reach it --
+        the canonical case face-aligned shooting exists for."""
+        hps = [Hyperplane(x, [x, y]), Hyperplane(x - 3, [x, y])]
+        A, c = BaseExtractor.hyperplanes_to_matrix(hps)
+        # Derive the tube's sign from a known interior point (1, 0), robust
+        # to hyperplane ordering.
+        tube = tuple(np.sign(A @ np.array([1, 0]) + c).astype(int).tolist())
+        assert 0 not in tube
+        return hps, A, c, tube
+
+    def test_baseline_misses_tube_cell(self):
+        """Generic origin shooting structurally cannot reach the tube."""
+        hps, A, c, tube = self._strip_arrangement()
+        base = RayShootingExtractor(
+            num_rays=40_000, missing_mass=0.0, max_coord=5, seed=0
+        ).extract(hps)
+        assert tube not in base
+
+    def test_face_aligned_finds_tube_cell(self):
+        """Face-aligned shooting recovers the tube the baseline misses, with
+        a witness genuinely inside it.
+
+        ``num_rays=None`` (unlimited) lets the generic phase plateau on its
+        2 reachable cells and hand the budget to the face-aligned phase --
+        a finite shared ray cap with no plateau would be spent entirely by
+        generic shooting, which is by-design for a global budget."""
+        hps, A, c, tube = self._strip_arrangement()
+        fa = RayShootingExtractor(
+            num_rays=None, missing_mass=1e-2, max_coord=5, seed=0,
+            face_aligned=True, face_subsets=40, face_offsets=25,
+        ).extract(hps)
+        assert tube in fa
+        w = fa[tube]
+        assert tuple(np.sign(A @ w + c).astype(int).tolist()) == tube
+
+    def test_per_strategy_plateau_is_independent(self):
+        """A plateaued generic phase must still let the face-aligned phase
+        run -- the tube only appears if face-aligned has its own tracker."""
+        hps, A, c, tube = self._strip_arrangement()
+        # Generic plateaus fast on the 2-cell strip (patience=1); the tube can
+        # only enter via the independently-tracked face-aligned phase.
+        fa = RayShootingExtractor(
+            num_rays=None, missing_mass=0.5, plateau_patience=1, max_coord=5,
+            seed=0, face_aligned=True, face_subsets=40, face_offsets=25,
+        ).extract(hps)
+        assert tube in fa
 
 
 # ----------------------------------------------------------------------
@@ -827,7 +933,7 @@ class TestExtractionManager:
             heuristic_refine_workers=4,
             heuristic_num_rays=123_456,
             heuristic_max_seconds=99.0,
-            heuristic_rel_improvement=1e-3,
+            heuristic_missing_mass=1e-3,
         )._get_heuristic()
         assert isinstance(built, RayShootingExtractor)
         assert built.refine_witnesses is True
@@ -835,7 +941,7 @@ class TestExtractionManager:
         assert built.refine_workers == 4
         assert built.num_rays == 123_456
         assert built.max_seconds == 99.0
-        assert built.rel_improvement == 1e-3
+        assert built.missing_mass == 1e-3
         # Default leaves the solver-free path on.
         assert (
             ExtractionManager(strategy="heuristic")._get_heuristic().refine_witnesses

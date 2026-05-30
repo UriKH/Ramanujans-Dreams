@@ -116,13 +116,16 @@ def main() -> int:
             'INIT_POINT_MAX_COORD': 2,
             'IGNORE_DUPLICATE_SEARCHABLES': False,
             'STRATEGY_TIMEOUT_SECONDS': 200.0,
-            # Heuristic budget knobs.  The default rel_improvement=5e-4 stops
-            # once marginal gain drops below 0.05%; lower it for more coverage.
-            # For high-D (e.g. 6F5/11D) set HEURISTIC_MAX_SECONDS and raise
-            # HEURISTIC_NUM_RAYS so the time budget governs, not the ray cap.
-            'HEURISTIC_REL_IMPROVEMENT': 5e-4,   # 0.05% marginal gain threshold
-            # 'HEURISTIC_MAX_SECONDS': 7200,     # e.g. 2h for a 6F5 scan
-            # 'HEURISTIC_NUM_RAYS': 500_000_000, # raise ceiling for long scans
+            # Heuristic stop/budget knobs.  HEURISTIC_MISSING_MASS=5e-4 (default)
+            # stops a phase once <0.05% of samples discover a new cell
+            # (Good-Turing f1/n).  num_rays is unlimited by default; for a
+            # high-D scan (e.g. 6F5/11D) the space never saturates, so
+            # HEURISTIC_MAX_SECONDS is the recommended primary limiter.
+            'HEURISTIC_MISSING_MASS': 1e-4,    # lower => more coverage / longer
+            # 'HEURISTIC_MAX_SECONDS': 7200,   # e.g. 2h for a 6F5 scan (primary)
+            # 'HEURISTIC_NUM_RAYS': None,      # None (default) = unlimited
+            # Face-aligned phase: reach tube/slab cells generic rays miss.
+            # 'HEURISTIC_FACE_ALIGNED': True,
         },
         logging={'GENERATE_LOGS': False},
     )

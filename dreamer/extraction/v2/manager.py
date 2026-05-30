@@ -59,11 +59,16 @@ class ExtractionManager:
         -- only witnesses with L1 norm above this are refined.
     :param heuristic_refine_workers: Forwarded as ``refine_workers`` --
         process count for the refinement MILPs.
-    :param heuristic_num_rays: Forwarded as ``num_rays`` (hard ray ceiling).
+    :param heuristic_num_rays: Forwarded as ``num_rays`` (optional sample
+        ceiling; ``None`` = unlimited).
     :param heuristic_max_seconds: Forwarded as ``max_seconds`` (wall-clock
         budget for the shoot; ``None`` = no cap).
-    :param heuristic_rel_improvement: Forwarded as ``rel_improvement`` (the
-        marginal-gain stop threshold).
+    :param heuristic_missing_mass: Forwarded as ``missing_mass`` (the
+        Good-Turing missing-mass stop threshold).
+    :param heuristic_face_aligned: Forwarded as ``face_aligned`` -- run the
+        face-aligned phase to reach tube/slab cells.
+    :param heuristic_face_subsets: Forwarded as ``face_subsets``.
+    :param heuristic_face_offsets: Forwarded as ``face_offsets``.
     :raises ValueError: If ``strategy`` is unknown.
     """
 
@@ -79,9 +84,12 @@ class ExtractionManager:
         heuristic_refine: bool = False,
         heuristic_refine_threshold: float = 50.0,
         heuristic_refine_workers: int = 1,
-        heuristic_num_rays: int = 2_000_000,
+        heuristic_num_rays: Optional[int] = None,
         heuristic_max_seconds: Optional[float] = None,
-        heuristic_rel_improvement: float = 5e-4,
+        heuristic_missing_mass: float = 5e-4,
+        heuristic_face_aligned: bool = False,
+        heuristic_face_subsets: int = 200,
+        heuristic_face_offsets: int = 50,
     ):
         if strategy not in ("auto", "exact", "heuristic"):
             raise ValueError(
@@ -96,7 +104,10 @@ class ExtractionManager:
         self._heuristic_refine_workers = heuristic_refine_workers
         self._heuristic_num_rays = heuristic_num_rays
         self._heuristic_max_seconds = heuristic_max_seconds
-        self._heuristic_rel_improvement = heuristic_rel_improvement
+        self._heuristic_missing_mass = heuristic_missing_mass
+        self._heuristic_face_aligned = heuristic_face_aligned
+        self._heuristic_face_subsets = heuristic_face_subsets
+        self._heuristic_face_offsets = heuristic_face_offsets
         self.timeout_seconds = timeout_seconds
         self._exact = exact
         self._heuristic = heuristic
@@ -173,7 +184,10 @@ class ExtractionManager:
             self._heuristic = RayShootingExtractor(
                 num_rays=self._heuristic_num_rays,
                 max_seconds=self._heuristic_max_seconds,
-                rel_improvement=self._heuristic_rel_improvement,
+                missing_mass=self._heuristic_missing_mass,
+                face_aligned=self._heuristic_face_aligned,
+                face_subsets=self._heuristic_face_subsets,
+                face_offsets=self._heuristic_face_offsets,
                 refine_witnesses=self._heuristic_refine,
                 refine_l1_threshold=self._heuristic_refine_threshold,
                 refine_workers=self._heuristic_refine_workers,

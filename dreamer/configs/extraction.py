@@ -112,14 +112,14 @@ class ExtractionConfig(Configurable):
             )
         },
     )
-    HEURISTIC_NUM_RAYS: int = field(
-        default=2_000_000,
+    HEURISTIC_NUM_RAYS: Optional[int] = field(
+        default=None,
         metadata={
             "description": (
-                "Hard ceiling on rays sampled by the heuristic (safety cap). "
-                "The relative-improvement stop usually fires first; for a long "
-                "high-D scan (e.g. 6F5/11D) raise this together with "
-                "HEURISTIC_MAX_SECONDS."
+                "Optional hard ceiling on samples processed by the heuristic "
+                "(safety cap).  None (default) = unlimited; the missing-mass "
+                "plateau and/or HEURISTIC_MAX_SECONDS govern instead.  Set a "
+                "finite value only to bound a run regardless of saturation."
             )
         },
     )
@@ -127,23 +127,58 @@ class ExtractionConfig(Configurable):
         default=None,
         metadata={
             "description": (
-                "Optional wall-clock budget (seconds) for the heuristic shoot. "
-                "None (default) = no time cap; the relative-improvement stop "
-                "and HEURISTIC_NUM_RAYS govern.  Set it (e.g. 7200 for a 2h "
-                "high-D scan) so the run uses its time and stops early only "
-                "when marginal gains saturate."
+                "Optional wall-clock budget (seconds) for the heuristic shoot "
+                "(all phases combined).  None (default) = no time cap; the "
+                "missing-mass plateau governs.  This is the recommended "
+                "primary limiter for high-D scans (e.g. 6F5/11D) where the "
+                "space never saturates -- e.g. 7200 for a 2h scan."
             )
         },
     )
-    HEURISTIC_REL_IMPROVEMENT: float = field(
+    HEURISTIC_MISSING_MASS: float = field(
         default=5e-4,
         metadata={
             "description": (
-                "Stop the heuristic once each batch's marginal gain "
-                "(new_cells / total_found) stays below this fraction for a few "
-                "consecutive batches.  Scale-invariant across dimensions. "
-                "Default 5e-4 (~0.05% marginal gain).  Lower = more coverage / "
-                "longer runs; 0 disables early stopping."
+                "Stop a heuristic phase once its Good-Turing missing-mass "
+                "estimate (f1/n: fraction of samples landing in a cell seen "
+                "exactly once) stays below this fraction for a few consecutive "
+                "batches.  Estimates P(next sample is a new cell), so it is "
+                "scale-invariant and robust to 'plateau then spike'.  Default "
+                "5e-4.  Lower = more coverage / longer runs; 0 disables early "
+                "stopping."
+            )
+        },
+    )
+    HEURISTIC_FACE_ALIGNED: bool = field(
+        default=False,
+        metadata={
+            "description": (
+                "If True, run a second face-aligned shooting phase after "
+                "generic ray shooting to reach unbounded cells with "
+                "lower-dimensional recession cones (tubes/slabs) that origin "
+                "rays structurally miss.  Default False."
+            )
+        },
+    )
+    HEURISTIC_FACE_SUBSETS: int = field(
+        default=200,
+        metadata={
+            "description": (
+                "Number of random hyperplane subsets sampled in the "
+                "face-aligned phase (each yields nullspace shooting "
+                "directions).  Only used when HEURISTIC_FACE_ALIGNED=True. "
+                "Default 200."
+            )
+        },
+    )
+    HEURISTIC_FACE_OFFSETS: int = field(
+        default=50,
+        metadata={
+            "description": (
+                "Number of random integer start offsets swept per face-aligned "
+                "direction (sweeping offsets enumerates the slab cells sharing "
+                "that recession direction).  Only used when "
+                "HEURISTIC_FACE_ALIGNED=True.  Default 50."
             )
         },
     )

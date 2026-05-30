@@ -128,8 +128,9 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
         def __init__(self, strategy, timeout_seconds, exact_unbounded_check="lp",
                      exact_num_workers=1, heuristic_refine=False,
                      heuristic_refine_threshold=50.0, heuristic_refine_workers=1,
-                     heuristic_num_rays=2_000_000, heuristic_max_seconds=None,
-                     heuristic_rel_improvement=5e-4):
+                     heuristic_num_rays=None, heuristic_max_seconds=None,
+                     heuristic_missing_mass=5e-4, heuristic_face_aligned=False,
+                     heuristic_face_subsets=200, heuristic_face_offsets=50):
             captured["strategy"] = strategy
             captured["timeout_seconds"] = timeout_seconds
             captured["exact_unbounded_check"] = exact_unbounded_check
@@ -139,7 +140,10 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
             captured["heuristic_refine_workers"] = heuristic_refine_workers
             captured["heuristic_num_rays"] = heuristic_num_rays
             captured["heuristic_max_seconds"] = heuristic_max_seconds
-            captured["heuristic_rel_improvement"] = heuristic_rel_improvement
+            captured["heuristic_missing_mass"] = heuristic_missing_mass
+            captured["heuristic_face_aligned"] = heuristic_face_aligned
+            captured["heuristic_face_subsets"] = heuristic_face_subsets
+            captured["heuristic_face_offsets"] = heuristic_face_offsets
 
         def extract(self, hyperplanes):
             captured["num_hps"] = len(hyperplanes)
@@ -155,6 +159,11 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
     assert captured["timeout_seconds"] == extraction_config.STRATEGY_TIMEOUT_SECONDS
     assert captured["exact_unbounded_check"] == extraction_config.EXACT_UNBOUNDED_CHECK
     assert captured["heuristic_refine"] == extraction_config.HEURISTIC_REFINE_WITNESSES
+    assert captured["heuristic_num_rays"] == extraction_config.HEURISTIC_NUM_RAYS
+    assert captured["heuristic_missing_mass"] == extraction_config.HEURISTIC_MISSING_MASS
+    assert captured["heuristic_face_aligned"] == extraction_config.HEURISTIC_FACE_ALIGNED
+    assert captured["heuristic_face_subsets"] == extraction_config.HEURISTIC_FACE_SUBSETS
+    assert captured["heuristic_face_offsets"] == extraction_config.HEURISTIC_FACE_OFFSETS
     assert captured["num_hps"] == 1
     assert len(shards) == 1
     assert tuple(shards[0].encoding) == (1,)
