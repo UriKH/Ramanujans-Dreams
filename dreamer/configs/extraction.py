@@ -18,7 +18,7 @@ class ExtractionConfig(Configurable):
         metadata={"description": "Maximum coordinate magnitude when searching for shard interior points."},
     )
     IGNORE_DUPLICATE_SEARCHABLES: bool = field(
-        default=True,
+        default=False,
         metadata={"description": "Skip duplicate searchables detected during extraction."},
     )
     STRATEGY: str = field(

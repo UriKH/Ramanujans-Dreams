@@ -10,7 +10,7 @@ def traj_from_dim(dim: int) -> int:
 
 
 def depth_from_len(traj_len, dim) -> int:
-    return min(round(1500 / max(traj_len / math.sqrt(dim), 1)), 1500) # TODO: normalize by trajectory. walk 1000 instead
+    return min(round(1500 / max(traj_len / math.sqrt(dim), 1)), 1500)
 
 def ga_generations(dim: int) -> int:
     return 15 + 4 * dim
@@ -88,9 +88,9 @@ class SearchConfig(Configurable):
     #            yet implemented; will run as a separate pipeline pass.
     TIER2_ATTRIBUTES: Tuple[str, ...] = field(
         default=(
-            "eigenvalues", "eigenvalue_errors", "spectral_gap", "companion_coboundary_rank",
-            ("asymptotics", "if_identified"), ("convergence_class", "if_identified"), ("kamidelta", "if_identified"),
-            "gcd_slope"
+            ("eigenvalues", "if_identified"), ("eigenvalue_errors", "if_identified"), ("spectral_gap", "if_identified"),
+            ("companion_coboundary_rank", "if_identified"), ("asymptotics", "if_identified"),
+            ("convergence_class", "if_identified"), ("kamidelta", "if_identified"), ("gcd_slope", "if_identified")
         ),
         metadata={"description": "Background-worker attributes computed asynchronously during search. Empty disables the worker/writer subprocesses entirely."},
     )
@@ -139,6 +139,7 @@ class SearchConfig(Configurable):
         metadata={"description": "Retry budget before stopping when no GA improvement is observed."},
     )
 
+    # ============================== Raycaster settings ==============================
     MAX_TRAJECTORY_LENGTH: int = field(
         default=100,
         metadata={"description": "Upper bound for absolute trajectory coordinate values during search."},

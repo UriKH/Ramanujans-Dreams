@@ -225,7 +225,6 @@ class SearcherModV1(SearcherModScheme):
                         f"Handler error — shard {shard_id}, traj={traj}, start={start}: {e}",
                         Logger.Levels.warning,
                     ).log()
-                    raise e # TODO: remove this
                     continue
 
                 patch: dict = {

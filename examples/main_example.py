@@ -6,7 +6,7 @@ from dreamer import log
 
 # Because of pickling format we need to define these functions here
 def trajectory_compute_func(d):
-    return max(10 ** (d - 1), 10)
+    return max(10 ** d, 10)
 
 
 def trajectory_compute_func_analysis(d):
@@ -31,18 +31,17 @@ if __name__ == '__main__':
             'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func_analysis
         },
         extraction={
-            'INIT_POINT_MAX_COORD': 10,
             # In this case this indicates usage of pFq symmetries utilization to reduce the number of shards
-            'IGNORE_DUPLICATE_SEARCHABLES': False,
-            # New v2 shard extraction:
+            'IGNORE_DUPLICATE_SEARCHABLES': True,
             #   'auto'      -- try exact (lrs + MILP), fall back to heuristic on timeout (DEFAULT)
             #   'exact'     -- lrs + MILP only; raises on failure
-            #   'heuristic' -- ray-shooting only
-            #   'legacy'    -- the original brute-force lattice scan (initial_points.py)
+            #   'heuristic' -- ray-shooting only (Best for high dimensional CMFs)
+            #   'legacy'    -- brute-force lattice scan
             'STRATEGY': 'heuristic',
             # Wall-clock budget per phase: exact + heuristic each independently
             # get this many seconds.  Under 'heuristic' alone, controls ray-shooting.
             'TIMEOUT_SECONDS': 200.0,
+            'LOAD_SHARD_CACHE': True
         },
         search={
             # number of trajectories to be auto-generated in search if needed by the module
