@@ -137,25 +137,32 @@ def build_trajectory_dto(
     shard_encoding_str: str,
     start,
     direction,
+    constants=None,
 ) -> "TrajectoryDTO":
     """Build a ``TrajectoryDTO`` carrying Tier-1 attributes from a handler.
 
-    The ``trajectory_id`` is built via :func:`derive_trajectory_id`:
-    ``"{shard_id}__{stable_hash(cmf_name, shard_encoding_str, start, direction)}"``.
-
-    ``extended_metrics`` is left empty; background workers compute the
-    asynchronous (Tier-2) attributes after the DTO is enqueued.
+    The trajectory matrix walk is computed once; delta / p / q / identified
+    are evaluated for every constant in *constants* by calling
+    :meth:`TrajectoryAttributesHandler.compute_for_constant` which swaps the
+    constant and clears only the per-constant caches, reusing the expensive
+    walk.  Results are stored as ``{const_name: value}`` dicts.
 
     Parameters
     ----------
     handler:
-        A ``TrajectoryAttributesHandler`` constructed from the trajectory.
+        A ``TrajectoryAttributesHandler`` constructed from the trajectory
+        (``constant`` may be ``None``; each constant is injected via
+        ``compute_for_constant``).
     cmf_id, shard_id:
         Identifiers for the parent CMF and shard.
     cmf_name, shard_encoding_str:
         Used together to build the deterministic trajectory id.
     start, direction:
         The ``ramanujantools.Position`` objects for this trajectory.
+    constants:
+        Iterable of ``sympy.Expr`` objects to evaluate.  When ``None``,
+        falls back to ``handler.constant()`` (backward-compatible path for
+        single-constant callers).
     """
     from dreamer.utils.storage.dtos import TrajectoryDTO  # lazy import avoids circular dep
 
@@ -164,6 +171,41 @@ def build_trajectory_dto(
     trajectory_id = derive_trajectory_id(
         shard_id, cmf_name, shard_encoding_str, start_t, dir_t,
     )
+
+    # Resolve which constants to evaluate.
+    # ``constants`` should be a list of ``Constant`` objects (preferred) or
+    # sympy expressions (legacy path).  Using ``Constant`` objects lets us
+    # store the human-readable name as the dict key while using the sympy
+    # expression for computation — keeping keys consistent across
+    # ``build_trajectory_dto`` and the ``c.name`` checks in the analyzer.
+    from dreamer.utils.constants.constant import Constant as _Constant  # local import avoids circular
+
+    if constants is None:
+        c_expr = handler.constant()
+        constants_list = [c_expr] if c_expr is not None else []
+    else:
+        constants_list = list(constants)
+
+    delta_dict: dict = {}
+    p_dict: dict = {}
+    q_dict: dict = {}
+    identified_dict: dict = {}
+
+    for c in constants_list:
+        if isinstance(c, _Constant):
+            c_name = c.name
+            c_sympy = c.value_sympy
+        else:
+            # Backward-compat: raw sympy expression.
+            c_name = str(c)
+            c_sympy = c
+
+        delta, p, q, ided = handler.compute_for_constant(c_sympy)
+        delta_dict[c_name] = float(delta)
+        p_dict[c_name] = tuple(_pq_to_jsonsafe(x) for x in p) if p else None
+        q_dict[c_name] = tuple(_pq_to_jsonsafe(x) for x in q) if q else None
+        identified_dict[c_name] = bool(ided)
+
     return TrajectoryDTO(
         trajectory_id=trajectory_id,
         cmf_id=cmf_id,
@@ -173,12 +215,11 @@ def build_trajectory_dto(
         recurrence_relation=handler.formula_str(),
         recurrence_order=handler.order(),
         limit_value=float(handler.limit()),
-        delta_estimate=float(handler.delta()),
-        p_vector=tuple(_pq_to_jsonsafe(x) for x in handler.p_vector()) if handler.p_vector() else None,
-        q_vector=tuple(_pq_to_jsonsafe(x) for x in handler.q_vector()) if handler.q_vector() else None,
-        identified=bool(handler.identified()),
+        delta_estimate=delta_dict,
+        p_vector=p_dict if p_dict else None,
+        q_vector=q_dict if q_dict else None,
+        identified=identified_dict,
         walk_type=int(handler.walk_type()),
-        constant=str(handler.constant()) if handler.constant() is not None else None,
     )
 
 
@@ -956,6 +997,47 @@ class TrajectoryAttributesHandler:
         if self._constant is None:
             return False
         return math.isfinite(self.delta())
+
+    def compute_for_constant(self, constant) -> tuple:
+        """Evaluate delta / p_vector / q_vector / identified for *constant*.
+
+        Reuses the cached walk matrices from this handler (the walk is
+        constant-independent).  Only the LIReC identification and derived
+        values are recomputed.
+
+        Returns ``(delta, p_vector, q_vector, identified)`` where
+        ``delta`` is a ``float`` and the others match the normal return
+        types of :meth:`delta`, :meth:`p_vector`, :meth:`q_vector`,
+        :meth:`identified`.
+        """
+        # Ensure the walk is cached before swapping the constant (walk is
+        # constant-independent, so we prime it here if not already done).
+        _ = self._effective_walk_values(self._depth)
+
+        old_constant = self._constant
+        self._constant = constant
+
+        # Clear only the constant-dependent entries from both caches.
+        self._utility_cache.pop("pq_vector", None)
+        for key in list(self._cache.keys()):
+            if "delta" in key:
+                del self._cache[key]
+
+        try:
+            delta = self.delta()
+            p = self.p_vector()
+            q = self.q_vector()
+            ided = self.identified()
+        finally:
+            # Restore the previous constant regardless of exceptions.
+            self._constant = old_constant
+            # Clear again so subsequent calls see the right constant.
+            self._utility_cache.pop("pq_vector", None)
+            for key in list(self._cache.keys()):
+                if "delta" in key:
+                    del self._cache[key]
+
+        return delta, p, q, ided
 
     def companion_coboundary_rank(self) -> int:
         """

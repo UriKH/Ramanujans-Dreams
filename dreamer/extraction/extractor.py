@@ -30,7 +30,7 @@ from collections import defaultdict
 from functools import partial
 from ramanujantools.cmf import pFq as rt_pFq
 from ramanujantools import Position
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 
 class ShardExtractorMod(ExtractionModScheme):
@@ -52,50 +52,70 @@ class ShardExtractorMod(ExtractionModScheme):
 
     def execute(self) -> Dict[Constant, List[Searchable]]:
         """
-        Extract shards from CMFs
+        Extract shards from CMFs.
+
+        CMFs shared by multiple constants (same ``CMFData`` object appearing
+        under several constant keys) are extracted *once* with all of their
+        constants bundled into a single multi-constant ``Shard``.  The same
+        ``Shard`` object is then placed under every one of its constants in
+        the returned dict so that downstream stages can still iterate by
+        constant when needed.
         :return: A mapping from constants to a list of shards
         """
-        all_shards = defaultdict(list)
+        # ----------------------------------------------------------------
+        # Group by CMFData identity: build a mapping
+        #   cmf_data_id → (CMFData, [constants_that_share_it])
+        # ----------------------------------------------------------------
+        cmf_id_to_entry: Dict[int, tuple] = {}  # id(CMFData) → (CMFData, list[Constant])
+        for const, cmf_data_list in self.cmf_data.items():
+            for cmd_data in cmf_data_list:
+                key = id(cmd_data)
+                if key not in cmf_id_to_entry:
+                    cmf_id_to_entry[key] = (cmd_data, [])
+                cmf_id_to_entry[key][1].append(const)
 
-        consts_itr = iter(list(self.cmf_data.keys()))
-        for const, cmf_data_list in SmartTQDM(
-                self.cmf_data.items(), desc=f'Extracting shards for "{next(consts_itr).name}"',
-                **sys_config.TQDM_CONFIG
+        all_shards: Dict[Constant, List[Searchable]] = defaultdict(list)
+
+        call_number = 0
+        for cmd_data, consts in SmartTQDM(
+                cmf_id_to_entry.values(),
+                desc='Extracting shards',
+                **sys_config.TQDM_CONFIG,
         ):
-            with Exporter.export_stream(
-                    os.path.join(sys_config.PATH_TO_SEARCHABLES, const.name),
-                    exists_ok=True,
-                    clean_exists=True,
-                    fmt=Formats(sys_config.EXPORT_SEARCHABLES_FORMAT),
-            ) as export_stream:
-                for i, cmd_data in enumerate(SmartTQDM(
-                        cmf_data_list, desc=f'Computing shards',
-                        **sys_config.TQDM_CONFIG)):
-                    extractor = ShardExtractor(
-                        const, cmd_data
-                    )
-                    shards = extractor.extract(call_number=i + 1)
-                    all_shards[const] += shards
-                    export_stream(shards, cmd_data.cmf_name)
+            call_number += 1
+            extractor = ShardExtractor(consts, cmd_data)
+            shards = extractor.extract(call_number=call_number)
 
-                    # DB-ready ShardDTO records alongside the pickle export.
-                    # Written idempotently per (const, cmf) so reruns don't
-                    # grow the file.  Also backfills the CmfDTO row written
-                    # by the loading stage with the hyperplanes we just
-                    # computed.
-                    if sys_config.EXPORT_CMFS:
-                        write_shard_records(
-                            sys_config.EXPORT_CMFS,
-                            const,
-                            cmd_data.cmf_name,
-                            shards,
-                        )
-                        update_cmf_hyperplanes(
-                            sys_config.EXPORT_CMFS,
-                            const,
-                            cmd_data.cmf_name,
-                            extractor.hyperplanes,
-                        )
+            # Distribute the shared Shard objects to every constituent constant.
+            for const in consts:
+                all_shards[const] += shards
+
+                # Pickle export (per-constant searchables directory)
+                if sys_config.PATH_TO_SEARCHABLES:
+                    with Exporter.export_stream(
+                            os.path.join(sys_config.PATH_TO_SEARCHABLES, const.name),
+                            exists_ok=True,
+                            clean_exists=True,
+                            fmt=Formats(sys_config.EXPORT_SEARCHABLES_FORMAT),
+                    ) as export_stream:
+                        export_stream(shards, cmd_data.cmf_name)
+
+            # DB-ready ShardDTO records (written once per CMF, under the first constant's dir).
+            if sys_config.EXPORT_CMFS:
+                primary_const = consts[0]
+                write_shard_records(
+                    sys_config.EXPORT_CMFS,
+                    primary_const,
+                    cmd_data.cmf_name,
+                    shards,
+                )
+                update_cmf_hyperplanes(
+                    sys_config.EXPORT_CMFS,
+                    primary_const,
+                    cmd_data.cmf_name,
+                    extractor.hyperplanes,
+                )
+
         return all_shards
 
 
@@ -104,13 +124,16 @@ class ShardExtractor(ExtractionScheme):
     Shard extractor is a representation of a shard finding method.
     """
 
-    def __init__(self, const: Constant, cmf_data: CMFData):
+    def __init__(self, constants: Union[Constant, List[Constant]], cmf_data: CMFData):
         """
         Extracts the shards of a CMF
-        :param const: Constant searched in this CMF
+        :param constants: Constant or list of constants searched in this CMF
         :param cmf_data: CMF to extract shards from, more data for extraction and later usage
         """
-        super().__init__(const, cmf_data)
+        consts_list = constants if isinstance(constants, list) else [constants]
+        # ExtractionScheme base stores a single const; pass the first one for compatibility.
+        super().__init__(consts_list[0], cmf_data)
+        self._constants: List[Constant] = consts_list
         # Populated by extract(); read by ShardExtractorMod.execute() so it
         # can backfill the CmfDTO row with the hyperplanes used to derive
         # the shards.
@@ -193,7 +216,7 @@ class ShardExtractor(ExtractionScheme):
         self.hyperplanes = hps
 
         if not hps:
-            return [Shard.from_cmf_data(self.cmf_data, self.const, [], [])]
+            return [Shard.from_cmf_data(self.cmf_data, self._constants, [], [])]
 
         symbols = list(hps)[0].symbols
         shard_encodings: Dict[Tuple[int, ...], Position] = dict()
@@ -259,7 +282,7 @@ class ShardExtractor(ExtractionScheme):
         shards = []
         for enc in SmartTQDM(shard_encodings.keys(), desc='Creating shard objects', **sys_config.TQDM_CONFIG):
             shards.append(Shard.from_cmf_data(
-                self.cmf_data, self.const, shifted_hps, enc, shard_encodings[enc],
+                self.cmf_data, self._constants, shifted_hps, enc, shard_encodings[enc],
                 hyperplanes_already_shifted=True,
             ))
         return shards

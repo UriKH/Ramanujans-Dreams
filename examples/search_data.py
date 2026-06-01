@@ -1,24 +1,28 @@
 """
 Primitive CLI for browsing search-stage JSONL outputs.
 
-Layout assumed:
-    <root>/<constant_name>/<shard_id>.jsonl
+Layout assumed (flat directory — one file per shard):
+    <root>/<shard_id>.jsonl
 
-where ``shard_id`` has the structural form ``<cmf_id>__<encoding_hash>`` and
-each line is either a base ``TrajectoryDTO`` record or a patch record (the
-loader merges them by ``trajectory_id``, last-write-wins on conflicts).
+where ``shard_id`` has the structural form ``<cmf_id>__<encoding_hash>``
+and each line is either a base ``TrajectoryDTO`` record or a patch record
+(the loader merges them by ``trajectory_id``, last-write-wins on conflicts).
+
+Per-constant attributes (``delta_estimate``, ``p_vector``, ``q_vector``,
+``identified``) are stored as dicts keyed by constant name — one trajectory
+covers all constants searched in that shard.
 
 Three subcommands:
 
     list-shards   <cmf_id>
         List shards stored for the given CMF — every per-shard JSONL whose
-        filename starts with ``<cmf_id>__``.  Prints ``<shard_id>  <encoding>``
-        where ``encoding`` is reconstructed from the first record of the file
-        (so the encoding column is empty for whole-space shards).
+        filename starts with ``<cmf_id>__``.  Prints
+        ``<shard_id>  <records>  <constants>  encoding`` where
+        ``constants`` is the union of constant names found in the JSONL.
 
     list-trajectories <shard_id>
         List every trajectory in the shard with its start / direction /
-        constant / trajectory_id.
+        constants / trajectory_id.
 
     show-trajectory <trajectory_id>
         Dump every merged attribute for a single trajectory (base record +
@@ -40,7 +44,7 @@ import argparse
 import json
 import os
 import sys
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -50,17 +54,13 @@ from typing import Dict, Iterator, List, Optional, Tuple
 DEFAULT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "search results")
 
 
-def _iter_shard_files(root: str) -> Iterator[Tuple[str, str]]:
-    """Yield ``(constant_name, jsonl_path)`` for every per-shard JSONL under *root*."""
+def _iter_shard_files(root: str) -> Iterator[str]:
+    """Yield ``jsonl_path`` for every per-shard JSONL directly under *root*."""
     if not os.path.isdir(root):
         return
-    for const_name in sorted(os.listdir(root)):
-        const_dir = os.path.join(root, const_name)
-        if not os.path.isdir(const_dir):
-            continue
-        for fname in sorted(os.listdir(const_dir)):
-            if fname.endswith(".jsonl"):
-                yield const_name, os.path.join(const_dir, fname)
+    for fname in sorted(os.listdir(root)):
+        if fname.endswith(".jsonl"):
+            yield os.path.join(root, fname)
 
 
 def _merge_jsonl(path: str) -> Dict[str, dict]:
@@ -97,36 +97,59 @@ def _shard_id_from_filename(fname: str) -> str:
     return fname[:-len(".jsonl")] if fname.endswith(".jsonl") else fname
 
 
+def _constants_in_file(merged: Dict[str, dict]) -> Set[str]:
+    """Collect constant names that appear in any record's ``delta_estimate`` dict."""
+    consts: Set[str] = set()
+    for r in merged.values():
+        d = r.get("delta_estimate")
+        if isinstance(d, dict):
+            consts.update(d.keys())
+    return consts
+
+
+def _fmt_delta_dict(delta) -> str:
+    """Render ``delta_estimate`` whether it is a dict or a legacy scalar."""
+    if isinstance(delta, dict):
+        parts = [f"{k}={v:.4f}" for k, v in delta.items() if isinstance(v, (int, float))]
+        return "{" + ", ".join(parts) + "}" if parts else str(delta)
+    if isinstance(delta, (int, float)):
+        return f"{delta:.4f}"
+    return str(delta)
+
+
 # ---------------------------------------------------------------------------
 # Subcommand implementations
 # ---------------------------------------------------------------------------
 
 def cmd_list_shards(args: argparse.Namespace) -> int:
     """List every shard JSONL whose filename starts with ``<cmf_id>__``."""
-    matches: List[Tuple[str, str, str]] = []  # (constant, shard_id, sample_record_path)
-    for const_name, jsonl_path in _iter_shard_files(args.root):
+    matches: List[Tuple[str, str]] = []  # (shard_id, jsonl_path)
+    for jsonl_path in _iter_shard_files(args.root):
         fname = os.path.basename(jsonl_path)
         shard_id = _shard_id_from_filename(fname)
         if shard_id.startswith(f"{args.cmf_id}__"):
-            matches.append((const_name, shard_id, jsonl_path))
+            matches.append((shard_id, jsonl_path))
 
     if not matches:
         print(f"No shards found for cmf_id={args.cmf_id!r} under {args.root}")
         return 1
 
     print(f"Shards for cmf_id={args.cmf_id} ({len(matches)} total):")
-    print(f"{'constant':<16} {'shard_id':<60} {'records':>8}  encoding")
-    print("-" * 110)
-    for const_name, shard_id, path in matches:
+    print(f"{'shard_id':<60} {'records':>8}  {'constants':<24}  encoding")
+    print("-" * 130)
+    for shard_id, path in matches:
         merged = _merge_jsonl(path)
-        # Pull an encoding hint from the first record (when present).
+        consts = _constants_in_file(merged)
         encoding = ""
         for r in merged.values():
             enc = r.get("shard_encoding")
             if enc is not None:
                 encoding = str(enc)
                 break
-        print(f"{const_name:<16} {shard_id:<60} {len(merged):>8}  {encoding}")
+        print(
+            f"{shard_id:<60} {len(merged):>8}  "
+            f"{', '.join(sorted(consts)):<24}  {encoding}"
+        )
     return 0
 
 
@@ -134,11 +157,9 @@ def cmd_list_trajectories(args: argparse.Namespace) -> int:
     """List trajectories inside a single shard JSONL."""
     target = args.shard_id
     found_path: Optional[str] = None
-    found_const: Optional[str] = None
-    for const_name, jsonl_path in _iter_shard_files(args.root):
+    for jsonl_path in _iter_shard_files(args.root):
         if _shard_id_from_filename(os.path.basename(jsonl_path)) == target:
             found_path = jsonl_path
-            found_const = const_name
             break
 
     if found_path is None:
@@ -147,24 +168,27 @@ def cmd_list_trajectories(args: argparse.Namespace) -> int:
 
     merged = _merge_jsonl(found_path)
     if not merged:
-        print(f"Shard {target} (under {found_const}) is empty.")
+        print(f"Shard {target} is empty.")
         return 0
 
-    print(f"Shard {target}  (constant={found_const}, {len(merged)} trajectories)")
-    print(f"{'trajectory_id':<86} {'identified':>10}  {'delta':>10}  start -> direction")
-    print("-" * 160)
+    consts = sorted(_constants_in_file(merged))
+    print(f"Shard {target}  (constants={consts}, {len(merged)} trajectories)")
+    print(
+        f"{'trajectory_id':<86} {'identified':>22}  {'delta':>34}  start -> direction"
+    )
+    print("-" * 200)
     for tid, r in merged.items():
         identified = r.get("identified", "?")
+        if isinstance(identified, dict):
+            identified_str = "{" + ", ".join(f"{k}={v}" for k, v in identified.items()) + "}"
+        else:
+            identified_str = str(identified)
         delta = r.get("delta_estimate", "?")
+        delta_str = _fmt_delta_dict(delta)
         start = r.get("start_point")
         direction = r.get("direction")
-        delta_str = (
-            f"{delta:.4f}"
-            if isinstance(delta, (int, float)) and delta == delta and abs(delta) < 1e30
-            else str(delta)
-        )
         print(
-            f"{tid:<86} {str(identified):>10}  {delta_str:>10}  "
+            f"{tid:<86} {identified_str:>22}  {delta_str:>34}  "
             f"{start} -> {direction}"
         )
     return 0
@@ -173,43 +197,43 @@ def cmd_list_trajectories(args: argparse.Namespace) -> int:
 def cmd_show_trajectory(args: argparse.Namespace) -> int:
     """Show every merged field for one trajectory."""
     target = args.trajectory_id
-    # Trajectory id structure: ``<shard_id>__<traj_hash>``.  Strip the last
-    # ``__<hash>`` segment to find the shard_id and locate the JSONL directly
-    # — much faster than scanning every shard.
+    # Trajectory id structure: ``<shard_id>__<traj_hash>``.
     shard_id = target.rsplit("__", 1)[0] if "__" in target else None
 
     record: Optional[dict] = None
-    constant_name: Optional[str] = None
 
     if shard_id:
-        for const_name, jsonl_path in _iter_shard_files(args.root):
+        for jsonl_path in _iter_shard_files(args.root):
             if _shard_id_from_filename(os.path.basename(jsonl_path)) == shard_id:
                 merged = _merge_jsonl(jsonl_path)
                 if target in merged:
                     record = merged[target]
-                    constant_name = const_name
-                break  # shard id is unique; no need to keep scanning
+                break
 
-    # Fallback: trajectory id might not follow the structural prefix (e.g.
-    # legacy data) — scan every JSONL in last resort.
+    # Fallback: scan every file.
     if record is None:
-        for const_name, jsonl_path in _iter_shard_files(args.root):
+        for jsonl_path in _iter_shard_files(args.root):
             merged = _merge_jsonl(jsonl_path)
             if target in merged:
                 record = merged[target]
-                constant_name = const_name
                 break
 
     if record is None:
         print(f"Trajectory {target!r} not found under {args.root}")
         return 1
 
-    print(f"Trajectory {target}  (constant={constant_name})")
+    print(f"Trajectory {target}")
     print("=" * 80)
     for key, value in record.items():
         if key == "extended_metrics":
             continue
-        print(f"  {key:<22} {value}")
+        # Pretty-print dict-valued per-constant fields.
+        if isinstance(value, dict) and key in ("delta_estimate", "p_vector", "q_vector", "identified"):
+            print(f"  {key:<22}")
+            for cname, cval in value.items():
+                print(f"    {cname:<20} {cval}")
+        else:
+            print(f"  {key:<22} {value}")
 
     em = record.get("extended_metrics") or {}
     if em:
@@ -228,7 +252,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="search_data.py",
         description=(
-            "Primitive search over per-shard JSONL outputs.  "
+            "Primitive search over per-shard JSONL outputs (flat directory).  "
             "Three subcommands: list-shards, list-trajectories, show-trajectory."
         ),
     )

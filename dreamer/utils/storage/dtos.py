@@ -133,23 +133,21 @@ class TrajectoryDTO:
     recurrence_relation: str
     recurrence_order: int
     limit_value: float
-    delta_estimate: float
-    p_vector: Tuple[int | str, ...]
-    q_vector: Tuple[int | str, ...]
-    # ``identified`` defaults True for backward compatibility with records
-    # written before this field was added; the analyzer populates it from
-    # ``handler.identified()``.
-    identified: bool = True
+
+    # Per-constant attributes — dicts keyed by constant name so that one
+    # trajectory record covers all constants searched in this shard.
+    # ``delta_estimate``: irrationality measure δ per constant.
+    # ``p_vector`` / ``q_vector``: LIReC projection vectors per constant
+    #   (None entry = constant not identified for this trajectory).
+    # ``identified``: whether LIReC found a convergent p/q for this constant.
+    delta_estimate: Dict[str, float]
+    p_vector: Optional[Dict[str, Optional[Tuple[int | str, ...]]]]
+    q_vector: Optional[Dict[str, Optional[Tuple[int | str, ...]]]]
+    identified: Dict[str, bool] = field(default_factory=dict)
 
     # Walk-style flag: 1 → ``inv().T`` applied after walking the trajectory
-    # matrix (the dual recurrence); 2 → walked directly.  Persisted so that
-    # downstream tooling can faithfully reconstruct the handler that
-    # produced these p/q vectors.  Defaults to 1 for backward compatibility
-    # with records written before this field existed.
+    # matrix (the dual recurrence); 2 → walked directly.
     walk_type: int = 1
-    # Target constant as a sympy-parseable string (``str(handler.constant())``).
-    # ``None`` for handlers built without a constant (worker-context records).
-    constant: Optional[str] = None
 
     # Open extension field for Tier-2+ attributes added by background workers
     extended_metrics: Dict[str, Any] = field(default_factory=dict, hash=False)
@@ -159,7 +157,15 @@ class TrajectoryDTO:
 
     @classmethod
     def from_dict(cls, d: dict) -> "TrajectoryDTO":
-        """Reconstruct from a JSON-parsed dict. Converts JSON lists back to tuples."""
+        """Reconstruct from a JSON-parsed dict."""
+        # p_vector / q_vector: dict of {const: tuple-or-None} or None
+        def _restore_pq(raw) -> Optional[Dict[str, Optional[tuple]]]:
+            if raw is None:
+                return None
+            if isinstance(raw, dict):
+                return {k: (tuple(v) if v is not None else None) for k, v in raw.items()}
+            return None  # unexpected format — discard gracefully
+
         return cls(
             trajectory_id=d["trajectory_id"],
             cmf_id=d["cmf_id"],
@@ -169,11 +175,10 @@ class TrajectoryDTO:
             recurrence_relation=d["recurrence_relation"],
             recurrence_order=d["recurrence_order"],
             limit_value=d["limit_value"],
-            delta_estimate=d["delta_estimate"],
-            p_vector=tuple(d.get("p_vector", ())),
-            q_vector=tuple(d.get("q_vector", ())),
-            identified=bool(d.get("identified", True)),
+            delta_estimate=d.get("delta_estimate") or {},
+            p_vector=_restore_pq(d.get("p_vector")),
+            q_vector=_restore_pq(d.get("q_vector")),
+            identified=d.get("identified") or {},
             walk_type=int(d.get("walk_type", 1)),
-            constant=d.get("constant"),
             extended_metrics=d.get("extended_metrics", {}),
         )

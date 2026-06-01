@@ -7,7 +7,7 @@ import mpmath as mp
 import ramanujantools as rt
 from ramanujantools import Limit, Position
 from ramanujantools.cmf import CMF
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Union
 
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
@@ -25,26 +25,31 @@ class Searchable(ABC):
     A template for a general searchable object (e.g., shards)
     """
 
-    def __init__(self, cmf: CMF, constant: Constant, shift: Position, use_inv_t: bool, cmf_name: str):
+    def __init__(self, cmf: CMF, constants: Union[Constant, List[Constant]], shift: Position, use_inv_t: bool, cmf_name: str):
         """
         :param cmf: The CMF to search in.
-        :param constant: A constant to search for.
+        :param constants: A constant or list of constants to search for.
         :param shift: The shift in the starting point of the CMF.
         :param use_inv_t: If true, use inverse of the walk matrix to compute the limit.
         :param cmf_name: The name of the CMF.
         """
         self.cache = FrequencyList(max_size=100)
         self.cmf = cmf
-        self.const = constant
+        self.consts: List[Constant] = constants if isinstance(constants, list) else [constants]
         self.shift = shift
         self.use_inv_t = use_inv_t
         self.symbols = list(self.shift.keys())
         self.cmf_name = cmf_name
 
+    @property
+    def const(self) -> Constant:
+        """Backward-compatible accessor — returns the first (primary) constant."""
+        return self.consts[0]
+
     @classmethod
     @abstractmethod
-    def from_cmf_data(cls, cmf_data: CMFData, constant: Constant, *args, **kwargs):
-        return cls(cmf_data.cmf, constant, cmf_data.shift, cmf_data.use_inv_t, cmf_data.cmf_name)
+    def from_cmf_data(cls, cmf_data: CMFData, constants: Union[Constant, List[Constant]], *args, **kwargs):
+        return cls(cmf_data.cmf, constants, cmf_data.shift, cmf_data.use_inv_t, cmf_data.cmf_name)
 
     def is_unconstrained(self) -> bool:
         """

@@ -10,7 +10,8 @@ from ramanujantools import Position
 
 class pFq(Formatter):
     def __init__(self,
-                 const: str | Constant, p: int, q: int, z: sp.Expr | int, shifts: Optional[list] = None,
+                 const: Union[str, Constant, List[Union[str, Constant]]],
+                 p: int, q: int, z: sp.Expr | int, shifts: Optional[list] = None,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
                  use_inv_t: bool = None
@@ -50,6 +51,13 @@ class pFq(Formatter):
         :param data: The JSON string representation of the pFq (only attributes).
         :return: A pFq object.
         """
+        data = dict(data)
+        # Normalise to a list under the 'const' key (pFq.__init__ param name).
+        # Old format: {'const': "log2", ...}  → const=["log2"]
+        # New format: {'consts': ["log2", "pi"], ...} → const=["log2", "pi"]
+        if 'consts' in data:
+            data['const'] = data.pop('consts')
+        # 'const' stays as-is (may be str or list).
         data['z'] = sp.sympify(data['z']) if isinstance(data['z'], str) else data['z']
         data['shifts'] = cls._shift_from_json(data['shifts'])
         data['selected_start_points'] = cls._selected_start_points_from_json(data['selected_start_points'])
@@ -83,4 +91,4 @@ class pFq(Formatter):
         return f'<{self.__class__.__name__}: {self.__repr__()}>'
 
     def __hash__(self):
-        return hash((self.p, self.q, self.z, super().__hash__()))
+        return hash((self.p, self.q, str(self.z), super().__hash__()))

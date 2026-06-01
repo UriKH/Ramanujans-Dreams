@@ -81,14 +81,18 @@ The system is desigend as a modular pipeline:
   * Under `"exact"` / `"heuristic"` alone, only the matching knob applies.
   * `extractor.py`, `main_example.py`, `benchmark_extraction.py`, `ray_extractor.py` comment, and `test_extractor.py` updated; 430 tests pass.
 
-- [ ] **Multi-constant shards** — sample trajectories once per CMF and evaluate all target constants on the same trajectory.
-  * **Motivation:** searching N constants in the same CMF currently runs extraction and trajectory walks N times independently.  Sharing the walk (constant-independent) and only branching at delta/p-q/identified (constant-dependent) eliminates redundant computation.
-  * **API change (loading stage):** CMF formatters (`pFq`, etc.) accept a single constant or a list of constants instead of binding to exactly one.  The pipeline groups CMFs by structure (family + params + shift) and creates one multi-constant `Shard` per unique CMF.  Constants not listed in `System.run()` are silently dropped at load time.
-  * **Shard / Searchable:** hold a list of `Constant` objects instead of one.  The trajectory matrix walk runs once per (trajectory, shard) pair.  Per-constant attributes — `delta`, `p vector`, `q vector`, `identified` — are stored as `{const_name: value}` dicts.
-  * **JSONL format:** one file per shard (no longer one per constant per shard).  `delta` and identification fields become nested dicts keyed by constant name.  `search_data.py` must be updated to browse and display this structure.
-  * **Analysis stage:** a shard passes if it identifies *any* of its constants above the threshold.
-  * **`search_data.py`:** update `list-shards`, `list-trajectories`, `show-trajectory` subcommands to reflect multi-constant records.
-  * **Design decision (2026-06-01):** confirmed by user — single JSONL per shard, delta stored as `{const_name: value}`.
+- [x] 2026-06-01 — **Multi-constant shards** — sample trajectories once per CMF and evaluate all target constants on the same trajectory.
+  * **Motivation:** searching N constants in the same CMF currently ran extraction and trajectory walks N times independently.  Sharing the walk (constant-independent) and only branching at delta/p-q/identified (constant-dependent) eliminates redundant computation.
+  * **API change (loading stage):** CMF formatters (`pFq`, `MeijerG`, `BaseCMF`) now accept a single constant or a list of constants.  `Formatter.__init__` stores `self.consts: List[str]`; `self.const` is a backward-compatible property returning `consts[0]`.  `_to_json_obj` emits `consts` key (list); `_from_json_obj` reads both old `const` and new `consts`.  Constants not listed in `System.run()` are logged as a warning per CMF.
+  * **Shard / Searchable:** `Shard.__init__` now takes `constants: Union[Constant, List[Constant]]`; `self.consts: List[Constant]` stores all; `self.const` property returns `consts[0]`.  The `from_cmf_data` / `from_matrices` class methods updated accordingly.
+  * **Extraction:** `ShardExtractorMod.execute()` deduplicates `CMFData` objects by identity — the same CMF is extracted once with all its constants bundled, producing one set of multi-constant `Shard` objects placed under every constituent constant in the output dict.
+  * **Trajectory walk shared:** `TrajectoryAttributesHandler.compute_for_constant(constant)` evaluates delta / p / q / identified for a new constant by swapping `_constant` and clearing only per-constant caches while reusing the cached walk matrices.  `build_trajectory_dto(..., constants=...)` accepts `Constant` objects (using `c.name` as the dict key) and calls `compute_for_constant` for each.
+  * **JSONL format:** one flat file per shard at `EXPORT_SEARCH_RESULTS/<shard_id>.jsonl` (no constant subdirectory).  `delta_estimate`, `p_vector`, `q_vector`, `identified` are `{const_name: value}` dicts.  The `constant` field removed from `TrajectoryDTO`.
+  * **Analysis stage:** processes each unique shard once (deduplicated by shard_id), computes delta for all shard constants per trajectory, keeps shard under each constant that passes `IDENTIFY_THRESHOLD`.
+  * **Search stage:** `SearcherModV1` accepts the full `Dict[Constant, List[Shard]]` priorities dict; deduplicates shards and computes delta only for the subset of constants that were identified in analysis.
+  * **`search_data.py`:** updated — flat directory scan, `list-shards` shows all constants in the JSONL, `list-trajectories` / `show-trajectory` display per-constant delta/identified dicts.
+  * **Summary / system:** flat dir scan in `_collect_shard_stats`, `_ShardStats.add()` handles dict-valued fields, `__best_trajectory_record` returns `(record, delta_val)` tuple.
+  * **429 tests pass** (1 warning only).  Committed 2026-06-01.
 
 - [ ] **Shard streaming + RAM cap during extraction.** See full issue spec in [`context/shard_extraction/ISSUE_RAM_STREAMING.md`](shard_extraction/ISSUE_RAM_STREAMING.md).  Short version: `out` (witnesses) + `counts` (Good-Turing) are held entirely in memory — 5–7 GB for a 1M-shard run, forced shutdown loses everything.  Chosen fix: stream witnesses to `shards.jsonl` every 10k shards + compact `seen: Set[bytes]` for dedup; `counts` stays exact (it is already per-phase).  **RAM policy (general):** any stage accumulating large in-memory dicts should checkpoint periodically — ask "what happens on forced shutdown after 2 hours?" before finalising any long-running stage.
 
@@ -130,7 +134,7 @@ The system is desigend as a modular pipeline:
   - [ ] A point in each shard - current methods just enumerate points and that is how we get each shard and a point in it. Given a Shard we want to find an integer coordinates point in it efficiently.
   - [ ] Shard symmetry utilization - shards could be considered symmetric under certain conditions, we should use it to avoid redundant computations. For CMFs in the pFq family we know something about their symmetric nature. See `SYMMETRIES.md` (if empty remind me to create it).
 - [ ] Add advanced search algorithms. See `SEARCH_ALGORITHMS.md` (if empty remind me to create it).
-- [ ] Support search of multiple constants in the same CMF simultaneously — now tracked as an active task in Near-Term Tasks.
+- [x] Support search of multiple constants in the same CMF simultaneously — implemented 2026-06-01; see Near-Term Tasks completed entry.
 - [ ] Discuss and develop how to deal with forced shutdowns and gracefull exist - ensuring data will not be completely lost.
 
 ---

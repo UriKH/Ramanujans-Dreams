@@ -12,7 +12,8 @@ import sympy as sp
 
 class BaseCMF(Formatter):
     def __init__(self,
-                 const: str | Constant, cmf_name: str, cmf: CMF, shifts: Optional[list] = None,
+                 const: Union[str, Constant, List[Union[str, Constant]]],
+                 cmf_name: str, cmf: CMF, shifts: Optional[list] = None,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
                  use_inv_t: bool = None
@@ -45,6 +46,10 @@ class BaseCMF(Formatter):
         :param data: The JSON string representation of the pFq (only attributes).
         :return: A BaseCMF object.
         """
+        data = dict(data)
+        # Normalise: new 'consts' list → 'const' param; old 'const' str stays.
+        if 'consts' in data:
+            data['const'] = data.pop('consts')
         data['cmf'] = CMF(
             matrices={sp.sympify(k): Matrix(sp.sympify(v)) for k, v in data['cmf'].items()},
             validate=False

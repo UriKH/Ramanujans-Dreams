@@ -2,10 +2,15 @@
 Markdown summary writer.
 
 Reads the JSONL outputs of a completed pipeline run — the per-shard
-``<EXPORT_SEARCH_RESULTS>/<constant>/<shard_id>.jsonl`` trajectory store,
-plus the optional ``<EXPORT_CMFS>/<constant>/cmfs.jsonl`` metadata file —
-and renders a single ``summary.md`` describing what the run scanned,
-what was found, and where the best trajectories live.
+``<EXPORT_SEARCH_RESULTS>/<shard_id>.jsonl`` trajectory store (flat
+directory, one file per shard), plus the optional
+``<EXPORT_CMFS>/<constant>/cmfs.jsonl`` metadata file — and renders a
+single ``summary.md`` describing what the run scanned, what was found,
+and where the best trajectories live.
+
+Each JSONL record stores per-constant attributes as dicts keyed by
+constant name (``delta_estimate``, ``identified``, etc.), so a single
+file covers all constants searched in that shard.
 
 This-run filtering
 ==================
@@ -16,8 +21,7 @@ time — the file persists because the writer always appends).  Callers
 that want the summary to describe **this run only** should pass
 ``this_run_shards`` (a mapping from constant name to the set of shard
 ids the current pipeline knows about).  Files whose shard_id isn't in
-that set are silently skipped; per-constant rows are likewise omitted
-when no shards passed the filter.  Passing ``None`` (the default) keeps
+that set are silently skipped.  Passing ``None`` (the default) keeps
 the legacy behaviour of summarising every file on disk.
 
 Designed to be safe to call after a partial / failed run: missing
@@ -67,20 +71,32 @@ class _ShardStats:
         # ``EXPORT_CMFS`` sidecar is available.
         self.interior_point: Optional[Tuple[int, ...]] = None
 
-    def add(self, record: dict) -> None:
+    def add(self, record: dict, constant_name: Optional[str] = None) -> None:
+        """Accumulate one trajectory record.
+
+        *constant_name* is used to index into per-constant dict fields
+        (``delta_estimate``, ``identified``).  When ``None``, falls back to
+        reading those fields as plain scalars (legacy single-constant format).
+        """
         self.trajectories += 1
-        if bool(record.get("identified")):
+        identified_raw = record.get("identified")
+        if isinstance(identified_raw, dict) and constant_name:
+            identified_val = identified_raw.get(constant_name, False)
+        else:
+            identified_val = identified_raw
+        if bool(identified_val):
             self.identified += 1
-        delta = _finite_float(record.get("delta_estimate"))
+
+        delta_raw = record.get("delta_estimate")
+        if isinstance(delta_raw, dict) and constant_name:
+            delta_raw = delta_raw.get(constant_name)
+        delta = _finite_float(delta_raw)
         if delta is not None:
             if delta > 0:
                 self.positive_delta += 1
             if self.best_delta is None or delta > self.best_delta:
                 self.best_delta = delta
                 self.best_trajectory_id = record.get("trajectory_id")
-                # ``start_point`` / ``direction`` may be absent on patch-only
-                # trajectories (no base record ever written) — surface ``None``
-                # in that case rather than crashing the summary.
                 self.best_start = record.get("start_point")
                 self.best_direction = record.get("direction")
 
@@ -137,36 +153,51 @@ def _load_shard_metadata(
     export_cmfs_root: Optional[str], constant_name: str
 ) -> Dict[str, dict]:
     """Return ``{shard_id: shard_dict}`` from every ``*__shards.jsonl``
-    under ``<root>/<safe_const>/``.
+    under ``<root>/<safe_const>/`` and, as a fallback, any other constant
+    subdirectory under *export_cmfs_root*.
 
-    Used to surface the per-shard ``interior_point`` (a witness integer
-    coordinate from the extractor) so reviewers can sanity-check what
-    starting point the search actually ran from.  Missing directory or
-    files degrade silently.
+    With multi-constant shards, shard records may only be written under the
+    primary constant's directory.  If the requested constant's directory
+    yields nothing, we search the other subdirectories so that the
+    ``interior_point`` annotation still appears in the summary.
+    Missing directories / files degrade silently.
     """
-    if not export_cmfs_root:
+    if not export_cmfs_root or not os.path.isdir(export_cmfs_root):
         return {}
+
+    def _read_dir(const_dir: str) -> Dict[str, dict]:
+        result: Dict[str, dict] = {}
+        if not os.path.isdir(const_dir):
+            return result
+        for fname in sorted(os.listdir(const_dir)):
+            if not fname.endswith("__shards.jsonl"):
+                continue
+            path = os.path.join(const_dir, fname)
+            with open(path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    shard_id = record.get("shard_id")
+                    if shard_id:
+                        result[shard_id] = record
+        return result
+
     safe_const = "".join(c for c in constant_name if c.isalnum() or c in ("-", "_"))
-    const_dir = os.path.join(export_cmfs_root, safe_const)
-    if not os.path.isdir(const_dir):
-        return {}
-    out: Dict[str, dict] = {}
-    for fname in sorted(os.listdir(const_dir)):
-        if not fname.endswith("__shards.jsonl"):
-            continue
-        path = os.path.join(const_dir, fname)
-        with open(path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                shard_id = record.get("shard_id")
-                if shard_id:
-                    out[shard_id] = record
+    out = _read_dir(os.path.join(export_cmfs_root, safe_const))
+
+    if not out:
+        # Fallback: search all constant subdirectories.
+        for entry in sorted(os.listdir(export_cmfs_root)):
+            if entry == safe_const:
+                continue
+            candidate = _read_dir(os.path.join(export_cmfs_root, entry))
+            out.update(candidate)
+
     return out
 
 
@@ -178,14 +209,15 @@ def _collect_shard_stats(
     search_results_root: str,
     this_run_shards: Optional[Mapping[str, Set[str]]] = None,
 ) -> Dict[str, Dict[str, List[_ShardStats]]]:
-    """Walk the search-results tree and aggregate per-shard stats.
+    """Walk the flat search-results directory and aggregate per-shard stats.
 
-    When ``this_run_shards`` is provided, it must map constant name to a
-    set of shard ids that the current pipeline run actually scanned.  Any
-    JSONL file whose shard id is *not* in that set is treated as an
-    orphan from a previous run and silently dropped.  Constants absent
-    from the map are also skipped (so an old "log-2" data dir won't leak
-    into a "pi" summary).
+    JSONL files now live directly in *search_results_root* (one file per
+    shard, no constant subdirectory).  Each record has per-constant fields:
+    ``delta_estimate`` and ``identified`` are dicts keyed by constant name.
+
+    When ``this_run_shards`` is provided it must map constant name to a set
+    of shard ids the current run touched.  JSONL files not covered by the
+    filter are skipped (orphan protection).
 
     Returns ``{constant_name: {cmf_id: [shard_stats, ...]}}``.
     """
@@ -193,41 +225,52 @@ def _collect_shard_stats(
     if not os.path.isdir(search_results_root):
         return out
 
-    for const_name in sorted(os.listdir(search_results_root)):
-        const_dir = os.path.join(search_results_root, const_name)
-        if not os.path.isdir(const_dir):
-            continue
-        if this_run_shards is not None and const_name not in this_run_shards:
-            # No shards searched under this constant in the current run —
-            # the whole subtree is stale.
-            continue
-        allowed = this_run_shards.get(const_name) if this_run_shards is not None else None
-        for fname in sorted(os.listdir(const_dir)):
-            if not fname.endswith(".jsonl"):
-                continue
-            shard_id = fname[: -len(".jsonl")]
-            if allowed is not None and shard_id not in allowed:
-                # Orphan from an earlier run — extraction sampling is
-                # stochastic, so a shard discovered last time may not
-                # appear this time.  Skip it cleanly.
-                continue
-            # ``shard_id`` has the structural form ``<cmf_id>__<hash>``; the
-            # cmf id is everything before the trailing hash segment.  Falls
-            # back to the whole string for legacy / unstructured ids.
-            cmf_id = shard_id.rsplit("__", 1)[0] if "__" in shard_id else shard_id
+    # Build the allowed-shard-ids superset (union across all constants).
+    all_allowed: Optional[Set[str]] = None
+    if this_run_shards is not None:
+        all_allowed = set()
+        for ids in this_run_shards.values():
+            all_allowed.update(ids)
 
-            merged = load_seen_trajectories(os.path.join(const_dir, fname))
-            if not merged:
+    for fname in sorted(os.listdir(search_results_root)):
+        if not fname.endswith(".jsonl"):
+            continue
+        # Skip non-shard files (e.g. summary.md itself, though it's .md).
+        shard_id = fname[: -len(".jsonl")]
+        if all_allowed is not None and shard_id not in all_allowed:
+            continue
+
+        cmf_id = shard_id.rsplit("__", 1)[0] if "__" in shard_id else shard_id
+        merged = load_seen_trajectories(os.path.join(search_results_root, fname))
+        if not merged:
+            continue
+
+        # Determine which constants appear in this shard's records.
+        const_names_in_file: Set[str] = set()
+        for record in merged.values():
+            delta = record.get("delta_estimate")
+            if isinstance(delta, dict):
+                const_names_in_file.update(delta.keys())
+
+        # If this_run_shards is given, restrict to its constant keys.
+        if this_run_shards is not None:
+            const_names_in_file = const_names_in_file & set(this_run_shards.keys())
+            # Also include constants for which shard_id is listed even if the
+            # JSONL has no record yet for that constant (e.g. analyzed but
+            # threshold not met — will be backfilled as empty below).
+            for c_name, ids in this_run_shards.items():
+                if shard_id in ids:
+                    const_names_in_file.add(c_name)
+
+        for const_name in sorted(const_names_in_file):
+            if this_run_shards is not None and shard_id not in this_run_shards.get(const_name, set()):
                 continue
             stats = _ShardStats(shard_id, cmf_id, const_name)
             for record in merged.values():
-                stats.add(record)
+                stats.add(record, constant_name=const_name)
             out[const_name][cmf_id].append(stats)
 
-    # Shards extracted this run but not yet searched (analysis filtered them
-    # out, or the search stage hasn't run) have no JSONL file.  Add an empty
-    # _ShardStats row for each so the summary still lists them — with zero
-    # trajectories and no best delta — rather than silently omitting them.
+    # Backfill empty rows for extracted-but-not-yet-searched shards.
     if this_run_shards is not None:
         for const_name, allowed in this_run_shards.items():
             seen_ids = {
@@ -437,9 +480,10 @@ def build_summary_markdown(
     if export_cmfs_root:
         header.append(f"CMF-metadata root: `{export_cmfs_root}`")
     if this_run_shards is not None:
-        n_total = sum(len(v) for v in this_run_shards.values())
+        # Unique shard IDs (a shard may appear under multiple constants).
+        unique_shards = {sid for ids in this_run_shards.values() for sid in ids}
         header.append(
-            f"Scope: this run only ({n_total} shard(s) across "
+            f"Scope: this run only ({len(unique_shards)} shard(s) across "
             f"{len(this_run_shards)} constant(s))"
         )
     header.append("")

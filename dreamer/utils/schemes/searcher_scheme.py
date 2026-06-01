@@ -51,20 +51,45 @@ class SearcherModScheme(Module):
     """
     A Scheme for all search modules.
     """
-    def __init__(self, searchables: List[Searchable],
+    def __init__(self, priorities,
                  use_LIReC: bool = True,
                  name: Optional[str] = None,
                  description: Optional[str] = None,
                  version: Optional[str] = None):
         """
-        :param searchables: A list of all searchables to search in.
+        :param priorities: Either a ``Dict[Constant, List[Searchable]]`` mapping
+            each constant to the shards that identified it (the modern interface),
+            or a bare ``List[Searchable]`` for backward compatibility.
         :param use_LIReC: While searching, identify constants using LIReC
         :param name: Optional - the name of the module.
         :param description: Optional - module description.
         :param version: Optional - the module version.
         """
         super().__init__(name, description, version)
-        self.searchables = searchables
+        if isinstance(priorities, dict):
+            self.priorities: Dict = priorities
+            # Flat list for backward-compatible subclasses that read self.searchables.
+            seen: set = set()
+            flat: List[Searchable] = []
+            for shards in priorities.values():
+                for s in shards:
+                    if id(s) not in seen:
+                        seen.add(id(s))
+                        flat.append(s)
+            self.searchables: List[Searchable] = flat
+        else:
+            # Legacy path: bare list — wrap in a synthetic dict keyed by primary const.
+            # Guard against unhashable or mock const values (e.g. tests using SimpleNamespace).
+            self.searchables = list(priorities)
+            from collections import defaultdict
+            d: Dict = defaultdict(list)
+            for s in self.searchables:
+                try:
+                    d[s.const].append(s)
+                except TypeError:
+                    # const is not hashable (e.g. a mock SimpleNamespace) — use object id.
+                    d[id(s.const)].append(s)
+            self.priorities = dict(d)
         self.use_LIReC = use_LIReC
 
     @abstractmethod

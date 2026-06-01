@@ -123,7 +123,7 @@ def build_shard_dto(shard: Shard) -> ShardDTO:
         cmf_id=cmf_id,
         shard_encoding=encoding,
         dimensionality=dimensionality,
-        found_constants=[shard.const.name],
+        found_constants=[c.name for c in shard.consts],
         interior_point=interior_point,
     )
 

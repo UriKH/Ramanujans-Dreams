@@ -144,7 +144,7 @@ class TestDTOFieldOrdering:
 class TestDTOSerializationRoundTrips:
 
     def test_trajectory_dto_round_trip(self):
-        """JSON serialise → deserialise → fields are equal and tuples are tuples."""
+        """JSON serialise → deserialise → fields are equal."""
         dto = TrajectoryDTO(
             trajectory_id="abc123",
             cmf_id="4F3",
@@ -154,26 +154,24 @@ class TestDTOSerializationRoundTrips:
             recurrence_relation="a(n)*f(n) + b(n)*f(n-1) = 0",
             recurrence_order=1,
             limit_value=2.718,
-            delta_estimate=1.5,
-            p_vector=(1, 0),
-            q_vector=(0, 1),
+            delta_estimate={"e": 1.5, "log2": 0.7},
+            p_vector={"e": (1, 0), "log2": (2, 1)},
+            q_vector={"e": (0, 1), "log2": (1, 0)},
+            identified={"e": True, "log2": False},
             walk_type=2,
-            constant="exp(1)",
         )
         restored = TrajectoryDTO.from_dict(json.loads(dto.to_json_line()))
 
         assert restored == dto
         assert isinstance(restored.start_point, tuple)
         assert isinstance(restored.direction, tuple)
-        assert isinstance(restored.p_vector, tuple)
-        assert isinstance(restored.q_vector, tuple)
-        # New reconstruction-critical fields survive the round trip:
+        assert isinstance(restored.delta_estimate, dict)
+        assert isinstance(restored.p_vector, dict)
+        # New reconstruction-critical field survives the round trip:
         assert restored.walk_type == 2
-        assert restored.constant == "exp(1)"
 
-    def test_trajectory_dto_walk_type_and_constant_defaults(self):
-        """Older JSONL records missing ``walk_type``/``constant`` deserialize
-        with safe defaults (``walk_type=1`` for back-compat, ``constant=None``)."""
+    def test_trajectory_dto_walk_type_default(self):
+        """Older JSONL records missing ``walk_type`` deserialise with default 1."""
         d = {
             "trajectory_id": "old",
             "cmf_id": "c",
@@ -183,32 +181,11 @@ class TestDTOSerializationRoundTrips:
             "recurrence_relation": "",
             "recurrence_order": 1,
             "limit_value": 1.0,
-            "delta_estimate": 1.0,
+            "delta_estimate": {"e": 1.0},
+            "identified": {"e": True},
         }
         restored = TrajectoryDTO.from_dict(d)
         assert restored.walk_type == 1
-        assert restored.constant is None
-
-    def test_trajectory_dto_constant_sympify_round_trip(self):
-        """``constant`` is sympy-parseable: ``sp.sympify(dto.constant)`` recovers
-        an expression equal to the original."""
-        original = sp.log(2)
-        dto = TrajectoryDTO(
-            trajectory_id="t",
-            cmf_id="c",
-            shard_id="s",
-            start_point=(0,),
-            direction=(1,),
-            recurrence_relation="",
-            recurrence_order=1,
-            limit_value=0.69,
-            delta_estimate=1.0,
-            p_vector=(),
-            q_vector=(),
-            constant=str(original),
-        )
-        restored = TrajectoryDTO.from_dict(json.loads(dto.to_json_line()))
-        assert sp.sympify(restored.constant) == original
 
     def test_trajectory_dto_round_trip_with_extended_metrics(self):
         """extended_metrics survive the round-trip intact."""
@@ -221,9 +198,9 @@ class TestDTOSerializationRoundTrips:
             recurrence_relation="",
             recurrence_order=2,
             limit_value=3.14,
-            delta_estimate=1.1,
-            p_vector=(),
-            q_vector=(),
+            delta_estimate={"e": 1.1},
+            p_vector={"e": ()},
+            q_vector={"e": ()},
             extended_metrics={"eigenvalues": ["1+0j", "0.5"], "spectral_gap": 0.5},
         )
         restored = TrajectoryDTO.from_dict(json.loads(dto.to_json_line()))
@@ -266,8 +243,8 @@ class TestDTOSerializationRoundTrips:
         restored = CmfFamilyDTO.from_dict(json.loads(dto.to_json_line()))
         assert restored == dto
 
-    def test_trajectory_dto_empty_p_q_vectors_default(self):
-        """Omitting p_vector / q_vector in the dict defaults to empty tuples."""
+    def test_trajectory_dto_missing_p_q_vectors(self):
+        """Omitting p_vector / q_vector in the dict produces None."""
         d = {
             "trajectory_id": "t",
             "cmf_id": "c",
@@ -277,11 +254,12 @@ class TestDTOSerializationRoundTrips:
             "recurrence_relation": "",
             "recurrence_order": 1,
             "limit_value": 1.0,
-            "delta_estimate": 1.0,
+            "delta_estimate": {"e": 1.0},
+            "identified": {"e": True},
         }
         dto = TrajectoryDTO.from_dict(d)
-        assert dto.p_vector == ()
-        assert dto.q_vector == ()
+        assert dto.p_vector is None
+        assert dto.q_vector is None
         assert dto.extended_metrics == {}
 
 
@@ -541,9 +519,8 @@ class TestBuildTrajectoryDto:
         """build_trajectory_dto must fill every Tier-1 field.
 
         ``recurrence_relation``, ``recurrence_order``, ``limit_value`` and
-        ``delta_estimate`` are Tier-1 — derived once here, on the main
-        thread, before any worker runs.  ``extended_metrics`` stays empty
-        until Tier-2 workers (if any) write to it.
+        ``delta_estimate`` (now a dict) are Tier-1.  ``extended_metrics``
+        stays empty until Tier-2 workers (if any) write to it.
         """
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
@@ -555,16 +532,15 @@ class TestBuildTrajectoryDto:
         assert dto.recurrence_order >= 1
         assert isinstance(dto.recurrence_relation, str)
         assert dto.recurrence_relation != ""
-        # ``delta_estimate`` is either finite or the documented -inf sentinel
-        # (LIReC may fail to identify ``e`` from this small 1F1 trajectory).
-        assert isinstance(dto.delta_estimate, float)
-        assert abs(dto.delta_estimate) < 1e9 or dto.delta_estimate == float("-inf")
+        # ``delta_estimate`` is a dict; each value is finite or the -inf sentinel.
+        assert isinstance(dto.delta_estimate, dict)
+        for delta_val in dto.delta_estimate.values():
+            assert abs(delta_val) < 1e9 or delta_val == float("-inf")
         assert abs(float(dto.limit_value)) < 1e15
         assert dto.extended_metrics == {}   # workers haven't run yet
 
-    def test_p_and_q_vectors_are_tuples_or_none(self, minimal_handler, symbols):
-        """``build_trajectory_dto`` stores p/q as tuples — or ``None`` when
-        identification failed (mirrors ``handler.p_vector()``)."""
+    def test_p_and_q_vectors_are_dicts_or_none(self, minimal_handler, symbols):
+        """``build_trajectory_dto`` stores p/q as dicts (const→tuple) or ``None``."""
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         dto = build_trajectory_dto(
@@ -574,12 +550,13 @@ class TestBuildTrajectoryDto:
         )
         if dto.p_vector is None:
             assert dto.q_vector is None
-            assert dto.identified is False
         else:
-            assert isinstance(dto.p_vector, tuple)
-            assert isinstance(dto.q_vector, tuple)
-            assert len(dto.p_vector) == minimal_handler.traj_size()
-            assert len(dto.q_vector) == minimal_handler.traj_size()
+            assert isinstance(dto.p_vector, dict)
+            assert isinstance(dto.q_vector, dict)
+            for pv in dto.p_vector.values():
+                if pv is not None:
+                    assert isinstance(pv, tuple)
+                    assert len(pv) == minimal_handler.traj_size()
 
 
 # ---------------------------------------------------------------------------
@@ -695,9 +672,9 @@ class TestExtendedMetricsMutation:
             recurrence_relation="",
             recurrence_order=1,
             limit_value=1.0,
-            delta_estimate=1.0,
-            p_vector=(),
-            q_vector=(),
+            delta_estimate={"e": 1.0},
+            p_vector={"e": ()},
+            q_vector={"e": ()},
         )
         dto.extended_metrics["eigenvalues"] = ["1+0j"]
         assert dto.extended_metrics["eigenvalues"] == ["1+0j"]
@@ -713,9 +690,9 @@ class TestExtendedMetricsMutation:
             recurrence_relation="",
             recurrence_order=1,
             limit_value=1.0,
-            delta_estimate=1.0,
-            p_vector=(),
-            q_vector=(),
+            delta_estimate={"e": 1.0},
+            p_vector={"e": ()},
+            q_vector={"e": ()},
         )
         with pytest.raises(Exception):  # FrozenInstanceError is a dataclasses internal
             dto.trajectory_id = "new_id"
@@ -736,9 +713,10 @@ def _make_dto(trajectory_id: str = "t1", delta: float = 1.0) -> TrajectoryDTO:
         recurrence_relation="a*f(n) + b*f(n-1) = 0",
         recurrence_order=1,
         limit_value=2.7,
-        delta_estimate=delta,
-        p_vector=(),
-        q_vector=(),
+        delta_estimate={"e": delta},
+        p_vector={"e": ()},
+        q_vector={"e": ()},
+        identified={"e": True},
     )
 
 
@@ -757,7 +735,7 @@ class TestJsonlRoundTrip:
         ids = [r["trajectory_id"] for r in records]
         assert ids == ["a", "b", "c"]
         deltas = [r["delta_estimate"] for r in records]
-        assert deltas == [1.0, 2.0, 3.0]
+        assert deltas == [{"e": 1.0}, {"e": 2.0}, {"e": 3.0}]
 
     def test_jsonl_export_then_dto_from_dict(self, tmp_path):
         """Records returned by Importer can be rebuilt into typed DTOs."""
@@ -1123,74 +1101,81 @@ class TestConditionalAttributes:
 # ---------------------------------------------------------------------------
 
 class TestBestTrajectoryRecord:
-    """Verifies the system stage's JSONL scan picks the maximum delta."""
+    """Verifies the system stage's JSONL scan picks the maximum delta.
+
+    JSONL files now live in the flat EXPORT_SEARCH_RESULTS dir (no constant
+    subdir).  ``delta_estimate`` is a ``{const_name: float}`` dict.
+    ``__best_trajectory_record`` returns ``(record, delta_float)`` or
+    ``(None, None)``.
+    """
 
     def test_finds_max_delta_across_files(self, tmp_path, monkeypatch):
         from dreamer.configs.system import sys_config
         from dreamer.system.system import System
 
         monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
-        const_dir = tmp_path / "e"
-        const_dir.mkdir()
 
-        # Two shards, three trajectories each — best delta lives in shard B.
-        (const_dir / "cmfA__sh1.jsonl").write_text(
-            json.dumps({"trajectory_id": "a1", "delta_estimate": 1.2,
+        # Two shards, three trajectories — best delta lives in shard B.
+        (tmp_path / "cmfA__sh1.jsonl").write_text(
+            json.dumps({"trajectory_id": "a1", "delta_estimate": {"e": 1.2},
                         "start_point": [0, 0], "direction": [1, 0]}) + "\n"
-            + json.dumps({"trajectory_id": "a2", "delta_estimate": 2.5,
+            + json.dumps({"trajectory_id": "a2", "delta_estimate": {"e": 2.5},
                           "start_point": [0, 1], "direction": [1, 0]}) + "\n"
         )
-        (const_dir / "cmfB__sh2.jsonl").write_text(
-            json.dumps({"trajectory_id": "b1", "delta_estimate": 4.7,
+        (tmp_path / "cmfB__sh2.jsonl").write_text(
+            json.dumps({"trajectory_id": "b1", "delta_estimate": {"e": 4.7},
                         "start_point": [2, 2], "direction": [0, 1]}) + "\n"
         )
 
         class _Const:
             name = "e"
-        record = System._System__best_trajectory_record(_Const())
+        record, delta_val = System._System__best_trajectory_record(_Const())
         assert record is not None
         assert record["trajectory_id"] == "b1"
-        assert record["delta_estimate"] == 4.7
+        assert delta_val == pytest.approx(4.7)
 
     def test_returns_none_when_dir_missing(self, tmp_path, monkeypatch):
         from dreamer.configs.system import sys_config
         from dreamer.system.system import System
 
-        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        # Use a path that doesn't exist as EXPORT_SEARCH_RESULTS.
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path / "nonexistent"))
 
         class _Const:
             name = "missing_const"
-        assert System._System__best_trajectory_record(_Const()) is None
+        record, delta_val = System._System__best_trajectory_record(_Const())
+        assert record is None
+        assert delta_val is None
 
     def test_returns_none_when_no_jsonl_files(self, tmp_path, monkeypatch):
         from dreamer.configs.system import sys_config
         from dreamer.system.system import System
 
         monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
-        (tmp_path / "e").mkdir()
-        (tmp_path / "e" / "stray.txt").write_text("not a jsonl file")
+        (tmp_path / "stray.txt").write_text("not a jsonl file")
 
         class _Const:
             name = "e"
-        assert System._System__best_trajectory_record(_Const()) is None
+        record, delta_val = System._System__best_trajectory_record(_Const())
+        assert record is None
+        assert delta_val is None
 
     def test_skips_records_with_no_delta(self, tmp_path, monkeypatch):
         from dreamer.configs.system import sys_config
         from dreamer.system.system import System
 
         monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
-        const_dir = tmp_path / "e"
-        const_dir.mkdir()
-        (const_dir / "f.jsonl").write_text(
+        (tmp_path / "f.jsonl").write_text(
             json.dumps({"trajectory_id": "no_delta"}) + "\n"
-            + json.dumps({"trajectory_id": "has_delta", "delta_estimate": 1.0,
+            + json.dumps({"trajectory_id": "has_delta", "delta_estimate": {"e": 1.0},
                           "start_point": [0], "direction": [1]}) + "\n"
         )
 
         class _Const:
             name = "e"
-        record = System._System__best_trajectory_record(_Const())
+        record, delta_val = System._System__best_trajectory_record(_Const())
         assert record["trajectory_id"] == "has_delta"
+        assert delta_val == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1495,6 +1480,7 @@ class TestMergeOnRead:
         sink, items = self._collecting_sink()
         SearcherModV1([simple_shard], use_LIReC=False)._produce(
             shard=simple_shard,
+            identified_consts=list(simple_shard.consts),
             cmf_id=cmf_id,
             shard_id=shard_id,
             shard_encoding_str=enc_str,
@@ -1549,6 +1535,7 @@ class TestMergeOnRead:
         sink, items = self._collecting_sink()
         SearcherModV1([simple_shard], use_LIReC=False)._produce(
             shard=simple_shard,
+            identified_consts=list(simple_shard.consts),
             cmf_id=cmf_id,
             shard_id=shard_id,
             shard_encoding_str=enc_str,
@@ -1571,6 +1558,7 @@ class TestMergeOnRead:
         sink, items = self._collecting_sink()
         SearcherModV1([simple_shard], use_LIReC=False)._produce(
             shard=simple_shard,
+            identified_consts=list(simple_shard.consts),
             cmf_id=cmf_id,
             shard_id=shard_id,
             shard_encoding_str=enc_str,
@@ -1599,6 +1587,7 @@ class TestMergeOnRead:
         sink, _items = self._collecting_sink()
         SearcherModV1([simple_shard], use_LIReC=False)._produce(
             shard=simple_shard,
+            identified_consts=list(simple_shard.consts),
             cmf_id=cmf_id,
             shard_id=shard_id,
             shard_encoding_str=enc_str,
@@ -1688,6 +1677,7 @@ class TestMergeOnRead:
         sink, items = self._collecting_sink()
         SearcherModV1([simple_shard], use_LIReC=False)._produce(
             shard=simple_shard,
+            identified_consts=list(simple_shard.consts),
             cmf_id=cmf_id,
             shard_id=shard_id,
             shard_encoding_str=enc_str,
@@ -1730,6 +1720,7 @@ class TestMergeOnRead:
         sink, items = self._collecting_sink()
         SearcherModV1([simple_shard], use_LIReC=False)._produce(
             shard=simple_shard,
+            identified_consts=list(simple_shard.consts),
             cmf_id=cmf_id,
             shard_id=shard_id,
             shard_encoding_str=enc_str,
@@ -1779,10 +1770,13 @@ class TestDirectWritePath:
             spy_process,
         )
 
+        from dreamer.configs.system import sys_config
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+
         searcher = SearcherModV1([simple_shard], use_LIReC=False)
         searcher._run_shard(
             shard=simple_shard,
-            dir_path=str(tmp_path),
+            identified_consts=list(simple_shard.consts),
             num_workers=4,  # ignored on the direct-write path
             config_overrides=config.export_configurations(),
         )
@@ -1849,9 +1843,8 @@ class TestAnalyzerDedup:
         pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs(
             trajectory_generator=analysis_config.NUM_TRAJECTORIES_FROM_DIM,
         )
-        shard_dir = tmp_path / e.name
-        shard_dir.mkdir(parents=True)
-        jsonl_path = shard_dir / f"{shard_id}.jsonl"
+        # JSONL now lives flat under EXPORT_SEARCH_RESULTS.
+        jsonl_path = tmp_path / f"{shard_id}.jsonl"
         with open(jsonl_path, "w") as fout:
             for traj_p, start_p in pairs:
                 start_t = tuple(int(v) for v in start_p.values())
@@ -1859,8 +1852,8 @@ class TestAnalyzerDedup:
                 tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
                 fout.write(json.dumps({
                     "trajectory_id": tid,
-                    "delta_estimate": 1.0,
-                    "identified": True,
+                    "delta_estimate": {e.name: 1.0},
+                    "identified": {e.name: True},
                 }) + "\n")
 
         sample_calls = [0]
@@ -1881,7 +1874,7 @@ class TestAnalyzerDedup:
     def test_analyzer_skips_walks_for_cached_trajectories(
         self, simple_shard, tmp_path, monkeypatch,
     ):
-        """When every sampled trajectory is on file with delta + identified,
+        """When every sampled trajectory is on file with dict-format delta + identified,
         no handler is constructed (no trajectory walk happens).
         """
         from dreamer.analysis.analyzers.serial_scan.analyzer_mod import AnalyzerModV1
@@ -1896,9 +1889,8 @@ class TestAnalyzerDedup:
         pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs(
             trajectory_generator=analysis_config.NUM_TRAJECTORIES_FROM_DIM,
         )
-        shard_dir = tmp_path / e.name
-        shard_dir.mkdir(parents=True)
-        jsonl_path = shard_dir / f"{shard_id}.jsonl"
+        # JSONL now lives flat under EXPORT_SEARCH_RESULTS.
+        jsonl_path = tmp_path / f"{shard_id}.jsonl"
         with open(jsonl_path, "w") as fout:
             for traj_p, start_p in pairs:
                 start_t = tuple(int(v) for v in start_p.values())
@@ -1906,8 +1898,8 @@ class TestAnalyzerDedup:
                 tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
                 fout.write(json.dumps({
                     "trajectory_id": tid,
-                    "delta_estimate": 2.5,
-                    "identified": True,
+                    "delta_estimate": {e.name: 2.5},
+                    "identified": {e.name: True},
                 }) + "\n")
 
         calls = [0]
@@ -1954,7 +1946,7 @@ class TestAnalyzerDedup:
     def test_analyzer_writes_per_trajectory_records(
         self, simple_shard, tmp_path, monkeypatch,
     ):
-        """Output is per-trajectory at ``EXPORT_SEARCH_RESULTS/<const>/<cmf>__<shard_id>.jsonl``."""
+        """Output is per-trajectory at ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` (flat)."""
         from dreamer.analysis.analyzers.serial_scan.analyzer_mod import AnalyzerModV1
         from dreamer.configs.system import sys_config
         from dreamer.configs.analysis import analysis_config
@@ -1965,11 +1957,10 @@ class TestAnalyzerDedup:
         AnalyzerModV1({e: [simple_shard]}).execute()
 
         _cmf_id, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
-        jsonl_path = (
-            tmp_path / e.name / f"{shard_id}.jsonl"
-        )
+        # JSONL now lives flat (no constant subdir).
+        jsonl_path = tmp_path / f"{shard_id}.jsonl"
         assert jsonl_path.exists(), (
-            "Analyzer must write to the shared per-shard JSONL location"
+            "Analyzer must write to the flat per-shard JSONL location"
         )
         lines = [ln for ln in jsonl_path.read_text().splitlines() if ln.strip()]
         assert len(lines) > 0
@@ -2017,14 +2008,13 @@ class TestAnalyzerDedup:
         dir_t = tuple(int(v) for v in traj_p.values())
         tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
 
-        shard_dir = tmp_path / e.name
-        shard_dir.mkdir(parents=True)
-        jsonl_path = shard_dir / f"{shard_id}.jsonl"
+        # JSONL now lives flat under EXPORT_SEARCH_RESULTS.
+        jsonl_path = tmp_path / f"{shard_id}.jsonl"
         with open(jsonl_path, "w") as fout:
             fout.write(json.dumps({
                 "trajectory_id": tid,
-                "delta_estimate": 1.0,
-                "identified": True,
+                "delta_estimate": {e.name: 1.0},
+                "identified": {e.name: True},
             }) + "\n")
 
         calls = [0]
@@ -2676,11 +2666,15 @@ class TestSummaryWriter:
         assert "nothing to summarise" in text.lower()
 
     def test_single_shard_renders_full_report(self, tmp_path):
-        """A small synthetic JSONL renders all sections with correct stats."""
+        """A small synthetic JSONL renders all sections with correct stats.
+
+        JSONL files now live flat under EXPORT_SEARCH_RESULTS (no constant
+        subdir).  Per-constant attributes (delta_estimate, identified) are
+        dicts keyed by constant name.
+        """
         from dreamer.utils.storage.summary import write_summary
 
         root = tmp_path / "search results"
-        const_dir = root / "log-2"
         cmf_id = "pFq_2_1_-1__0_0_0"
         shard_id = f"{cmf_id}__deadbeefdeadbeef"
         records = [
@@ -2688,36 +2682,33 @@ class TestSummaryWriter:
                 "trajectory_id": f"{shard_id}__aaaaaaaaaaaaaaaa",
                 "cmf_id": cmf_id,
                 "shard_id": shard_id,
-                "constant": "log(2)",
                 "start_point": [-3, 1, -1],
                 "direction": [-1, 1, 0],
-                "delta_estimate": 0.28,
-                "identified": True,
+                "delta_estimate": {"log-2": 0.28},
+                "identified": {"log-2": True},
             },
             {
                 "trajectory_id": f"{shard_id}__bbbbbbbbbbbbbbbb",
                 "cmf_id": cmf_id,
                 "shard_id": shard_id,
-                "constant": "log(2)",
                 "start_point": [-3, 1, -1],
                 "direction": [0, 1, 0],
-                "delta_estimate": -0.5,
-                "identified": True,
+                "delta_estimate": {"log-2": -0.5},
+                "identified": {"log-2": True},
             },
             {
                 "trajectory_id": f"{shard_id}__cccccccccccccccc",
                 "cmf_id": cmf_id,
                 "shard_id": shard_id,
-                "constant": "log(2)",
                 "start_point": [-3, 1, -1],
                 "direction": [-1, 0, -1],
-                # ``-inf`` is the documented non-convergence sentinel — must
-                # be ignored, not propagated into max/sum stats.
-                "delta_estimate": float("-inf"),
-                "identified": False,
+                # ``-inf`` is the documented non-convergence sentinel.
+                "delta_estimate": {"log-2": float("-inf")},
+                "identified": {"log-2": False},
             },
         ]
-        self._write_jsonl(str(const_dir / f"{shard_id}.jsonl"), records)
+        # Flat layout: <root>/<shard_id>.jsonl
+        self._write_jsonl(str(root / f"{shard_id}.jsonl"), records)
 
         out = write_summary(search_results_root=str(root))
         assert out is not None
@@ -2731,7 +2722,6 @@ class TestSummaryWriter:
         # Per-CMF section appeared
         assert f"CMF `{cmf_id}`" in text
         # Per-shard table row: trajectories=3, identified=2, positive δ=1
-        # (the -inf row counts toward trajectories but not delta-derived stats)
         assert "| 3 | 2 | 1 |" in text
         # Best trajectory line carries start → direction from the winning record
         assert "`[-3, 1, -1]` → `[-1, 1, 0]`" in text
@@ -2743,14 +2733,11 @@ class TestSummaryWriter:
         """Stale JSONLs (from a previous run with different sampling) must
         be dropped when ``this_run_shards`` is supplied.
 
-        Reproduces the user-reported scenario: extraction sampling found 2
-        shards this run, but the search-results dir still has a 3rd file
-        on disk from a prior run with different stochastic sampling.
+        JSONL files now live flat under EXPORT_SEARCH_RESULTS.
         """
         from dreamer.utils.storage.summary import write_summary
 
         root = tmp_path / "search results"
-        const_dir = root / "log-2"
         cmf_id = "pFq_X"
 
         current_shards = {
@@ -2761,13 +2748,12 @@ class TestSummaryWriter:
 
         for sid in list(current_shards) + [orphan_shard]:
             self._write_jsonl(
-                str(const_dir / f"{sid}.jsonl"),
+                str(root / f"{sid}.jsonl"),
                 [{
                     "trajectory_id": f"{sid}__deadbeefdeadbeef",
                     "cmf_id": cmf_id, "shard_id": sid,
-                    "constant": "log-2",
                     "start_point": [0, 0], "direction": [1, 0],
-                    "delta_estimate": 0.5, "identified": True,
+                    "delta_estimate": {"log-2": 0.5}, "identified": {"log-2": True},
                 }],
             )
 
@@ -2790,30 +2776,32 @@ class TestSummaryWriter:
         assert "this run only" in filtered_text
 
     def test_this_run_shards_drops_unknown_constants(self, tmp_path):
-        """A constant absent from ``this_run_shards`` must not leak into the summary."""
+        """A constant absent from ``this_run_shards`` must not leak into the summary.
+
+        With the flat layout, both shards live in root/. The filter restricts
+        which constant names and shard IDs are shown.
+        """
         from dreamer.utils.storage.summary import write_summary
 
         root = tmp_path / "search results"
-        # Old data from a previous "pi" run still on disk.
+        # Old shard (pi) still on disk from a previous run.
         old_shard = "pFq_old__deadbeefdeadbeef"
         self._write_jsonl(
-            str(root / "pi" / f"{old_shard}.jsonl"),
+            str(root / f"{old_shard}.jsonl"),
             [{
                 "trajectory_id": f"{old_shard}__aaaaaaaaaaaaaaaa",
                 "cmf_id": "pFq_old", "shard_id": old_shard,
-                "constant": "pi",
-                "delta_estimate": 0.9, "identified": True,
+                "delta_estimate": {"pi": 0.9}, "identified": {"pi": True},
             }],
         )
         # Current run touched only "log-2".
         new_shard = "pFq_new__cafef00dcafef00d"
         self._write_jsonl(
-            str(root / "log-2" / f"{new_shard}.jsonl"),
+            str(root / f"{new_shard}.jsonl"),
             [{
                 "trajectory_id": f"{new_shard}__bbbbbbbbbbbbbbbb",
                 "cmf_id": "pFq_new", "shard_id": new_shard,
-                "constant": "log-2",
-                "delta_estimate": 0.4, "identified": True,
+                "delta_estimate": {"log-2": 0.4}, "identified": {"log-2": True},
             }],
         )
 
@@ -2825,10 +2813,13 @@ class TestSummaryWriter:
         assert "log-2" in text
         # The "pi" constant section must not appear — it's stale.
         assert "## pi" not in text
-        assert "`pi`" not in text or "constant: `pi`" not in text
 
     def test_overall_best_picks_max_across_constants(self, tmp_path):
-        """Best δ in the overview must aggregate across every constant."""
+        """Best δ in the overview must aggregate across every constant.
+
+        With the flat layout, each shard's JSONL has dict-valued delta.
+        Different constants can appear in different shards.
+        """
         from dreamer.utils.storage.summary import write_summary
 
         root = tmp_path / "search results"
@@ -2839,11 +2830,10 @@ class TestSummaryWriter:
                 "trajectory_id": f"{shard_id}__deadbeefdeadbeef",
                 "cmf_id": cmf_id,
                 "shard_id": shard_id,
-                "constant": const_name,
-                "delta_estimate": delta,
-                "identified": True,
+                "delta_estimate": {const_name: delta},
+                "identified": {const_name: True},
             }
-            self._write_jsonl(str(root / const_name / f"{shard_id}.jsonl"), [rec])
+            self._write_jsonl(str(root / f"{shard_id}.jsonl"), [rec])
 
         make_shard("log-2", "pFq_A", "1111111111111111", 0.10)
         make_shard("pi",    "pFq_B", "2222222222222222", 0.50)
@@ -2872,14 +2862,13 @@ class TestSummaryWriter:
             {
                 "trajectory_id": tid,
                 "cmf_id": cmf_id, "shard_id": shard_id,
-                "constant": "log-2",
-                "delta_estimate": 0.7,
-                "identified": True,
+                "delta_estimate": {"log-2": 0.7},
+                "identified": {"log-2": True},
             },
             {"trajectory_id": tid, "extended_metrics": {"gcd_slope": 0.5}},
             {"trajectory_id": tid, "extended_metrics": {"asymptotics": ["1"]}},
         ]
-        self._write_jsonl(str(root / "log-2" / f"{shard_id}.jsonl"), records)
+        self._write_jsonl(str(root / f"{shard_id}.jsonl"), records)
 
         write_summary(search_results_root=str(root))
         text = (root / "summary.md").read_text()
@@ -2888,7 +2877,10 @@ class TestSummaryWriter:
 
     def test_summary_surfaces_shard_interior_point(self, tmp_path):
         """When the EXPORT_CMFS sidecar carries an interior_point, the
-        per-shard table must render it under a 'Start point' column."""
+        per-shard table must render it under a 'Start point' column.
+
+        JSONL lives flat under search_root; sidecar under cmfs_root.
+        """
         from dreamer.utils.storage.summary import write_summary
 
         search_root = tmp_path / "search results"
@@ -2898,13 +2890,12 @@ class TestSummaryWriter:
         tid = f"{shard_id}__cafef00dcafef00d"
 
         self._write_jsonl(
-            str(search_root / "log-2" / f"{shard_id}.jsonl"),
+            str(search_root / f"{shard_id}.jsonl"),
             [{
                 "trajectory_id": tid,
                 "cmf_id": cmf_id, "shard_id": shard_id,
-                "constant": "log-2",
                 "start_point": [7, -3], "direction": [1, 0],
-                "delta_estimate": 0.42, "identified": True,
+                "delta_estimate": {"log-2": 0.42}, "identified": {"log-2": True},
             }],
         )
         # ShardDTO sidecar — only interior_point is what the summary reads.
@@ -2937,12 +2928,11 @@ class TestSummaryWriter:
         shard_id = f"{cmf_id}__1234123412341234"
         tid = f"{shard_id}__abcdabcdabcdabcd"
         self._write_jsonl(
-            str(root / "log-2" / f"{shard_id}.jsonl"),
+            str(root / f"{shard_id}.jsonl"),
             [{
                 "trajectory_id": tid,
                 "cmf_id": cmf_id, "shard_id": shard_id,
-                "constant": "log-2",
-                "delta_estimate": 0.1, "identified": True,
+                "delta_estimate": {"log-2": 0.1}, "identified": {"log-2": True},
             }],
         )
         # No export_cmfs_root passed => no sidecar to load.

@@ -239,7 +239,14 @@ class System:
 
     def __loading_stage(self, constants: List[Constant]) -> Dict[Constant, List[CMFData]]:
         """
-        Preforms the loading of the inspiration functions from various sources
+        Preforms the loading of the inspiration functions from various sources.
+
+        Formatters may now declare multiple constants (``fmt.consts``).  The
+        same ``CMFData`` object is added under every constant in that list
+        that is also present in the run's *constants* list.  Constants
+        declared by a formatter but absent from the run are logged as a
+        warning and dropped.
+
         :param constants: A list of all constants relevant to this run
         :return: A mapping from a constant to the list of its CMFs (matching the inspiration functions)
         """
@@ -248,7 +255,8 @@ class System:
 
         Logger('Loading CMFs ...', Logger.Levels.info).log()
         modules = []
-        cmf_data = defaultdict(set)
+        cmf_data: Dict[Constant, set] = defaultdict(set)
+        constants_set = set(constants)
 
         for db in self.func_srcs:
             if isinstance(db, DBModScheme):
@@ -257,7 +265,17 @@ class System:
                 shift_cmf = Importer.imprt(db)
                 cmf_data[Constant.get_constant(db.split('/')[-2])].add(shift_cmf[0])
             elif isinstance(db, Formatter):
-                cmf_data[Constant.get_constant(db.const)].add(db.to_cmf())
+                cmf = db.to_cmf()
+                fmt_consts = [Constant.get_constant(name) for name in db.consts]
+                ignored = [c.name for c in fmt_consts if c not in constants_set]
+                active = [c for c in fmt_consts if c in constants_set]
+                if ignored:
+                    Logger(
+                        f'Constants ignored for CMF {db.cmf_name}: {ignored}',
+                        level=Logger.Levels.warning,
+                    ).log()
+                for c in active:
+                    cmf_data[c].add(cmf)
             else:
                 raise ValueError(f'Unknown format: {db} (accepts only str | DBModScheme | Formatter)')
 
@@ -268,10 +286,10 @@ class System:
         for const in cmf_data_2.keys():
             cmf_data[const].update(cmf_data_2[const])
 
-        # convert back to dict[str, list]
+        # convert back to dict[Constant, list], filtering to run constants only
         as_list = dict()
         for k, v in cmf_data.items():
-            if k not in constants:
+            if k not in constants_set:
                 Logger(
                     f'constant {k} is not in the search list, its inspiration function(s) will be ignored',
                     level=Logger.Levels.warning
@@ -497,16 +515,16 @@ class System:
 
     def __search_stage(self, priorities: Dict[Constant, List[Searchable]]):
         """
-        Preform deep search using the provided search module
-        :param priorities: a list prioritized searchables for each constant
+        Preform deep search using the provided search module.
+        :param priorities: mapping from each constant to its prioritized shards
         """
-        # Execute searchers
-        for data in priorities.values():
-            self.searcher(data, sys_config.USE_LIReC).execute()
+        # Pass the full priorities dict so the searcher can deduplicate shards
+        # and compute only the identified constants per shard.
+        self.searcher(priorities, sys_config.USE_LIReC).execute()
 
-        # Print best delta for each constant by scanning the JSONL outputs
+        # Print best delta for each constant by scanning the flat JSONL dir.
         for const in priorities.keys():
-            best_record = self.__best_trajectory_record(const)
+            best_record, best_delta_val = self.__best_trajectory_record(const)
             if best_record is None:
                 Logger(
                     f'No trajectory results found for "{const.name}"',
@@ -515,7 +533,7 @@ class System:
                 continue
 
             Logger(
-                f'Best delta for "{const.name}" is {best_record["delta_estimate"]:.6f}\n'
+                f'Best delta for "{const.name}" is {best_delta_val:.6f}\n'
                 f'* Trajectory id: {best_record["trajectory_id"]}\n'
                 f'* Start:         {tuple(best_record["start_point"])}\n'
                 f'* Direction:     {tuple(best_record["direction"])}',
@@ -525,41 +543,52 @@ class System:
         # delete temp directory
         if sys_config.EXPORT_SEARCH_RESULTS.split('.')[-1] == sys_config.DEFAULT_DIR_SUFFIX:
             if os.path.isdir(sys_config.EXPORT_SEARCH_RESULTS):
-                # rmdir only succeeds if empty; if results were written we leave them.
                 try:
                     os.rmdir(sys_config.EXPORT_SEARCH_RESULTS)
                 except OSError:
                     pass
 
     @staticmethod
-    def __best_trajectory_record(const: Constant) -> Optional[dict]:
-        """Scan the per-constant JSONL outputs and return the record with the
-        largest ``delta_estimate``.
+    def __best_trajectory_record(const: Constant):
+        """Scan the flat JSONL search-results dir and return the record with the
+        largest ``delta_estimate`` for *const*, plus that delta value.
 
-        Returns ``None`` when no JSONL file is found or no record carries a
-        finite delta.  Skips malformed lines silently (consistent with
-        ``Importer._read_jsonl``).
+        Returns ``(None, None)`` when no JSONL file is found or no record
+        carries a finite delta for this constant.  The JSONL files now live
+        at ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` (no constant subdir)
+        and ``delta_estimate`` is a ``{const_name: float}`` dict.
         """
-        dir_path = os.path.join(sys_config.EXPORT_SEARCH_RESULTS, const.name)
+        import math as _math
+        dir_path = sys_config.EXPORT_SEARCH_RESULTS
         if not os.path.isdir(dir_path):
-            return None
+            return None, None
 
         jsonl_ext = '.' + Formats.JSONL.value
-        best_delta = -sp.oo
-        best_record: Optional[dict] = None
+        best_delta: float = -float('inf')
+        best_record = None
 
         for fname in sorted(os.listdir(dir_path)):
             if not fname.endswith(jsonl_ext):
                 continue
             records = Importer.imprt(os.path.join(dir_path, fname))
             for record in records:
-                delta = record.get("delta_estimate")
+                delta_raw = record.get("delta_estimate")
+                if isinstance(delta_raw, dict):
+                    delta = delta_raw.get(const.name)
+                else:
+                    delta = delta_raw  # backward compat with old scalar records
                 if delta is None:
+                    continue
+                try:
+                    delta = float(delta)
+                except (TypeError, ValueError):
+                    continue
+                if not _math.isfinite(delta):
                     continue
                 if delta > best_delta:
                     best_delta = delta
                     best_record = record
-        return best_record
+        return best_record, best_delta if best_record is not None else None
 
     @staticmethod
     def __compact_analysis_results(dicts: List[Dict[Constant, List[Searchable]]]) -> Dict[Constant, List[Searchable]]:

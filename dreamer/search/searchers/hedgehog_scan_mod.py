@@ -5,37 +5,40 @@ Replaces the old ``SerialSearcher.search()`` / ``DataManager`` flow with a
 handler-based pipeline:
 
   Producer (main thread)
-    For each (trajectory, start) pair:
-      1. Compute ``trajectory_id`` from (cmf_name, encoding, start, direction)
-         — cheap; no symbolic work, no trajectory walk.
-      2. If the id is already in the JSONL and every configured Tier-2
-         attribute is present, skip immediately — no handler, no walk.
-      3. Otherwise build the handler and either a patch dict (partial
-         coverage) or a full Tier-1 DTO (new trajectory), and call
-         ``push(item)``.
+    For each unique shard (deduplicated by shard_id across all constants):
+      For each (trajectory, start) pair sampled from the shard:
+        1. Compute ``trajectory_id`` from (cmf_name, encoding, start, direction)
+           — cheap; no symbolic work, no trajectory walk.
+        2. If the id is already in the JSONL and every configured Tier-2
+           attribute is present, skip immediately.
+        3. Otherwise build the handler and push per-constant Tier-1 data.
 
   push(item) — provided by the generic ``worker_pool`` context manager:
     * ``TIER2_ATTRIBUTES`` empty (default) → ``push`` is a synchronous
-      writer; the JSONL is written from the main thread, no subprocesses
-      created.
-    * ``TIER2_ATTRIBUTES`` non-empty → ``push`` enqueues to a worker pool
-      that runs ``compute_tier2_for_item`` in background subprocesses and
-      a dedicated writer subprocess that appends to the JSONL.
+      writer; the JSONL is written from the main thread, no subprocesses.
+    * ``TIER2_ATTRIBUTES`` non-empty → ``push`` enqueues to a worker pool.
 
-Output files are written to:
-    ``sys_config.EXPORT_SEARCH_RESULTS / <constant_name> / <shard_id>.jsonl``
-where ``<shard_id>`` already includes the parent cmf id as a prefix
-(``<cmf_id>__<encoding_hash>``) — see ``derive_cmf_and_shard_ids``.
+Output files:
+    ``sys_config.EXPORT_SEARCH_RESULTS / <shard_id>.jsonl``
+where ``<shard_id>`` encodes the parent CMF (``<cmf_id>__<encoding_hash>``).
+
+Only constants that were **identified** for a given shard during the
+analysis stage are searched: ``priorities[const]`` lists only shards for
+which ``const`` passed the threshold, so the intersection of constants in
+``shard.consts`` and the keys under which the shard appears gives exactly
+the set to compute delta for.
 """
 
 import os
-from typing import Callable, List
+from collections import defaultdict
+from typing import Callable, Dict, List, Optional, Set
 
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.search.methods.hedgehog_scan import SerialSearcher
 from dreamer.extraction.shard import Shard
+from dreamer.utils.constants.constant import Constant
 from dreamer.configs import config
 from dreamer.configs.system import sys_config
 from dreamer.utils.logger import Logger
@@ -61,44 +64,54 @@ class SearcherModV1(SearcherModScheme):
     """Search module — deep trajectory search with optional asynchronous Tier-2
     attribute computation.
 
-    All process/queue management lives in :func:`worker_pool`; the searcher
-    only supplies the per-shard producer.  When ``TIER2_ATTRIBUTES`` is
-    empty no subprocesses are spawned (direct-write fallback).
+    Receives the full ``priorities`` dict (``{Constant: [Shard, ...]}``) so
+    it can determine, per shard, which subset of its constants were
+    identified during analysis.  Only identified constants are searched;
+    the trajectory walk is shared across constants for each trajectory.
     """
 
-    def __init__(self, shards: List[Shard], use_LIReC: bool):
+    def __init__(self, priorities, use_LIReC: bool):
         """
-        :param shards: Prioritised shards to search.
+        :param priorities: ``Dict[Constant, List[Shard]]`` — shards that passed
+            analysis for each constant.
         :param use_LIReC: Whether to use LIReC for constant identification.
         """
         super().__init__(
-            shards,
+            priorities,
             use_LIReC,
             description='Search module — deep search with Tier-1 DTO output',
-            version='1.3.0',
+            version='2.0.0',
         )
 
     @CatchErrorInModule(with_trace=sys_config.MODULE_ERROR_SHOW_TRACE, fatal=True)
     def execute(self) -> None:
-        """Run the search pipeline over all shards."""
+        """Run the search pipeline over all unique shards."""
         if not self.searchables:
             return
 
-        dir_path = os.path.join(
-            sys_config.EXPORT_SEARCH_RESULTS,
-            self.searchables[0].const.name,
-        )
-        os.makedirs(dir_path, exist_ok=True)
+        os.makedirs(sys_config.EXPORT_SEARCH_RESULTS, exist_ok=True)
 
         num_workers = sys_config.NUM_BACKGROUND_WORKERS
         config_overrides = config.export_configurations()
 
-        for shard in SmartTQDM(
-            self.searchables,
+        # Build shard_id → (Shard, Set[Constant_identified]) mapping.
+        # A shard can be identified for a subset of its consts; only those
+        # are computed during the deep search.
+        shard_identified: Dict[str, Set[Constant]] = defaultdict(set)
+        shard_by_id: Dict[str, Shard] = {}
+        for const, shards in self.priorities.items():
+            for shard in shards:
+                _, shard_id, _ = derive_cmf_and_shard_ids(shard)
+                shard_by_id[shard_id] = shard
+                shard_identified[shard_id].add(const)
+
+        for shard_id, shard in SmartTQDM(
+            shard_by_id.items(),
             desc='Searching in shards: ',
             **sys_config.TQDM_CONFIG,
         ):
-            self._run_shard(shard, dir_path, num_workers, config_overrides)
+            identified_consts = list(shard_identified[shard_id])
+            self._run_shard(shard, identified_consts, num_workers, config_overrides)
 
     # ------------------------------------------------------------------
     # Per-shard pipeline
@@ -107,27 +120,17 @@ class SearcherModV1(SearcherModScheme):
     def _run_shard(
         self,
         shard: Shard,
-        dir_path: str,
+        identified_consts: List[Constant],
         num_workers: int,
         config_overrides: dict,
     ) -> None:
-        """Run the search for a single shard.
-
-        The ``worker_pool`` context manager chooses MPMC vs direct-write
-        based on whether ``TIER2_ATTRIBUTES`` is non-empty.
-        """
+        """Run the search for a single shard using only *identified_consts*."""
         cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
-        # ``shard_id`` already starts with the cmf id (e.g.
-        # ``pFq_2_1_-1__0_0_0__<hash>``), so the filename is just
-        # ``{shard_id}.jsonl`` — no need to prepend the cmf name again.
-        output_path = os.path.join(dir_path, f"{shard_id}.jsonl")
+        output_path = os.path.join(
+            sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl"
+        )
         seen_trajectories = load_seen_trajectories(output_path)
 
-        # ``compute_tier2_for_item`` unpacks the ``(traj_matrix, payload)`` tuple
-        # the producer pushes and is a fast no-op when no Tier-2 attrs are
-        # configured.  We still want it on the main thread in that case so the
-        # writer sees the unwrapped payload — so the only thing that depends on
-        # ``TIER2_ATTRIBUTES`` is whether to spawn subprocesses at all.
         with worker_pool(
             num_workers=num_workers,
             worker_fn=compute_tier2_for_item,
@@ -138,6 +141,7 @@ class SearcherModV1(SearcherModScheme):
         ) as push:
             self._produce(
                 shard=shard,
+                identified_consts=identified_consts,
                 cmf_id=cmf_id,
                 shard_id=shard_id,
                 shard_encoding_str=shard_encoding_str,
@@ -152,6 +156,7 @@ class SearcherModV1(SearcherModScheme):
     def _produce(
         self,
         shard: Shard,
+        identified_consts: List[Constant],
         cmf_id: str,
         shard_id: str,
         shard_encoding_str: str,
@@ -162,20 +167,14 @@ class SearcherModV1(SearcherModScheme):
 
         Three cases per trajectory:
 
-        1. **Complete** — trajectory_id is already in *seen_trajectories* with
-           every configured Tier-2 attribute present.  Skip *before* any
-           handler construction so no trajectory walk happens.
-        2. **Partial** — trajectory_id is known but some Tier-2 attributes
-           are missing.  Build the handler (cheap: just the symbolic
-           trajectory matrix, no walks), emit a patch dict.
-        3. **New** — trajectory_id is unknown.  Build the full Tier-1 DTO
-           (this triggers the trajectory walks for delta/limit/etc.) and
-           emit it.
-
-        ``sink`` receives ``(trajectory_matrix, payload)`` where *payload*
-        is either a ``TrajectoryDTO`` (case 3) or a patch ``dict`` (case 2).
+        1. **Complete** — trajectory_id already in *seen_trajectories* with
+           every configured Tier-2 attribute present.  Skip.
+        2. **Partial** — trajectory_id known but some Tier-2 attrs missing.
+           Emit a patch dict.
+        3. **New** — build the full multi-constant Tier-1 DTO and emit it.
         """
-        searcher = SerialSearcher(shard, shard.const, use_LIReC=self.use_LIReC)
+        primary_const = shard.consts[0]
+        searcher = SerialSearcher(shard, primary_const, use_LIReC=self.use_LIReC)
 
         try:
             pairs = searcher.sample_pairs(
@@ -188,16 +187,12 @@ class SearcherModV1(SearcherModScheme):
             ).log()
             return
 
-        # Specs may be ``(name, predicate)`` tuples — use just the names
-        # for set arithmetic against the JSONL ``extended_metrics`` keys.
         desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
-        # The target constant in sympy form — propagated through every
-        # work item so the worker can build a constant-aware handler
-        # (needed by ``delta_sequence``, ``limit``, p/q identification).
-        constant_sympy = shard.const.value_sympy
+        # Use the primary identified constant's sympy form for worker items
+        # (Tier-2 workers use it for delta_sequence etc.).
+        primary_sympy = identified_consts[0].value_sympy if identified_consts else None
 
         for traj, start in pairs:
-            # Cheap: derive trajectory_id without symbolic work or any walk.
             start_t = _position_to_tuple(start)
             dir_t = _position_to_tuple(traj)
             trajectory_id = derive_trajectory_id(
@@ -209,15 +204,14 @@ class SearcherModV1(SearcherModScheme):
                 existing_keys = set((seen_record.get("extended_metrics") or {}).keys())
                 missing = desired - existing_keys
                 if not missing:
-                    # Case 1: fully covered — skip without building the handler.
+                    # Case 1: fully covered.
                     continue
 
-                # Case 2: partial coverage.  Build handler (no walks needed —
-                # only the symbolic trajectory matrix), emit patch for workers.
+                # Case 2: partial coverage — emit patch.
                 try:
                     handler = TrajectoryAttributesHandler.from_cmf(
                         shard.cmf, traj, start,
-                        constant=shard.const.value_sympy,
+                        constant=primary_sympy,
                         searchable=shard,
                     )
                 except Exception as e:
@@ -231,17 +225,17 @@ class SearcherModV1(SearcherModScheme):
                     "trajectory_id": trajectory_id,
                     "extended_metrics": {},
                 }
-                sink((handler.trajectory_matrix(), constant_sympy, patch))
+                sink((handler.trajectory_matrix(), primary_sympy, patch))
                 seen_trajectories[trajectory_id] = {
                     "extended_metrics": dict.fromkeys(existing_keys | missing),
                 }
                 continue
 
-            # Case 3: new trajectory.  Build the full Tier-1 DTO; this walks.
+            # Case 3: new trajectory.
             try:
                 handler = TrajectoryAttributesHandler.from_cmf(
                     shard.cmf, traj, start,
-                    constant=shard.const.value_sympy,
+                    constant=None,
                     searchable=shard,
                 )
                 dto = build_trajectory_dto(
@@ -252,18 +246,16 @@ class SearcherModV1(SearcherModScheme):
                     shard_encoding_str=shard_encoding_str,
                     start=start,
                     direction=traj,
+                    constants=identified_consts,  # Constant objects → keys are c.name
                 )
             except Exception as e:
                 Logger(
                     f"Handler error — shard {shard_id}, traj={traj}, start={start}: {e}",
                     Logger.Levels.warning,
                 ).log()
-                raise e # TODO: remove this
                 continue
 
-            # Track in-flight locally so duplicate (traj, start) pairs within
-            # the same run don't push duplicate work.
             seen_trajectories[trajectory_id] = {
                 "extended_metrics": dict.fromkeys(desired),
             }
-            sink((handler.trajectory_matrix(), constant_sympy, dto))
+            sink((handler.trajectory_matrix(), primary_sympy, dto))

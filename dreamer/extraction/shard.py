@@ -10,7 +10,7 @@ from dreamer.utils.constants.constant import Constant
 from dreamer.configs import config
 from ramanujantools.cmf import CMF
 from ramanujantools import Position
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 import sympy as sp
 import numpy as np
 
@@ -20,7 +20,7 @@ from dreamer.utils.types import CMFData
 class Shard(Searchable, JSONable):
     def __init__(self,
                  cmf: CMF,
-                 constant: Constant,
+                 constants: Union[Constant, List[Constant]],
                  hyperplanes: List[Hyperplane],
                  encoding: List[int],
                  shift: Position,
@@ -31,7 +31,7 @@ class Shard(Searchable, JSONable):
                  ):
         """
         :param cmf: The CMF this shard is a part of
-        :param constant: The constant to search for in the shard
+        :param constants: A constant or list of constants to search for in the shard
         :param hyperplanes: The hyperplanes defining the shard
         :param encoding: The indicator vector that indicates whether the shard is below or above the hyperplanes
         :param shift: The shift in start points required
@@ -47,7 +47,7 @@ class Shard(Searchable, JSONable):
         """
         use_inv_t_value: bool = bool(config.search.DEFAULT_USES_INV_T if use_inv_t is None else use_inv_t)
 
-        super().__init__(cmf, constant, shift, use_inv_t_value, cmf_name)
+        super().__init__(cmf, constants, shift, use_inv_t_value, cmf_name)
         self.symbols = list(cmf.matrices.keys())
         self.A, self.b = None, None
         # Sign vector relative to the parent CMF's hyperplane list:
@@ -67,25 +67,25 @@ class Shard(Searchable, JSONable):
         self.is_whole_space = self.A is None or self.b is None
 
     @classmethod
-    def from_cmf_data(cls, cmf_data: CMFData, constant: Constant,
+    def from_cmf_data(cls, cmf_data: CMFData, constants: Union[Constant, List[Constant]],
                       hyperplanes: List[Hyperplane], encoding: List[int],
                       interior_point: Optional[Position] = None, *args,
-                      hyperplanes_already_shifted: bool = False, **kwargs) -> Shard:
+                      hyperplanes_already_shifted: bool = False, **kwargs) -> 'Shard':
         return cls(
-            cmf_data.cmf, constant, hyperplanes, encoding, cmf_data.shift,
+            cmf_data.cmf, constants, hyperplanes, encoding, cmf_data.shift,
             interior_point, cmf_data.use_inv_t, cmf_data.cmf_name,
             hyperplanes_already_shifted=hyperplanes_already_shifted,
         )
 
     @classmethod
     def from_matrices(cls, cmf: CMF,
-                 constant: Constant,
+                 constants: Union[Constant, List[Constant]],
                  A: np.ndarray, b: np.ndarray,
                  shift: Position,
                  interior_point: Optional[Position] = None,
                  use_inv_t: Optional[bool] = None,
                  cmf_name: str = 'UnknownCMF'):
-        shard = cls(cmf, constant, [], [], shift, interior_point, use_inv_t, cmf_name)  # Create an uninitialized instance
+        shard = cls(cmf, constants, [], [], shift, interior_point, use_inv_t, cmf_name)
         shard.A = A
         shard.b = b
         shard.is_whole_space = False
@@ -173,7 +173,7 @@ class Shard(Searchable, JSONable):
         return {
             "__class__": "Shard",
             "cmf_name": self.cmf_name,
-            "const": self.const.name,
+            "consts": [c.name for c in self.consts],
             "payload_b64": payload,
         }
 

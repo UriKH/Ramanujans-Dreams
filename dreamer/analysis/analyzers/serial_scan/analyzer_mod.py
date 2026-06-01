@@ -1,31 +1,30 @@
 """
 AnalyzerModV1 — analysis-stage module.
 
-For each constant, samples trajectories in every candidate shard and
-records the resulting Tier-1 attributes (`delta`, `identified`, plus the
-rest of the ``TrajectoryDTO`` core fields) as one JSONL line per
-trajectory.  Filters and ranks shards by best observed delta.
+For each shard, samples trajectories and records Tier-1 attributes
+(``delta``, ``identified``, plus the rest of the ``TrajectoryDTO`` core
+fields) as one JSONL line per trajectory.  The trajectory walk is computed
+*once* per (trajectory, shard) and evaluated against **all** constants
+bound to the shard; per-constant attributes (``delta_estimate``,
+``p_vector``, ``q_vector``, ``identified``) are stored as dicts keyed by
+constant name.
 
-**Per-trajectory dedup (never per-shard)** — sampling itself is cheap, so
-it always runs.  The expensive trajectory walk happens only for sampled
-pairs whose Tier-1 fields are not yet present in the shard's JSONL.
-Records already in the file (e.g. from a prior analyzer run or a previous
-search-stage pass) are reused.  This lets you re-run with a different
-sampling strategy and pick up incremental data without losing or
-recomputing anything.
+**JSONL layout** — one file per shard (no constant subdirectory):
+    ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl``
 
-**Single canonical store** — the analyzer's per-trajectory output is
-written to the same per-shard JSONL the searcher uses:
-``EXPORT_SEARCH_RESULTS/<constant>/<shard_id>.jsonl``.  ``<shard_id>``
-itself encodes the parent CMF (``<cmf_id>__<encoding_hash>``) so the
-filename remains uniquely identifying.  This is the canonical location
-for any per-trajectory record (analyzer + search + post-process all
-read/write it via merge-on-read).
+**Per-shard deduplication** — each unique shard (by shard_id) is processed
+exactly once even if it appears under several constants in the input dict.
+
+**Analysis threshold** — a shard is kept for constant C if C's
+``identified_pct`` meets ``IDENTIFY_THRESHOLD``.  The shard is placed in
+the output dict under *every* constant for which it passes; a shard that
+passes for none of its constants is discarded entirely.
 """
 
 import json
 import os
-from typing import Dict, List, Optional, Tuple
+from collections import defaultdict
+from typing import Dict, List, Optional, Set, Tuple
 
 from dreamer.utils.schemes.analysis_scheme import AnalyzerModScheme
 from dreamer.utils.ui.tqdm_config import SmartTQDM
@@ -52,13 +51,14 @@ analysis_config = config.analysis
 class AnalyzerModV1(AnalyzerModScheme):
     """Analysis module: filters and ranks shards by Tier-1 trajectory attributes.
 
-    For each shard, samples trajectories and computes ``delta`` + ``identified``
-    per trajectory.  Records are appended to the shared per-shard JSONL
-    (also used by the searcher) so subsequent runs — or the search stage
-    itself — can dedup at the trajectory level.
+    For each unique shard, samples trajectories and computes ``delta`` +
+    ``identified`` for every constant in ``shard.consts``.  Records are
+    appended to a single per-shard JSONL (shared by the searcher) at
+    ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl``.
 
-    Shards passing the identified-percentage threshold are sorted by best
-    observed delta and returned for deeper search.
+    Shards passing the identified-percentage threshold for at least one
+    constant are kept and sorted by best observed delta; they are placed
+    in the result dict under every constant for which they pass.
     """
 
     def __init__(self, cmf_data: Dict[Constant, List[Searchable]]):
@@ -68,7 +68,7 @@ class AnalyzerModV1(AnalyzerModScheme):
         super().__init__(
             cmf_data,
             desc='Analysis module — per-trajectory dedup, ranks shards by best delta',
-            version='3',
+            version='4',
         )
 
     @CatchErrorInModule(with_trace=sys_config.MODULE_ERROR_SHOW_TRACE, fatal=True)
@@ -77,9 +77,25 @@ class AnalyzerModV1(AnalyzerModScheme):
 
         Returns a mapping from constant → shards sorted by best delta
         (descending), then by dimension (ascending, as a tie-breaker).
+        Only constants whose shards are identified above threshold appear.
         """
+        os.makedirs(sys_config.EXPORT_SEARCH_RESULTS, exist_ok=True)
+
         result: Dict[Constant, List[Searchable]] = {c: [] for c in self.cmf_data.keys()}
 
+        # Collect the superset of all constants we need to analyse.
+        all_constants: Set[Constant] = set(self.cmf_data.keys())
+
+        # Deduplicate shards — the same Shard object may appear under several
+        # constants.  Process each unique shard_id exactly once.
+        seen_shard_ids: Set[str] = set()
+
+        # shard_id → {const: best_delta}  (None = not identified / no walk)
+        shard_const_best: Dict[str, Dict[Constant, Optional[float]]] = {}
+        # shard_id → Shard object (to build the sorted result later)
+        shard_objects: Dict[str, Shard] = {}
+
+        # Iterate in a deterministic order: all constants, then their shards.
         for constant, shards in SmartTQDM(
             self.cmf_data.items(),
             desc='Analyzing constants and their CMFs',
@@ -94,53 +110,53 @@ class AnalyzerModV1(AnalyzerModScheme):
                 Logger.Levels.message,
             ).log()
 
-            const_dir = os.path.join(sys_config.EXPORT_SEARCH_RESULTS, constant.name)
-            os.makedirs(const_dir, exist_ok=True)
-
-            shard_best_delta: Dict[Shard, float] = {}
-
             for shard in shards:
                 cmf_id, shard_id, encoding_str = derive_cmf_and_shard_ids(shard)
-                # ``shard_id`` already carries the cmf_id prefix — the
-                # filename is just ``{shard_id}.jsonl`` (no need to repeat
-                # the cmf name).  Mirrors the searcher convention.
+
+                if shard_id in seen_shard_ids:
+                    # Already analysed — skip.
+                    continue
+                seen_shard_ids.add(shard_id)
+                shard_objects[shard_id] = shard
+
                 shard_jsonl_path = os.path.join(
-                    const_dir, f"{shard_id}.jsonl",
+                    sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl"
                 )
                 seen_trajectories = load_seen_trajectories(shard_jsonl_path)
 
-                best_delta, identified_pct, sampled = self._analyze_shard(
+                per_const_best = self._analyze_shard(
                     shard,
-                    constant,
                     cmf_id=cmf_id,
                     shard_id=shard_id,
                     encoding_str=encoding_str,
                     jsonl_path=shard_jsonl_path,
                     seen_trajectories=seen_trajectories,
                 )
-                if not sampled:
-                    # ``_analyze_shard`` already logged a sampling failure;
-                    # skip the shard entirely (don't include in priorities).
-                    continue
+                shard_const_best[shard_id] = per_const_best
 
                 if analysis_config.PRINT_FOR_EVERY_SEARCHABLE:
-                    bd = f'{best_delta:.4f}' if best_delta is not None else 'N/A'
-                    Logger(
-                        f"Shard {shard_id[:8]}…  "
-                        f"best_delta={bd}  identified={identified_pct * 100:.1f}%",
-                        Logger.Levels.info,
-                    ).log()
+                    for c, bd in per_const_best.items():
+                        bd_str = f'{bd:.4f}' if bd is not None else 'N/A'
+                        Logger(
+                            f"Shard {shard_id[:8]}…  {c.name}  best_delta={bd_str}",
+                            Logger.Levels.info,
+                        ).log()
 
-                if (
-                    identified_pct >= analysis_config.IDENTIFY_THRESHOLD
-                    and best_delta is not None
-                ):
-                    shard_best_delta[shard] = best_delta
+        # Build per-constant priority lists from the analysis results.
+        for const in all_constants:
+            # Gather (shard, best_delta) pairs where this constant was identified.
+            passing: List[Tuple[Shard, float]] = []
+            for shard_id, per_const_best in shard_const_best.items():
+                bd = per_const_best.get(const)
+                if bd is not None:
+                    passing.append((shard_objects[shard_id], bd))
 
-            # Sort by best delta descending; tie-break by dimension ascending
-            result[constant] = sorted(
-                shard_best_delta.keys(),
-                key=lambda s: (-shard_best_delta[s], s.dim),
+            result[const] = sorted(
+                [s for s, _ in passing],
+                key=lambda s: (
+                    -(shard_const_best[derive_cmf_and_shard_ids(s)[1]].get(const, -float('inf')) or -float('inf')),
+                    s.dim,
+                ),
             )
 
         return result
@@ -152,30 +168,28 @@ class AnalyzerModV1(AnalyzerModScheme):
     def _analyze_shard(
         self,
         shard: Shard,
-        constant: Constant,
         *,
         cmf_id: str,
         shard_id: str,
         encoding_str: str,
         jsonl_path: str,
         seen_trajectories: dict,
-    ) -> Tuple[Optional[float], float, bool]:
-        """Sample trajectories in *shard* and aggregate Tier-1 stats.
+    ) -> Dict[Constant, Optional[float]]:
+        """Sample trajectories in *shard* and aggregate Tier-1 stats for all constants.
 
-        For every sampled ``(traj, start)`` pair:
+        Returns ``{Constant: best_delta_or_None}`` for each constant in
+        ``shard.consts`` that passed the identified-percentage threshold.
+        Constants that did not reach the threshold map to ``None`` (excluded
+        from the result dict entirely so the caller can distinguish "failed"
+        from "constant not in shard").
 
-        * Derive the deterministic ``trajectory_id`` (cheap — no walk).
-        * If the existing JSONL record already carries both ``delta_estimate``
-          and ``identified``, reuse the cached values — no handler is built.
-        * Otherwise build a ``TrajectoryAttributesHandler`` and a full
-          ``TrajectoryDTO`` (this triggers the walk), append the line to the
-          JSONL, and use the freshly computed values for aggregation.
-
-        Returns ``(best_delta, identified_pct, sampled)``.  ``sampled`` is
-        ``False`` when ``sample_pairs`` itself raised — the caller treats
-        that as "skip this shard".
+        The trajectory walk is computed once per trajectory and evaluated
+        against every constant via ``build_trajectory_dto(..., constants=...)``.
         """
-        searcher = SerialSearcher(shard, constant, use_LIReC=False)
+        # Use the first constant just to drive the SerialSearcher for pair sampling
+        # (trajectory sampling is constant-independent).
+        primary_const = shard.consts[0]
+        searcher = SerialSearcher(shard, primary_const, use_LIReC=False)
         try:
             pairs = searcher.sample_pairs(
                 trajectory_generator=analysis_config.NUM_TRAJECTORIES_FROM_DIM,
@@ -185,15 +199,15 @@ class AnalyzerModV1(AnalyzerModScheme):
                 f"Skipping shard {shard_id}: {e}",
                 Logger.Levels.warning,
             ).log()
-            return None, 0.0, False
+            return {}
 
-        best_delta: Optional[float] = None
+        # Per-constant accumulators.
         total = 0
-        identified_count = 0
+        identified_count: Dict[str, int] = defaultdict(int)
+        best_delta: Dict[str, Optional[float]] = {c.name: None for c in shard.consts}
 
         with open(jsonl_path, "a") as fout:
             for traj, start in pairs:
-                # Trajectory id derived without any symbolic / walk work.
                 start_t = _position_to_tuple(start)
                 dir_t = _position_to_tuple(traj)
                 tid = derive_trajectory_id(
@@ -204,50 +218,74 @@ class AnalyzerModV1(AnalyzerModScheme):
                 if (
                     cached is not None
                     and "delta_estimate" in cached
+                    and isinstance(cached["delta_estimate"], dict)
                     and "identified" in cached
+                    and isinstance(cached["identified"], dict)
+                    # All shard constants must be covered in the cached record.
+                    and all(c.name in cached["delta_estimate"] for c in shard.consts)
                 ):
-                    # Reuse — no handler, no walk.
-                    delta = float(cached["delta_estimate"])
-                    identified = bool(cached["identified"])
-                else:
-                    try:
-                        handler = TrajectoryAttributesHandler.from_cmf(
-                            shard.cmf, traj, start,
-                            constant=constant.value_sympy,
-                            searchable=shard,
-                        )
-                        dto = build_trajectory_dto(
-                            handler,
-                            cmf_id=cmf_id,
-                            shard_id=shard_id,
-                            cmf_name=shard.cmf_name,
-                            shard_encoding_str=encoding_str,
-                            start=start,
-                            direction=traj,
-                        )
-                    except Exception as e:
-                        Logger(
-                            f"Handler error — shard {shard_id}, "
-                            f"traj={traj}, start={start}: {e}",
-                            Logger.Levels.warning,
-                        ).log()
-                        raise e # TODO: remove this
-                        continue
+                    # Reuse cached record — no handler, no walk.
+                    for c in shard.consts:
+                        delta_val = cached["delta_estimate"].get(c.name)
+                        identified_val = bool(cached["identified"].get(c.name, False))
+                        if identified_val:
+                            identified_count[c.name] += 1
+                            if delta_val is not None:
+                                cur = best_delta.get(c.name)
+                                if cur is None or delta_val > cur:
+                                    best_delta[c.name] = delta_val
+                    total += 1
+                    continue
 
-                    delta = float(dto.delta_estimate)
-                    identified = bool(dto.identified)
-                    line = dto.to_json_line()
-                    fout.write(line + "\n")
-                    fout.flush()
-                    # Track in-run so duplicate (traj, start) pairs don't trigger
-                    # another walk within the same execute() call.
-                    seen_trajectories[tid] = json.loads(line)
+                try:
+                    handler = TrajectoryAttributesHandler.from_cmf(
+                        shard.cmf, traj, start,
+                        constant=None,  # constant injected per-constant in build_trajectory_dto
+                        searchable=shard,
+                    )
+                    dto = build_trajectory_dto(
+                        handler,
+                        cmf_id=cmf_id,
+                        shard_id=shard_id,
+                        cmf_name=shard.cmf_name,
+                        shard_encoding_str=encoding_str,
+                        start=start,
+                        direction=traj,
+                        constants=shard.consts,  # Constant objects → keys are c.name
+                    )
+                except Exception as e:
+                    Logger(
+                        f"Handler error — shard {shard_id}, "
+                        f"traj={traj}, start={start}: {e}",
+                        Logger.Levels.warning,
+                    ).log()
+                    continue
+
+                line = dto.to_json_line()
+                fout.write(line + "\n")
+                fout.flush()
+                seen_trajectories[tid] = json.loads(line)
+
+                for c in shard.consts:
+                    delta_val = dto.delta_estimate.get(c.name)
+                    identified_val = bool((dto.identified or {}).get(c.name, False))
+                    if identified_val:
+                        identified_count[c.name] += 1
+                        if delta_val is not None:
+                            cur = best_delta.get(c.name)
+                            if cur is None or delta_val > cur:
+                                best_delta[c.name] = delta_val
 
                 total += 1
-                if identified:
-                    identified_count += 1
-                if best_delta is None or delta > best_delta:
-                    best_delta = delta
 
-        identified_pct = identified_count / total if total else 0.0
-        return best_delta, identified_pct, True
+        # Build the final result: only include constants that passed the threshold.
+        result: Dict[Constant, Optional[float]] = {}
+        for c in shard.consts:
+            ident_pct = identified_count[c.name] / total if total else 0.0
+            if (
+                ident_pct >= analysis_config.IDENTIFY_THRESHOLD
+                and best_delta.get(c.name) is not None
+            ):
+                result[c] = best_delta[c.name]
+
+        return result

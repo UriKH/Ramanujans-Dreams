@@ -16,7 +16,7 @@ class Formatter(ABC):
     """
     registry: Dict[str, Type['Formatter']] = dict()
 
-    def __init__(self, const: str | Constant, shifts: list,
+    def __init__(self, const: Union[str, Constant, List[Union[str, Constant]]], shifts: list,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
                  use_inv_t: bool = None,
@@ -24,7 +24,14 @@ class Formatter(ABC):
         if use_inv_t is None:
             use_inv_t = config.search.DEFAULT_USES_INV_T
 
-        self.const = const.name if isinstance(const, Constant) else const
+        # Normalise to a list of name strings; accept single constant or list.
+        if isinstance(const, list):
+            self.consts: List[str] = [
+                c.name if isinstance(c, Constant) else c for c in const
+            ]
+        else:
+            self.consts = [const.name if isinstance(const, Constant) else const]
+
         self.shifts = shifts
         self.selected_start_points = selected_start_points
         self.only_selected = only_selected
@@ -62,6 +69,11 @@ class Formatter(ABC):
             name_segments_concat.append(segment_str)
         self.cmf_name = '__'.join(name_segments_concat)
 
+    @property
+    def const(self) -> str:
+        """Backward-compatible accessor — returns the first (primary) constant name."""
+        return self.consts[0]
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         Formatter.registry[cls.__name__] = cls
@@ -77,7 +89,7 @@ class Formatter(ABC):
     @abstractmethod
     def __hash__(self):
         return hash((
-            self.const,
+            tuple(self.consts),
             tuple(self.shifts if self.shifts else []),
             frozenset(self.selected_start_points if self.selected_start_points else []),
             self.only_selected,
@@ -104,7 +116,7 @@ class Formatter(ABC):
             points = [[v if isinstance(v, int) else str(v) for v in p] for p in self.selected_start_points]
 
         return {
-            'const': self.const.name if isinstance(self.const, Constant) else self.const,
+            'consts': self.consts,
             'use_inv_t': self.use_inv_t,
             'shifts': shifts,
             'selected_start_points': points,
