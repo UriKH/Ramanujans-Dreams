@@ -100,18 +100,15 @@ class ShardExtractorMod(ExtractionModScheme):
                     ) as export_stream:
                         export_stream(shards, cmd_data.cmf_name)
 
-            # DB-ready ShardDTO records (written once per CMF, under the first constant's dir).
+            # DB-ready ShardDTO records (flat file per CMF at root).
             if sys_config.EXPORT_CMFS:
-                primary_const = consts[0]
                 write_shard_records(
                     sys_config.EXPORT_CMFS,
-                    primary_const,
                     cmd_data.cmf_name,
                     shards,
                 )
                 update_cmf_hyperplanes(
                     sys_config.EXPORT_CMFS,
-                    primary_const,
                     cmd_data.cmf_name,
                     extractor.hyperplanes,
                 )
@@ -309,7 +306,7 @@ class ShardExtractor(ExtractionScheme):
             return None
 
         dtos = read_shard_records(
-            sys_config.EXPORT_CMFS, self.const, self.cmf_data.cmf_name
+            sys_config.EXPORT_CMFS, self.cmf_data.cmf_name
         )
         if not dtos:
             return None

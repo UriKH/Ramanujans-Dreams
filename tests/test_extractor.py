@@ -242,7 +242,7 @@ def _write_cache(tmp_path, cmf_data, hps, encodings):
     for enc in encodings:
         pt = Position({s: v for s, v in zip(symbols, enc)})  # any interior witness
         shards.append(Shard.from_cmf_data(cmf_data, e, list(hps), list(enc), pt))
-    write_shard_records(str(tmp_path), e, cmf_data.cmf_name, shards)
+    write_shard_records(str(tmp_path), cmf_data.cmf_name, shards)
 
 
 def test_load_shard_cache_skips_extraction(monkeypatch, tmp_path):

@@ -192,7 +192,12 @@ class SearcherModV1(SearcherModScheme):
         # (Tier-2 workers use it for delta_sequence etc.).
         primary_sympy = identified_consts[0].value_sympy if identified_consts else None
 
-        for traj, start in pairs:
+        for traj, start in SmartTQDM(
+            pairs,
+            desc=f"  Shard {shard_id[:8]}… trajectories",
+            leave=False,
+            **sys_config.TQDM_CONFIG,
+        ):
             start_t = _position_to_tuple(start)
             dir_t = _position_to_tuple(traj)
             trajectory_id = derive_trajectory_id(

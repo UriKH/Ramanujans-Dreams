@@ -7,6 +7,7 @@ import warnings
 from typing import List, Optional, TYPE_CHECKING, Tuple
 
 import sympy as sp
+from sqlalchemy.engine import result
 from sympy.abc import n
 
 from LIReC.db.access import db
@@ -970,9 +971,19 @@ class TrajectoryAttributesHandler:
         These encode the growth rates η (factorial), γ (exponential), β (polynomial)
         from the NeurIPS 2024 paper in symbolic form.
         """
-        return self._get(f"asymptotics_{precision}", lambda:
-            self.linear_recurrence().asymptotics(precision)
-        )
+        def compute():
+            import random
+            rand = random.randint(1, 1_000_000)
+            Logger(f'computing asymptotics [id={rand}] ... ').log()
+            result = self.linear_recurrence().asymptotics(precision)
+            Logger(f'computation successful [id={rand}]!').log()
+            return result
+
+        return self._get(f"asymptotics_{precision}", compute)
+
+        # return self._get(f"asymptotics_{precision}", lambda:
+        #     self.linear_recurrence().asymptotics(precision)
+        # )
 
     def identified(self) -> bool:
         """Whether the trajectory both identifies and converges to the target.

@@ -156,30 +156,33 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         num_workers = sys_config.NUM_BACKGROUND_WORKERS
         config_overrides = config.export_configurations()
 
-        for constant in SmartTQDM(
-            list(self.priorities.keys()),
-            desc='Post-process per constant: ',
+        dir_path = sys_config.EXPORT_SEARCH_RESULTS
+        if not os.path.isdir(dir_path):
+            Logger(
+                f"No search results directory at {dir_path}; skipping post-process.",
+                Logger.Levels.warning,
+            ).log()
+            return
+
+        # Flat layout: EXPORT_SEARCH_RESULTS/<shard_id>.jsonl (no constant subdir).
+        jsonl_files = sorted(
+            f for f in os.listdir(dir_path)
+            if f.endswith('.' + Formats.JSONL.value)
+        )
+        if not jsonl_files:
+            return
+
+        # One worker_pool per shard file (writer owns the file).
+        for shard_jsonl in SmartTQDM(
+            jsonl_files,
+            desc='Post-process shards: ',
             **sys_config.TQDM_CONFIG,
         ):
-            dir_path = os.path.join(
-                sys_config.EXPORT_SEARCH_RESULTS, constant.name,
+            self._run_jsonl(
+                os.path.join(dir_path, shard_jsonl),
+                num_workers=num_workers,
+                config_overrides=config_overrides,
             )
-            if not os.path.isdir(dir_path):
-                Logger(
-                    f"No search results directory for {constant.name}; skipping.",
-                    Logger.Levels.warning,
-                ).log()
-                continue
-
-            # One worker_pool per shard file (writer owns the file).
-            for shard_jsonl in sorted(os.listdir(dir_path)):
-                if not shard_jsonl.endswith('.' + Formats.JSONL.value):
-                    continue
-                self._run_jsonl(
-                    os.path.join(dir_path, shard_jsonl),
-                    num_workers=num_workers,
-                    config_overrides=config_overrides,
-                )
 
     # ------------------------------------------------------------------
     # Per-file pipeline

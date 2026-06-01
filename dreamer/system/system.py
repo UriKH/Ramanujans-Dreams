@@ -15,7 +15,7 @@ from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.schemes.post_process_scheme import PostProcessModScheme
 from dreamer.utils.schemes.extraction_scheme import ExtractionModScheme
 from dreamer.utils.storage import Exporter, Importer, Formats
-from dreamer.utils.storage.atlas_writer import write_cmf_records
+from dreamer.utils.storage.atlas_writer import update_found_constants, write_cmf_records
 from dreamer.utils.storage.summary import write_summary
 from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
 from dreamer.utils.types import CMFData
@@ -82,6 +82,9 @@ class System:
         if path := sys_config.EXPORT_CMFS:
             os.makedirs(path, exist_ok=True)
 
+            seen_cmf_ids: set = set()
+            all_unique_cmf_data = []
+
             for const, l in cmf_data.items():
                 safe_key = "".join(c for c in const.name if c.isalnum() or c in ('-', '_'))
                 const_path = os.path.join(path, safe_key)
@@ -92,13 +95,18 @@ class System:
                         data=[data],
                         fmt=Formats.PICKLE
                     )
-                # DB-ready DTO records, written idempotently alongside the
-                # runtime pickle dump.  Future Atlas migrations will read
-                # these JSONL files directly.
-                write_cmf_records(path, const, l)
+                    if id(data) not in seen_cmf_ids:
+                        seen_cmf_ids.add(id(data))
+                        all_unique_cmf_data.append(data)
+
                 Logger(
                     f'CMFs for {const.name} exported to {const_path}', Logger.Levels.info
                 ).log()
+
+            # DB-ready DTO records: flat cmfs.jsonl / cmf_families.jsonl at root.
+            # found_constants written empty here — updated after analysis
+            # via update_found_constants() to reflect only actually-found constants.
+            write_cmf_records(path, all_unique_cmf_data)
 
         # print constants and CMFs
         for constant, funcs in cmf_data.items():
@@ -132,6 +140,18 @@ class System:
         self._analysis_relevant_cmf_names = relevant_cmf_names
         priorities = self.__analysis_stage(shard_dict)
         Logger.timer_summary()
+
+        # Update found_constants in cmfs.jsonl for every CMF that was
+        # actually identified in the analysis stage.
+        if (path := sys_config.EXPORT_CMFS) and priorities:
+            seen_updates: set = set()
+            for const, shards in priorities.items():
+                for shard in shards:
+                    cmf_name = getattr(shard, 'cmf_name', None)
+                    key = (cmf_name, const.name)
+                    if cmf_name and key not in seen_updates:
+                        seen_updates.add(key)
+                        update_found_constants(path, cmf_name, [const.name])
 
         # Store priorities to be used in the search stage and future runs
         filtered_priorities = dict()

@@ -88,9 +88,10 @@ class SearchConfig(Configurable):
     #            yet implemented; will run as a separate pipeline pass.
     TIER2_ATTRIBUTES: Tuple[str, ...] = field(
         default=(
-            ("eigenvalues", "if_identified"), ("eigenvalue_errors", "if_identified"), ("spectral_gap", "if_identified"),
-            ("companion_coboundary_rank", "if_identified"), ("asymptotics", "if_identified"),
-            ("convergence_class", "if_identified"), ("kamidelta", "if_identified"), ("gcd_slope", "if_identified")
+            # ("eigenvalues", "if_identified"), ("eigenvalue_errors", "if_identified"), ("spectral_gap", "if_identified"),
+            # ("companion_coboundary_rank", "if_identified"), ("asymptotics", "if_identified"),
+            # ("convergence_class", "if_identified"), ("kamidelta", "if_identified"), ("gcd_slope", "if_identified")
+            ("asymptotics", "if_identified")
         ),
         metadata={"description": "Background-worker attributes computed asynchronously during search. Empty disables the worker/writer subprocesses entirely."},
     )

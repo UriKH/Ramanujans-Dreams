@@ -83,12 +83,12 @@ class ShardDTO:
     shard_id: str
     cmf_id: str
     shard_encoding: Tuple[int, ...]         # sign-vector encoding of the shard
-    dimensionality: int
+    dimensionality: int                     # number of CMF variables (ambient dim)
+    dimension: int                          # number of free (non-redundant) variables
     found_constants: List[str]
     # --- optional fields (computed lazily or not yet available) ---
     interior_point: Optional[Tuple[int, ...]] = None
-    volume_estimate: Optional[float] = None
-    orthogonality_defect: Optional[float] = None
+    orthogonality_defect: Optional[float] = None  # LLL-based; None when fpylll unavailable
 
     def to_json_line(self) -> str:
         return json.dumps(dataclasses.asdict(self))
@@ -100,9 +100,9 @@ class ShardDTO:
             cmf_id=d["cmf_id"],
             shard_encoding=tuple(d["shard_encoding"]),
             dimensionality=d["dimensionality"],
+            dimension=d.get("dimension", d["dimensionality"]),  # backward compat
             found_constants=d["found_constants"],
             interior_point=tuple(d["interior_point"]) if d.get("interior_point") is not None else None,
-            volume_estimate=d.get("volume_estimate"),
             orthogonality_defect=d.get("orthogonality_defect"),
         )
 

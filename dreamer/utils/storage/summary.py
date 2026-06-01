@@ -121,16 +121,16 @@ def _finite_float(v) -> Optional[float]:
 # ---------------------------------------------------------------------------
 
 def _load_cmf_metadata(export_cmfs_root: Optional[str], constant_name: str) -> Dict[str, dict]:
-    """Return ``{cmf_id: cmf_dict}`` from ``<root>/<safe_const>/cmfs.jsonl``.
+    """Return ``{cmf_id: cmf_dict}`` from the flat ``<root>/cmfs.jsonl``.
 
     Empty when the file or directory is missing — the summary degrades to
     showing only the per-shard data with no family / shift annotations.
-    The ``safe_const`` heuristic mirrors :func:`atlas_writer.write_shard_records`.
+    The *constant_name* parameter is kept for API stability but is no longer
+    used to scope the file path (all CMFs are stored together in one file).
     """
     if not export_cmfs_root:
         return {}
-    safe_const = "".join(c for c in constant_name if c.isalnum() or c in ("-", "_"))
-    path = os.path.join(export_cmfs_root, safe_const, "cmfs.jsonl")
+    path = os.path.join(export_cmfs_root, "cmfs.jsonl")
     if not os.path.isfile(path):
         return {}
     out: Dict[str, dict] = {}

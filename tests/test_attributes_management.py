@@ -119,10 +119,10 @@ class TestDTOFieldOrdering:
             cmf_id="c1",
             shard_encoding=(1, -1),
             dimensionality=2,
+            dimension=2,
             found_constants=["pi"],
         )
         assert dto.shard_id == "s1"
-        assert dto.volume_estimate is None
         assert dto.orthogonality_defect is None
         assert dto.interior_point is None
 
@@ -132,13 +132,13 @@ class TestDTOFieldOrdering:
             cmf_id="c2",
             shard_encoding=(1,),
             dimensionality=1,
+            dimension=1,
             found_constants=[],
             interior_point=(3, 4),
-            volume_estimate=1.5,
             orthogonality_defect=0.1,
         )
         assert dto.interior_point == (3, 4)
-        assert dto.volume_estimate == 1.5
+        assert dto.orthogonality_defect == 0.1
 
 
 class TestDTOSerializationRoundTrips:
@@ -213,6 +213,7 @@ class TestDTOSerializationRoundTrips:
             cmf_id="cf",
             shard_encoding=(1, -1, 1),
             dimensionality=3,
+            dimension=2,
             found_constants=["e"],
             interior_point=(2, 3, 4),
         )
@@ -2254,9 +2255,7 @@ class TestTier3PostProcess:
         monkeypatch.setattr(config.post_process, "TIER3_ATTRIBUTES", ())
 
         # Seed a JSONL the stage would otherwise process — assert it's untouched.
-        const_dir = tmp_path / e.name
-        const_dir.mkdir()
-        jsonl = const_dir / "anything.jsonl"
+        jsonl = tmp_path / "anything.jsonl"
         seeded = json.dumps({
             "trajectory_id": "t1",
             "cmf_id": simple_shard.cmf_name,
@@ -2283,9 +2282,8 @@ class TestTier3PostProcess:
         )
 
         cmf_id, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
-        const_dir = tmp_path / e.name
-        const_dir.mkdir()
-        jsonl = const_dir / f"{shard_id}.jsonl"
+        # Flat layout: JSONL directly in EXPORT_SEARCH_RESULTS (no const subdir).
+        jsonl = tmp_path / f"{shard_id}.jsonl"
         # All trajectories already carry the only configured Tier-3 attr.
         jsonl.write_text(
             json.dumps({
@@ -2334,9 +2332,8 @@ class TestTier3PostProcess:
         )
 
         cmf_id, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
-        const_dir = tmp_path / e.name
-        const_dir.mkdir()
-        jsonl = const_dir / f"{shard_id}.jsonl"
+        # Flat layout: JSONL directly in EXPORT_SEARCH_RESULTS (no const subdir).
+        jsonl = tmp_path / f"{shard_id}.jsonl"
         base_record = {
             "trajectory_id": "t-needs-tier3",
             "cmf_id": cmf_id,
@@ -2483,27 +2480,28 @@ class TestAtlasWriter:
         assert ids == {"a", "b"}
 
     def test_write_cmf_records_creates_both_files(self, tmp_path, simple_cmf, zero_shift):
-        """Loading-stage helper emits cmfs.jsonl + cmf_families.jsonl."""
+        """Loading-stage helper emits flat cmfs.jsonl + cmf_families.jsonl."""
         from dreamer.utils.storage.atlas_writer import write_cmf_records
         from dreamer.utils.types import CMFData
 
         data = CMFData(cmf=simple_cmf, shift=zero_shift, cmf_name="test_cmf")
-        write_cmf_records(str(tmp_path), e, [data])
+        write_cmf_records(str(tmp_path), [data])
 
-        const_dir = tmp_path / e.name
-        assert (const_dir / "cmfs.jsonl").exists()
-        assert (const_dir / "cmf_families.jsonl").exists()
+        assert (tmp_path / "cmfs.jsonl").exists()
+        assert (tmp_path / "cmf_families.jsonl").exists()
 
         cmf_records = [
-            json.loads(ln) for ln in (const_dir / "cmfs.jsonl").read_text().splitlines()
+            json.loads(ln) for ln in (tmp_path / "cmfs.jsonl").read_text().splitlines()
             if ln.strip()
         ]
         family_records = [
-            json.loads(ln) for ln in (const_dir / "cmf_families.jsonl").read_text().splitlines()
+            json.loads(ln) for ln in (tmp_path / "cmf_families.jsonl").read_text().splitlines()
             if ln.strip()
         ]
         assert len(cmf_records) == 1
         assert cmf_records[0]["cmf_id"] == "test_cmf"
+        # found_constants is written empty initially (filled in post-analysis).
+        assert cmf_records[0]["found_constants"] == []
         assert len(family_records) == 1
         assert family_records[0]["family_id"] == "1F1"
 
@@ -2513,26 +2511,24 @@ class TestAtlasWriter:
         from dreamer.utils.types import CMFData
 
         data = CMFData(cmf=simple_cmf, shift=zero_shift, cmf_name="test_cmf")
-        write_cmf_records(str(tmp_path), e, [data])
-        write_cmf_records(str(tmp_path), e, [data])  # rerun
+        write_cmf_records(str(tmp_path), [data])
+        write_cmf_records(str(tmp_path), [data])  # rerun
 
-        const_dir = tmp_path / e.name
-        cmf_lines = [ln for ln in (const_dir / "cmfs.jsonl").read_text().splitlines() if ln.strip()]
-        family_lines = [ln for ln in (const_dir / "cmf_families.jsonl").read_text().splitlines() if ln.strip()]
+        cmf_lines = [ln for ln in (tmp_path / "cmfs.jsonl").read_text().splitlines() if ln.strip()]
+        family_lines = [ln for ln in (tmp_path / "cmf_families.jsonl").read_text().splitlines() if ln.strip()]
         assert len(cmf_lines) == 1
         assert len(family_lines) == 1
 
     def test_write_shard_records_creates_file(self, tmp_path, simple_shard):
-        """Extraction-stage helper emits ``<cmf>__shards.jsonl``."""
+        """Extraction-stage helper emits flat ``<cmf>__shards.jsonl``."""
         from dreamer.utils.storage.atlas_writer import write_shard_records
 
         written = write_shard_records(
-            str(tmp_path), e, simple_shard.cmf_name, [simple_shard]
+            str(tmp_path), simple_shard.cmf_name, [simple_shard]
         )
         assert written == 1
 
-        const_dir = tmp_path / e.name
-        files = list(const_dir.glob("*__shards.jsonl"))
+        files = list(tmp_path.glob("*__shards.jsonl"))
         assert len(files) == 1
         records = [json.loads(ln) for ln in files[0].read_text().splitlines() if ln.strip()]
         assert len(records) == 1
@@ -2542,15 +2538,14 @@ class TestAtlasWriter:
         """Same shard written twice → file still has one record."""
         from dreamer.utils.storage.atlas_writer import write_shard_records
 
-        write_shard_records(str(tmp_path), e, simple_shard.cmf_name, [simple_shard])
+        write_shard_records(str(tmp_path), simple_shard.cmf_name, [simple_shard])
         # Second write with same shard → no growth
         new_written = write_shard_records(
-            str(tmp_path), e, simple_shard.cmf_name, [simple_shard]
+            str(tmp_path), simple_shard.cmf_name, [simple_shard]
         )
         assert new_written == 0
 
-        const_dir = tmp_path / e.name
-        files = list(const_dir.glob("*__shards.jsonl"))
+        files = list(tmp_path.glob("*__shards.jsonl"))
         lines = [ln for ln in files[0].read_text().splitlines() if ln.strip()]
         assert len(lines) == 1
 
@@ -2558,8 +2553,8 @@ class TestAtlasWriter:
         """ShardDTO survives JSONL serialise → parse → from_dict."""
         from dreamer.utils.storage.atlas_writer import write_shard_records
 
-        write_shard_records(str(tmp_path), e, simple_shard.cmf_name, [simple_shard])
-        path = next((tmp_path / e.name).glob("*__shards.jsonl"))
+        write_shard_records(str(tmp_path), simple_shard.cmf_name, [simple_shard])
+        path = next(tmp_path.glob("*__shards.jsonl"))
         record = json.loads(path.read_text().splitlines()[0])
         restored = ShardDTO.from_dict(record)
         assert restored.shard_id == derive_cmf_and_shard_ids(simple_shard)[1]
@@ -2577,13 +2572,13 @@ class TestAtlasWriter:
         from dreamer.utils.types import CMFData
 
         data = CMFData(cmf=simple_cmf, shift=zero_shift, cmf_name="cmf_a")
-        write_cmf_records(str(tmp_path), e, [data])
-        path = tmp_path / e.name / "cmfs.jsonl"
+        write_cmf_records(str(tmp_path), [data])
+        path = tmp_path / "cmfs.jsonl"
         record_before = json.loads(path.read_text().splitlines()[0])
         assert record_before["cmf_hyperplanes"] == []
 
         hps = [Hyperplane(symbols[0], symbols), Hyperplane(symbols[1], symbols)]
-        updated = update_cmf_hyperplanes(str(tmp_path), e, "cmf_a", hps)
+        updated = update_cmf_hyperplanes(str(tmp_path), "cmf_a", hps)
         assert updated is True
 
         record_after = json.loads(path.read_text().splitlines()[0])
@@ -2602,10 +2597,10 @@ class TestAtlasWriter:
         from dreamer.utils.types import CMFData
 
         data = CMFData(cmf=simple_cmf, shift=zero_shift, cmf_name="cmf_a")
-        write_cmf_records(str(tmp_path), e, [data])
+        write_cmf_records(str(tmp_path), [data])
 
         hps = [Hyperplane(symbols[0], symbols)]
-        updated = update_cmf_hyperplanes(str(tmp_path), e, "nope", hps)
+        updated = update_cmf_hyperplanes(str(tmp_path), "nope", hps)
         assert updated is False
 
     def test_update_cmf_hyperplanes_missing_file(self, tmp_path, symbols):
@@ -2613,7 +2608,7 @@ class TestAtlasWriter:
         from dreamer.utils.storage.atlas_writer import update_cmf_hyperplanes
 
         hps = [Hyperplane(symbols[0], symbols)]
-        updated = update_cmf_hyperplanes(str(tmp_path), e, "anything", hps)
+        updated = update_cmf_hyperplanes(str(tmp_path), "anything", hps)
         assert updated is False
 
     def test_cmf_name_does_not_contain_constant(self, simple_cmf):

@@ -62,6 +62,27 @@ The system is desigend as a modular pipeline:
 
 ## Near-Term Tasks (Active / Next Up)
 
+- [x] 2026-06-01 — UX improvements + bug fixes (6 tasks, branch `feature/ux-improvements-june`).
+  * **Task 1 — "not identified" print:** `AnalyzerModV1` now logs `"Shard … not identified"` for each constant that fails the identification threshold, matching the old per-constant behavior.
+  * **Task 2 — per-shard progress bars:** Inner trajectory loops in `_analyze_shard` (analyzer) and `_produce` (searcher) are now wrapped with `SmartTQDM(leave=False)` so a sub-bar appears under each shard row.
+  * **Task 3 — post-process flat layout bug fix:** `Tier3PostProcessModV1.execute()` was looking for `EXPORT_SEARCH_RESULTS/<const_name>/` (old per-constant subdir layout) but the JSONL files are flat since the multi-constant refactor.  Fixed to scan `EXPORT_SEARCH_RESULTS/*.jsonl` directly.
+  * **Task 4 (answered) — search-only-for-identified is intentional:** The deep-search stage only walks trajectories for the constants that passed the analysis threshold.  This is an optimization — there is no value deepening a constant that the analysis sampler did not identify.  Confirmed, no code change.
+  * **Task 5 — ShardDTO update:**
+    - Removed `volume_estimate` (was never populated, dead field).
+    - Added `dimension` field (rank of A — effective free variables, equal to `dimensionality` in typical shards).
+    - `orthogonality_defect` is now computed via LLL reduction (fpylll) of the rows of `shard.A` (hyperplane normals), with graceful fallback to the unreduced defect on Windows / no-fpylll.  A defect of 1.0 = perfectly orthogonal normals; higher = more skewed shard geometry.
+    - `build_shard_dto` in `atlas_writer.py` now populates all three fields.
+  * **Task 6 — CMF storage flat layout + deferred `found_constants`:**
+    - `cmfs.jsonl` and `cmf_families.jsonl` moved from `<EXPORT_CMFS>/<const>/` to flat `<EXPORT_CMFS>/`.  All CMFs across all constants share one file; constant scope no longer needed at the CMF metadata level.
+    - `<cmf>__shards.jsonl` also moved to flat `<EXPORT_CMFS>/` (no longer in const subdir).
+    - `found_constants` in `cmfs.jsonl` is now written **empty** at load time.  After the analysis stage completes, `update_found_constants(root, cmf_name, [const.name])` is called for every (CMF, constant) pair that passed the identification threshold, so only actually-found constants appear.
+    - New helper `update_found_constants` in `atlas_writer.py`.
+    - `summary.py` `_load_cmf_metadata` reads from flat root.
+    - 428 tests pass (1 pre-existing unrelated failure).
+  * **Task 7 (design, pending) — shards reconstructable from JSONL:**  See open question in Notes section.
+
+
+
 - [x] 2026-05-31 — Shard symmetry utilization via **canonical teleportation** (S_p × S_q for pFq).  One representative per orbit is extracted; integrated into both the exact and heuristic methods.  Spec: [`context/shard_symmetries/SYMMETRIES.md`](shard_symmetries/SYMMETRIES.md).
   * **Replaced the earlier (reverted) fundamental-domain approach.**  The first attempt injected ordering hyperplanes (`x_i >= x_{i+1}`) as LP constraints / domain-rejected the reverse-search base.  That was **wrong**: intersecting the arrangement with the convex domain cone disconnects the Avis–Fukuda parent tree and silently drops in-domain shards (measured: pFq(3,1) returned a strict subset).  All of that plumbing (`sym_p`/`sym_q` everywhere) was removed.
   * **Method (correct, verified):** explore the *unconstrained* arrangement; teleport each discovered interior point into a fundamental domain (block-sort coordinates per S_p / S_q) and fingerprint by `sign(A @ canonical_point + c)`.  This is an exact orbit invariant — needs **no symmetry-group enumeration**, so it scales (heuristic is O(D log D)/point, fully vectorised; works to 6F5).
@@ -223,7 +244,12 @@ The system is desigend as a modular pipeline:
 
 ## Notes / Open Questions
 
-<!-- Assumptions, blockers, design decisions pending review -->
+<!-- Assumptions, blockers, design questions pending review -->
+
+- **Task 7 (open) — Shard reconstruction from JSONL / self-sustaining pipeline (2026-06-01).**
+  Currently `PATH_TO_SEARCHABLES` points to a dir of pickle files (`<const>/<cmf>.pkl`) that store full `CMFData` + deserialized `Shard` objects.  The user wants the pipeline to be self-sustaining: given `<cmf>__shards.jsonl` (which has `shard_encoding` + `interior_point`) and the CMF pickle (which has the CMF object and shift), a `Shard` can be fully reconstructed by recomputing hyperplanes from the CMF and applying the encoding + interior point.  `ShardExtractor._load_cached_encodings` already does exactly this.  The next step is to wire `PATH_TO_SEARCHABLES` to load from the flat JSONL instead of (or in addition to) the pickle files.  Similarly, analysis-priorities export could store shard IDs only (not full shard objects) and resolve them from `<cmf>__shards.jsonl` at load time.  **Decision needed:** keep pkl as runtime bridge (recommended — avoids re-parsing sympy matrices from JSON) and make the JSONL the canonical human-readable shard cache, or also serialize the CMF matrices to JSON for full pickle-independence?
+
+
 
 - **Stopping is now Good-Turing missing-mass (2026-05-30).**  `m̂ = f1/n` estimates P(next sample is a new cell).  Robust to "plateau then spike": a large undiscovered reservoir keeps `f1` high so it won't stop early.  Each generation phase has its own tracker; time/ray budgets are global.  Face-aligned shooting samples the central arrangement's lower-dim faces *heuristically* (integer nullspace of a random hyperplane subset + random offsets), sidestepping the exact face enumeration that proved intractable below.
 

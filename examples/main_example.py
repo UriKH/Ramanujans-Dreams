@@ -1,7 +1,7 @@
 from dreamer import System, config
 from dreamer import analysis, search, extraction, post_process
 from dreamer.loading import pFq
-from dreamer import log
+from dreamer import log, pi
 
 
 # Because of pickling format we need to define these functions here
@@ -32,7 +32,7 @@ if __name__ == '__main__':
         },
         extraction={
             # In this case this indicates usage of pFq symmetries utilization to reduce the number of shards
-            'IGNORE_DUPLICATE_SEARCHABLES': False,
+            'IGNORE_DUPLICATE_SEARCHABLES': True,
             #   'auto'      -- try exact (lrs + MILP), fall back to heuristic on timeout (DEFAULT)
             #   'exact'     -- lrs + MILP only; raises on failure
             #   'heuristic' -- ray-shooting only (Best for high dimensional CMFs)
@@ -43,7 +43,7 @@ if __name__ == '__main__':
             # Under 'exact'/'heuristic' alone, only the matching knob applies.
             'EXACT_TIMEOUT_SECONDS': 60.0,
             'HEURISTIC_TIMEOUT_SECONDS': 200.0,
-            'LOAD_SHARD_CACHE': False
+            'LOAD_SHARD_CACHE': True
         },
         search={
             # number of trajectories to be auto-generated in search if needed by the module
@@ -57,9 +57,9 @@ if __name__ == '__main__':
     )
 
     System(
-        function_sources=[pFq(log(2), 2, 1, -1)],
+        function_sources=[pFq([log(2), pi], 2, 1, -1)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
         searcher=search.SearcherModV1,
         post_processor=post_process.Tier3PostProcessModV1,
-    ).run(constants=[log(2)])
+    ).run(constants=[log(2), pi])

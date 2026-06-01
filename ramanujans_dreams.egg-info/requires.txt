@@ -1,0 +1,20 @@
+peewee
+sympy
+ramanujantools @ git+https://github.com/RamanujanMachine/ramanujantools.git
+matplotlib
+numpy
+mpmath
+networkx
+tqdm
+numba
+pandas
+scipy
+pulp
+mip
+LIReC @ git+https://github.com/RamanujanMachine/LIReC.git@main
+cysignals
+fpylll
+
+[dev]
+pytest>=8.2.0
+pytest-cov>=4.0.0

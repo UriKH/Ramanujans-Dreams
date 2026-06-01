@@ -135,12 +135,19 @@ class AnalyzerModV1(AnalyzerModScheme):
                 shard_const_best[shard_id] = per_const_best
 
                 if analysis_config.PRINT_FOR_EVERY_SEARCHABLE:
-                    for c, bd in per_const_best.items():
-                        bd_str = f'{bd:.4f}' if bd is not None else 'N/A'
-                        Logger(
-                            f"Shard {shard_id[:8]}…  {c.name}  best_delta={bd_str}",
-                            Logger.Levels.info,
-                        ).log()
+                    for c in shard.consts:
+                        if c in per_const_best:
+                            bd = per_const_best[c]
+                            bd_str = f'{bd:.4f}' if bd is not None else 'N/A'
+                            Logger(
+                                f"Shard {shard_id[:8]}…  {c.name}  best_delta={bd_str}",
+                                Logger.Levels.info,
+                            ).log()
+                        else:
+                            Logger(
+                                f"Shard {shard_id[:8]}…  {c.name}  not identified",
+                                Logger.Levels.info,
+                            ).log()
 
         # Build per-constant priority lists from the analysis results.
         for const in all_constants:
@@ -207,7 +214,12 @@ class AnalyzerModV1(AnalyzerModScheme):
         best_delta: Dict[str, Optional[float]] = {c.name: None for c in shard.consts}
 
         with open(jsonl_path, "a") as fout:
-            for traj, start in pairs:
+            for traj, start in SmartTQDM(
+                pairs,
+                desc=f"  Shard {shard_id[:8]}… trajectories",
+                leave=False,
+                **sys_config.TQDM_CONFIG,
+            ):
                 start_t = _position_to_tuple(start)
                 dir_t = _position_to_tuple(traj)
                 tid = derive_trajectory_id(

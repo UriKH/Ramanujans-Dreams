@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Iterable, List, Set
+from typing import Iterable, List, Optional, Set
 
+import numpy as np
 from ramanujantools.cmf import CMF, pFq
 
 from dreamer.extraction.shard import Shard
@@ -28,6 +29,53 @@ from dreamer.utils.storage.trajectory_attributes import (
     derive_cmf_and_shard_ids,
 )
 from dreamer.utils.types import CMFData
+
+
+# ---------------------------------------------------------------------------
+# Orthogonality defect helper
+# ---------------------------------------------------------------------------
+
+def _compute_orthogonality_defect(A: np.ndarray) -> Optional[float]:
+    """Compute the orthogonality defect of the shard constraint matrix *A*.
+
+    Treats rows of *A* (the hyperplane normal vectors) as lattice vectors,
+    applies LLL reduction (via fpylll), then computes:
+        defect = ∏_i ‖a_i‖ / sqrt(det(A A^T))
+
+    A defect of 1.0 means perfectly orthogonal hyperplane normals.  Higher
+    values indicate a more skewed / ill-conditioned shard geometry.
+
+    Falls back to the defect of the *unreduced* rows when fpylll is
+    unavailable (Windows / no fpylll install).  Returns ``None`` on any
+    unexpected failure.
+    """
+    if A is None or A.size == 0:
+        return None
+
+    try:
+        A_f = np.asarray(A, dtype=np.float64)
+
+        def _defect(M: np.ndarray) -> float:
+            norms = np.linalg.norm(M, axis=1)
+            prod_norms = float(np.prod(norms))
+            gram = M @ M.T
+            det_val = float(np.sqrt(max(0.0, np.linalg.det(gram))))
+            if det_val < 1e-9:
+                return float("inf")
+            return prod_norms / det_val
+
+        try:
+            from fpylll import IntegerMatrix, LLL
+            A_int = np.round(A_f).astype(np.int64)
+            M_fp = IntegerMatrix.from_matrix(A_int.tolist())
+            LLL.reduction(M_fp)
+            A_reduced = np.array([list(row) for row in M_fp], dtype=np.float64)
+            return _defect(A_reduced)
+        except ImportError:
+            # fpylll not available — return raw (unreduced) defect
+            return _defect(A_f)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -105,11 +153,27 @@ def build_shard_dto(shard: Shard) -> ShardDTO:
     ``-1`` means below.  Paired one-to-one with the CMF's hyperplane list
     (stored in ``cmf_hyperplanes`` on the corresponding CmfDTO), which is
     the natural combinatorial label of a shard.
+
+    ``dimension`` is the number of free (non-redundant) CMF variables in this
+    shard — equal to ``dimensionality`` unless the shard lives in a strict
+    affine subspace.
+
+    ``orthogonality_defect`` is computed via LLL reduction of the constraint
+    matrix rows (hyperplane normals).  A value of 1.0 means perfectly
+    orthogonal normals; higher means more skewed geometry.  ``None`` when
+    fpylll is unavailable or the matrix is degenerate.
     """
     cmf_id, shard_id, _ = derive_cmf_and_shard_ids(shard)
 
     encoding = tuple(getattr(shard, "encoding", ()) or ())
     dimensionality = len(shard.symbols)
+    # Effective dimension: number of independent constraint rows (rank of A).
+    dimension = dimensionality
+    if shard.A is not None and shard.A.size > 0:
+        try:
+            dimension = int(np.linalg.matrix_rank(shard.A))
+        except Exception:
+            pass
 
     interior_point = None
     if shard.start_coord is not None:
@@ -118,13 +182,19 @@ def build_shard_dto(shard: Shard) -> ShardDTO:
         except (TypeError, ValueError):
             interior_point = tuple(str(v) for v in shard.start_coord.values())
 
+    orthogonality_defect = _compute_orthogonality_defect(
+        shard.A if shard.A is not None else None
+    )
+
     return ShardDTO(
         shard_id=shard_id,
         cmf_id=cmf_id,
         shard_encoding=encoding,
         dimensionality=dimensionality,
+        dimension=dimension,
         found_constants=[c.name for c in shard.consts],
         interior_point=interior_point,
+        orthogonality_defect=orthogonality_defect,
     )
 
 
@@ -196,31 +266,71 @@ def append_dtos_jsonl(
 
 def write_cmf_records(
     root: str,
-    const: Constant,
     cmf_data_list: List[CMFData],
 ) -> None:
-    """Write CmfDTOs + CmfFamilyDTOs for *const* into ``<root>/<const>/``.
+    """Write CmfDTOs + CmfFamilyDTOs into flat ``<root>/cmfs.jsonl``.
 
-    Two files are produced (or extended) per constant directory:
-      * ``cmfs.jsonl``        — one ``CmfDTO`` per CMF.
+    Two files are produced (or extended) at the root level — one file for
+    all CMFs across all constants, one for all families:
+      * ``cmfs.jsonl``         — one ``CmfDTO`` per CMF (``found_constants``
+                                 starts empty; call :func:`update_found_constants`
+                                 after analysis to populate it).
       * ``cmf_families.jsonl`` — one ``CmfFamilyDTO`` per distinct family.
     """
-    safe_const = "".join(c for c in const.name if c.isalnum() or c in ("-", "_"))
-    const_path = os.path.join(root, safe_const)
-    os.makedirs(const_path, exist_ok=True)
+    os.makedirs(root, exist_ok=True)
 
-    cmf_dtos = [build_cmf_dto(data, [const]) for data in cmf_data_list]
+    # Write with found_constants=[] — updated after analysis via
+    # update_found_constants() once we know which constants were actually found.
+    cmf_dtos = [build_cmf_dto(data, []) for data in cmf_data_list]
     family_dtos = [build_cmf_family_dto(data.cmf) for data in cmf_data_list]
 
-    append_dtos_jsonl(os.path.join(const_path, "cmfs.jsonl"), cmf_dtos, "cmf_id")
-    append_dtos_jsonl(
-        os.path.join(const_path, "cmf_families.jsonl"), family_dtos, "family_id"
-    )
+    append_dtos_jsonl(os.path.join(root, "cmfs.jsonl"), cmf_dtos, "cmf_id")
+    append_dtos_jsonl(os.path.join(root, "cmf_families.jsonl"), family_dtos, "family_id")
+
+
+def update_found_constants(
+    root: str,
+    cmf_name: str,
+    const_names: List[str],
+) -> bool:
+    """Add *const_names* to the ``found_constants`` list of an existing CmfDTO.
+
+    Called after the analysis stage confirms which constants were identified
+    in a CMF.  Only adds names not already present (idempotent).
+
+    Returns ``True`` if the record was found and (possibly) updated.
+    """
+    path = os.path.join(root, "cmfs.jsonl")
+    if not os.path.exists(path):
+        return False
+
+    with open(path, "r") as f:
+        lines = [ln for ln in (line.strip() for line in f) if ln]
+
+    updated = False
+    out_lines: List[str] = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            out_lines.append(line)
+            continue
+        if record.get("cmf_id") == cmf_name:
+            existing = set(record.get("found_constants") or [])
+            new_consts = [c for c in const_names if c not in existing]
+            if new_consts:
+                record["found_constants"] = sorted(existing | set(new_consts))
+                updated = True
+        out_lines.append(json.dumps(record))
+
+    if updated:
+        with open(path, "w") as f:
+            f.write("\n".join(out_lines) + "\n")
+    return updated
 
 
 def update_cmf_hyperplanes(
     root: str,
-    const: Constant,
     cmf_name: str,
     hyperplanes: Iterable,
 ) -> bool:
@@ -228,21 +338,16 @@ def update_cmf_hyperplanes(
 
     The loading stage writes the CMF record with an empty hyperplane list
     because hyperplanes are only known after extraction.  This helper
-    rewrites the existing ``cmfs.jsonl`` line for ``cmf_name`` so the
-    record is complete.
+    rewrites the existing ``<root>/cmfs.jsonl`` line for ``cmf_name`` so
+    the record is complete.
 
     Implementation: read all records, update the matching one in place,
-    rewrite the file.  ``cmfs.jsonl`` is small (typically <10 records per
-    constant) so this is cheap and keeps the file canonical — one row
-    per CMF, no patch records to merge.
+    rewrite the file.  ``cmfs.jsonl`` is typically small so this is cheap.
 
     Parameters
     ----------
     root:
-        Same root used by :func:`write_cmf_records` (typically
-        ``sys_config.EXPORT_CMFS``).
-    const:
-        Constant the CMF belongs to.
+        Same root used by :func:`write_cmf_records` (``sys_config.EXPORT_CMFS``).
     cmf_name:
         Identifies the CmfDTO row to update (matches ``cmf_id``).
     hyperplanes:
@@ -254,8 +359,7 @@ def update_cmf_hyperplanes(
     ``True`` if a record was updated, ``False`` if no matching cmf_id was
     found or the file does not yet exist.
     """
-    safe_const = "".join(c for c in const.name if c.isalnum() or c in ("-", "_"))
-    path = os.path.join(root, safe_const, "cmfs.jsonl")
+    path = os.path.join(root, "cmfs.jsonl")
     if not os.path.exists(path):
         return False
 
@@ -283,30 +387,28 @@ def update_cmf_hyperplanes(
     return updated
 
 
-def shard_records_path(root: str, const: Constant, cmf_name: str) -> str:
-    """Return the ``<root>/<const>/<cmf>__shards.jsonl`` path for a CMF.
+def shard_records_path(root: str, cmf_name: str) -> str:
+    """Return the flat ``<root>/<cmf>__shards.jsonl`` path for a CMF.
 
     Centralises the safe-name munging shared by the writer and reader so
     they can never drift apart.
     """
-    safe_const = "".join(c for c in const.name if c.isalnum() or c in ("-", "_"))
     safe_cmf = "".join(
         c if c.isalnum() or c in ("-", "_") else "_" for c in str(cmf_name)
     ).strip("_") or "unknown"
-    return os.path.join(root, safe_const, f"{safe_cmf}__shards.jsonl")
+    return os.path.join(root, f"{safe_cmf}__shards.jsonl")
 
 
 def write_shard_records(
     root: str,
-    const: Constant,
     cmf_name: str,
     shards: Iterable[Shard],
 ) -> int:
-    """Write ShardDTOs for one CMF into ``<root>/<const>/<cmf>__shards.jsonl``.
+    """Write ShardDTOs for one CMF into ``<root>/<cmf>__shards.jsonl``.
 
     Returns the number of new records appended (existing ids are skipped).
     """
-    path = shard_records_path(root, const, cmf_name)
+    path = shard_records_path(root, cmf_name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     shard_dtos = [build_shard_dto(s) for s in shards]
     return append_dtos_jsonl(path, shard_dtos, "shard_id")
@@ -314,7 +416,6 @@ def write_shard_records(
 
 def read_shard_records(
     root: str,
-    const: Constant,
     cmf_name: str,
 ) -> List[ShardDTO]:
     """Read the cached ShardDTOs for one CMF, or ``[]`` if none on disk.
@@ -324,7 +425,7 @@ def read_shard_records(
     skip re-running the expensive enumeration.  Malformed lines are
     skipped rather than aborting the load.
     """
-    path = shard_records_path(root, const, cmf_name)
+    path = shard_records_path(root, cmf_name)
     if not os.path.isfile(path):
         return []
     out: List[ShardDTO] = []
