@@ -32,16 +32,18 @@ if __name__ == '__main__':
         },
         extraction={
             # In this case this indicates usage of pFq symmetries utilization to reduce the number of shards
-            'IGNORE_DUPLICATE_SEARCHABLES': True,
+            'IGNORE_DUPLICATE_SEARCHABLES': False,
             #   'auto'      -- try exact (lrs + MILP), fall back to heuristic on timeout (DEFAULT)
             #   'exact'     -- lrs + MILP only; raises on failure
             #   'heuristic' -- ray-shooting only (Best for high dimensional CMFs)
             #   'legacy'    -- brute-force lattice scan
             'STRATEGY': 'heuristic',
-            # Wall-clock budget per phase: exact + heuristic each independently
-            # get this many seconds.  Under 'heuristic' alone, controls ray-shooting.
-            'TIMEOUT_SECONDS': 200.0,
-            'LOAD_SHARD_CACHE': True
+            # Under 'auto': exact extractor gets EXACT_TIMEOUT_SECONDS before
+            # falling back; heuristic then gets HEURISTIC_TIMEOUT_SECONDS.
+            # Under 'exact'/'heuristic' alone, only the matching knob applies.
+            'EXACT_TIMEOUT_SECONDS': 60.0,
+            'HEURISTIC_TIMEOUT_SECONDS': 200.0,
+            'LOAD_SHARD_CACHE': False
         },
         search={
             # number of trajectories to be auto-generated in search if needed by the module

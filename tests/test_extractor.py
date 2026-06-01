@@ -140,7 +140,7 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
             captured["heuristic_refine_threshold"] = heuristic_refine_threshold
             captured["heuristic_refine_workers"] = heuristic_refine_workers
             captured["heuristic_num_rays"] = heuristic_num_rays
-            captured["heuristic_max_seconds"] = heuristic_max_seconds  # forwarded from TIMEOUT_SECONDS
+            captured["heuristic_max_seconds"] = heuristic_max_seconds
             captured["heuristic_missing_mass"] = heuristic_missing_mass
             captured["heuristic_face_aligned"] = heuristic_face_aligned
             captured["heuristic_face_subsets"] = heuristic_face_subsets
@@ -157,8 +157,8 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
     shards = extractor.extract(call_number=1)
 
     assert captured["strategy"] == "auto"
-    assert captured["timeout_seconds"] == extraction_config.TIMEOUT_SECONDS
-    assert captured["heuristic_max_seconds"] == extraction_config.TIMEOUT_SECONDS
+    assert captured["timeout_seconds"] == extraction_config.EXACT_TIMEOUT_SECONDS
+    assert captured["heuristic_max_seconds"] == extraction_config.HEURISTIC_TIMEOUT_SECONDS
     assert captured["exact_unbounded_check"] == extraction_config.EXACT_UNBOUNDED_CHECK
     assert captured["heuristic_refine"] == extraction_config.HEURISTIC_REFINE_WITNESSES
     assert captured["heuristic_num_rays"] == extraction_config.HEURISTIC_NUM_RAYS

@@ -211,13 +211,20 @@ class System:
                 for shard in shards:
                     try:
                         _, shard_id, _ = derive_cmf_and_shard_ids(shard)
-                    except Exception:
+                    except Exception as _exc:
+                        Logger(
+                            f"Failed to derive shard id for summary filter: {_exc}",
+                            Logger.Levels.warning,
+                        ).log()
                         continue
                     this_run_shards[const.name].add(shard_id)
+            # Always pass the dict (even if empty) so the summary is scoped
+            # to this run's shards only and never shows orphan JSONLs from
+            # earlier runs.  An empty dict means "extraction found nothing."
             summary_path = write_summary(
                 search_results_root=sys_config.EXPORT_SEARCH_RESULTS,
                 export_cmfs_root=sys_config.EXPORT_CMFS,
-                this_run_shards=dict(this_run_shards) or None,
+                this_run_shards=dict(this_run_shards),
             )
             if summary_path:
                 Logger(

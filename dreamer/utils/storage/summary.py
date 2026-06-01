@@ -223,6 +223,25 @@ def _collect_shard_stats(
             for record in merged.values():
                 stats.add(record)
             out[const_name][cmf_id].append(stats)
+
+    # Shards extracted this run but not yet searched (analysis filtered them
+    # out, or the search stage hasn't run) have no JSONL file.  Add an empty
+    # _ShardStats row for each so the summary still lists them — with zero
+    # trajectories and no best delta — rather than silently omitting them.
+    if this_run_shards is not None:
+        for const_name, allowed in this_run_shards.items():
+            seen_ids = {
+                s.shard_id
+                for shards in out[const_name].values()
+                for s in shards
+            }
+            for shard_id in sorted(allowed):
+                if shard_id not in seen_ids:
+                    cmf_id = shard_id.rsplit("__", 1)[0] if "__" in shard_id else shard_id
+                    out[const_name][cmf_id].append(
+                        _ShardStats(shard_id, cmf_id, const_name)
+                    )
+
     return out
 
 
@@ -426,10 +445,13 @@ def build_summary_markdown(
     header.append("")
 
     if not data:
-        header += [
-            "_No per-shard JSONL files were found — nothing to summarise._",
-            "",
-        ]
+        if this_run_shards is not None:
+            header += ["_Extraction produced no shards in this run._", ""]
+        else:
+            header += [
+                "_No per-shard JSONL files were found — nothing to summarise._",
+                "",
+            ]
         return "\n".join(header)
 
     # Backfill each shard's interior witness point from the

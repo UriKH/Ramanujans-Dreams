@@ -32,19 +32,30 @@ class ExtractionConfig(Configurable):
             )
         },
     )
-    TIMEOUT_SECONDS: float = field(
+    EXACT_TIMEOUT_SECONDS: float = field(
         default=3600.0,
         metadata={
             "description": (
-                "Wall-clock budget (seconds) for each extraction phase.  "
-                "Under STRATEGY='exact': the total budget for the exact "
-                "extractor.  Under STRATEGY='heuristic': the total budget for "
-                "ray-shooting (all phases).  Under STRATEGY='auto': the exact "
-                "extractor gets this budget first; if it times out, the "
-                "heuristic ray-shooter independently gets the same budget.  "
-                "Default 3600 (1 hour).  For high-D scans (e.g. 6F5/11D) "
-                "where exact never finishes, this controls how long the "
-                "heuristic runs."
+                "Wall-clock budget (seconds) for the exact extractor. "
+                "Under STRATEGY='auto': once this deadline passes the exact "
+                "extractor raises ExtractionTimeout and the heuristic takes "
+                "over.  Under STRATEGY='exact': the extractor raises on "
+                "timeout.  Ignored under STRATEGY='heuristic'. "
+                "Default 3600 (1 hour)."
+            )
+        },
+    )
+    HEURISTIC_TIMEOUT_SECONDS: float = field(
+        default=3600.0,
+        metadata={
+            "description": (
+                "Wall-clock budget (seconds) for the heuristic ray-shooter. "
+                "Applies whether the heuristic runs standalone "
+                "(STRATEGY='heuristic') or as the fallback after the exact "
+                "method times out (STRATEGY='auto').  Ignored under "
+                "STRATEGY='exact'.  Default 3600 (1 hour).  For high-D scans "
+                "(e.g. 6F5/11D) where exact never finishes, this controls how "
+                "long the heuristic runs."
             )
         },
     )
@@ -125,7 +136,8 @@ class ExtractionConfig(Configurable):
                 "Optional hard ceiling on samples processed by the heuristic "
                 "(safety cap).  None (default) = unlimited; the missing-mass "
                 "plateau and/or TIMEOUT_SECONDS govern instead.  Set a "
-                "finite value only to bound a run regardless of saturation."
+                "finite value only to bound a run regardless of saturation.  "
+                "Use HEURISTIC_TIMEOUT_SECONDS to time-budget the shoot instead."
             )
         },
     )

@@ -115,10 +115,10 @@ def main() -> int:
         extraction={
             'INIT_POINT_MAX_COORD': 2,
             'IGNORE_DUPLICATE_SEARCHABLES': True,
-            # TIMEOUT_SECONDS is the wall-clock budget for each phase: exact
-            # gets this budget under 'auto', then heuristic also gets it
-            # independently.  Under 'heuristic' alone it governs ray-shooting.
-            'TIMEOUT_SECONDS': 100,
+            # Under 'auto': exact gets EXACT_TIMEOUT_SECONDS, then heuristic
+            # gets HEURISTIC_TIMEOUT_SECONDS independently.
+            'EXACT_TIMEOUT_SECONDS': 60,
+            'HEURISTIC_TIMEOUT_SECONDS': 100,
             # Good-Turing stop: cease a phase when <HEURISTIC_MISSING_MASS
             # fraction of samples would land in a new cell.
             'HEURISTIC_MISSING_MASS': 1e-4,    # lower => more coverage / longer
