@@ -14,8 +14,12 @@ from dreamer.loading.funcs.formatter import Formatter
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.schemes.post_process_scheme import PostProcessModScheme
 from dreamer.utils.schemes.extraction_scheme import ExtractionModScheme
-from dreamer.utils.storage import Exporter, Importer, Formats
-from dreamer.utils.storage.atlas_writer import update_found_constants, write_cmf_records
+from dreamer.utils.storage import Importer, Formats
+from dreamer.utils.storage.atlas_writer import (
+    load_shards_from_export,
+    update_found_constants,
+    write_cmf_records,
+)
 from dreamer.utils.storage.summary import write_summary
 from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
 from dreamer.utils.types import CMFData
@@ -76,7 +80,7 @@ class System:
         # ======================================================
         # LOAD STAGE - loading constants (and optional storage)
         # ======================================================
-        cmf_data = self.__loading_stage(constants)
+        cmf_data, cmf_formatters = self.__loading_stage(constants)
         relevant_cmf_names = self.__derive_relevant_cmf_names(constants, cmf_data)
 
         if path := sys_config.EXPORT_CMFS:
@@ -88,13 +92,17 @@ class System:
             for const, l in cmf_data.items():
                 safe_key = "".join(c for c in const.name if c.isalnum() or c in ('-', '_'))
                 const_path = os.path.join(path, safe_key)
+                os.makedirs(const_path, exist_ok=True)
 
                 for data in l:
-                    Exporter.export(
-                        root=const_path, f_name=data.cmf_name, exists_ok=True, clean_exists=True,
-                        data=[data],
-                        fmt=Formats.PICKLE
-                    )
+                    # Write formatter JSON so shards can be reconstructed without pickle.
+                    formatter = cmf_formatters.get(data.cmf_name)
+                    if formatter is not None:
+                        import json as _json
+                        fmt_path = os.path.join(const_path, f"{data.cmf_name}.json")
+                        with open(fmt_path, "w") as _fh:
+                            _fh.write(_json.dumps(formatter.to_json_obj()))
+
                     if id(data) not in seen_cmf_ids:
                         seen_cmf_ids.add(id(data))
                         all_unique_cmf_data.append(data)
@@ -130,8 +138,16 @@ class System:
         shard_dict = dict()
         if self.extractor:
             shard_dict = self.extractor(cmf_data).execute()
-        elif sys_config.PATH_TO_SEARCHABLES:
-            shard_dict = self.__import_searchables(sys_config.PATH_TO_SEARCHABLES, constants, relevant_cmf_names)
+        elif sys_config.EXPORT_CMFS and os.path.isdir(sys_config.EXPORT_CMFS):
+            # Reconstruct shards from JSONL + formatter JSON (no pickle needed).
+            shard_dict = load_shards_from_export(
+                sys_config.EXPORT_CMFS, constants, relevant_cmf_names
+            )
+            if not shard_dict:
+                Logger(
+                    "No pre-extracted shards found in EXPORT_CMFS; skipping extraction.",
+                    Logger.Levels.warning,
+                ).log()
 
         # =======================================================
         # ANALYSIS STAGE - analyzes shards and prioritize search
@@ -153,11 +169,15 @@ class System:
                         seen_updates.add(key)
                         update_found_constants(path, cmf_name, [const.name])
 
-        # Store priorities to be used in the search stage and future runs
+        # Store priorities to be used in the search stage and future runs.
+        # Written as shard-ID JSON (no pickle) so priorities are stable across
+        # code changes and reconstructable via load_shards_from_export.
         filtered_priorities = dict()
         bad_run = False
         if path := sys_config.EXPORT_ANALYSIS_PRIORITIES:
             os.makedirs(path, exist_ok=True)
+            import json as _json
+            from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
 
             for const, l in priorities.items():
                 if not l:
@@ -170,16 +190,20 @@ class System:
                 const_path = os.path.join(path, const.name)
                 os.makedirs(const_path, exist_ok=True)
                 grouped = self.__group_searchables_by_cmf_name(l)
-                priorities_fmt = Formats(sys_config.EXPORT_ANALYSIS_PRIORITIES_FORMAT)
+
                 for cmf_name, spaces in grouped.items():
-                    Exporter.export(
-                        root=const_path,
-                        f_name=self.__safe_fs_name(cmf_name),
-                        exists_ok=True,
-                        clean_exists=False,
-                        fmt=priorities_fmt,
-                        data=spaces,
-                    )
+                    shard_ids = []
+                    for s in spaces:
+                        try:
+                            _, sid, _ = derive_cmf_and_shard_ids(s)
+                            shard_ids.append(sid)
+                        except Exception:
+                            pass
+                    record = {"cmf_name": cmf_name, "const_name": const.name, "shard_ids": shard_ids}
+                    out_path = os.path.join(const_path, self.__safe_fs_name(cmf_name) + ".json")
+                    with open(out_path, "w") as _fh:
+                        _fh.write(_json.dumps(record))
+
                 Logger(
                     f'Priorities for {const.name} exported to {const_path}', Logger.Levels.info
                 ).log()
@@ -257,7 +281,7 @@ class System:
                 Logger.Levels.warning,
             ).log()
 
-    def __loading_stage(self, constants: List[Constant]) -> Dict[Constant, List[CMFData]]:
+    def __loading_stage(self, constants: List[Constant]):
         """
         Preforms the loading of the inspiration functions from various sources.
 
@@ -268,14 +292,19 @@ class System:
         warning and dropped.
 
         :param constants: A list of all constants relevant to this run
-        :return: A mapping from a constant to the list of its CMFs (matching the inspiration functions)
+        :return: Tuple of (cmf_data mapping, formatter mapping).
+            ``cmf_data`` maps each constant to the list of its CMFData objects.
+            ``cmf_formatters`` maps ``cmf_name → Formatter`` for every
+            Formatter-sourced CMF so the export stage can write the formatter
+            JSON (the canonical no-pickle shard-reconstruction artefact).
         """
         if not self.func_srcs:
-            return dict()
+            return dict(), dict()
 
         Logger('Loading CMFs ...', Logger.Levels.info).log()
         modules = []
         cmf_data: Dict[Constant, set] = defaultdict(set)
+        cmf_formatters: Dict[str, Formatter] = {}  # cmf_name → Formatter
         constants_set = set(constants)
 
         for db in self.func_srcs:
@@ -286,6 +315,7 @@ class System:
                 cmf_data[Constant.get_constant(db.split('/')[-2])].add(shift_cmf[0])
             elif isinstance(db, Formatter):
                 cmf = db.to_cmf()
+                cmf_formatters[cmf.cmf_name] = db  # record for JSON export
                 fmt_consts = [Constant.get_constant(name) for name in db.consts]
                 ignored = [c.name for c in fmt_consts if c not in constants_set]
                 active = [c for c in fmt_consts if c in constants_set]
@@ -316,7 +346,7 @@ class System:
                 ).log()
                 continue
             as_list[k] = list(v)
-        return as_list
+        return as_list, cmf_formatters
 
     def __analysis_stage(
             self,
@@ -434,38 +464,78 @@ class System:
             constants: List[Constant],
             relevant_cmf_names: Dict[str, Optional[Set[str]]]
     ) -> Dict[Constant, List[Searchable]]:
-        """
-        Load priorities from export path in arbitrary order when analyzers are not provided.
-        Expected layout: <priorities_root>/<constant>/<cmf>.pkl
+        """Load priorities from the shard-ID JSON files written by the analysis stage.
+
+        Expected layout: ``<priorities_root>/<const>/<safe_cmf_name>.json``
+        Each JSON file contains ``{"cmf_name": ..., "const_name": ..., "shard_ids": [...]}``.
+        Shards are reconstructed via :func:`~dreamer.utils.storage.atlas_writer.load_shards_from_export`
+        (formatter JSON + ``<cmf>__shards.jsonl`` in ``EXPORT_CMFS``).
+
         :param constants: Constants requested for the current run.
-        :param relevant_cmf_names: Per-constant set of allowed cmf_name values, or None to allow all CMFs.
-        :return: Mapping from constant object to imported priority list.
+        :param relevant_cmf_names: Per-constant set of allowed cmf_name values, or None for all.
+        :return: Mapping from constant to ordered shard list.
         """
-        path = sys_config.EXPORT_ANALYSIS_PRIORITIES
-        if not path or not os.path.isdir(path):
+        import json as _json
+        from dreamer.utils.storage.atlas_writer import read_shard_records, reconstruct_shard_from_dto
+        from dreamer.loading.funcs.formatter import Formatter
+
+        prio_path = sys_config.EXPORT_ANALYSIS_PRIORITIES
+        export_root = sys_config.EXPORT_CMFS
+
+        if not prio_path or not os.path.isdir(prio_path):
             return {}
 
         priorities: Dict[Constant, List[Searchable]] = {}
+
         for const in constants:
-            const_path = os.path.join(path, const.name)
-            if not os.path.isdir(const_path):
+            const_prio_path = os.path.join(prio_path, const.name)
+            if not os.path.isdir(const_prio_path):
                 continue
 
             allowed_cmf_names = relevant_cmf_names.get(const.name)
-            allowed_safe = {self.__safe_fs_name(name) for name in allowed_cmf_names} if allowed_cmf_names else set()
+            allowed_safe = {self.__safe_fs_name(n) for n in allowed_cmf_names} if allowed_cmf_names else None
             spaces: List[Searchable] = []
-            priorities_ext = f'.{Formats(sys_config.EXPORT_ANALYSIS_PRIORITIES_FORMAT).value}'
 
-            for f_name in sorted(os.listdir(const_path)):
-                file_path = os.path.join(const_path, f_name)
-                if not os.path.isfile(file_path) or not f_name.endswith(priorities_ext):
+            for f_name in sorted(os.listdir(const_prio_path)):
+                if not f_name.endswith(".json"):
+                    continue
+                file_path = os.path.join(const_prio_path, f_name)
+                try:
+                    with open(file_path) as fh:
+                        record = _json.load(fh)
+                except Exception:
                     continue
 
+                cmf_name = record.get("cmf_name", "")
+                shard_ids_wanted = set(record.get("shard_ids", []))
                 cmf_stem = os.path.splitext(f_name)[0]
-                if allowed_cmf_names is not None and cmf_stem not in allowed_cmf_names and cmf_stem not in allowed_safe:
+                if allowed_safe is not None and cmf_stem not in (allowed_safe or set()):
+                    continue
+                if not shard_ids_wanted or not export_root:
                     continue
 
-                spaces.extend(self.__iter_searchables(Importer.imprt(file_path)))
+                # Load CMFData from formatter JSON stored in EXPORT_CMFS/<const>/<cmf>.json.
+                safe_key = "".join(c for c in const.name if c.isalnum() or c in ("-", "_"))
+                fmt_json_path = os.path.join(export_root, safe_key, f"{cmf_name}.json")
+                try:
+                    with open(fmt_json_path) as fh:
+                        fmt_raw = _json.load(fh)
+                    formatter = Formatter.from_json_obj(fmt_raw)
+                    cmf_data = formatter.to_cmf()
+                except Exception as exc:
+                    Logger(
+                        f"__import_priorities: could not load formatter for {cmf_name}: {exc}",
+                        Logger.Levels.warning,
+                    ).log()
+                    continue
+
+                dtos = read_shard_records(export_root, cmf_name)
+                for dto in dtos:
+                    if dto.shard_id not in shard_ids_wanted:
+                        continue
+                    shard = reconstruct_shard_from_dto(dto, cmf_data, [const])
+                    if shard is not None:
+                        spaces.append(shard)
 
             if spaces:
                 priorities[const] = spaces

@@ -1,25 +1,33 @@
 """
 Atlas writer — emits DB-ready DTOs (CmfFamilyDTO, CmfDTO, ShardDTO) as
-JSONL files alongside the existing pickle exports.
+JSONL files.  This is the single source of truth for the pipeline — no
+pickle files are used.
 
 Used by:
-  * Loading stage  — writes ``cmfs.jsonl`` + ``cmf_families.jsonl`` per constant.
+  * Loading stage  — writes ``cmfs.jsonl`` + ``cmf_families.jsonl`` + per-
+                     constant formatter JSON (``<const>/<cmf_name>.json``).
   * Extraction stage — writes ``<cmf>__shards.jsonl`` per CMF.
 
 Writes are idempotent: each file is keyed by the appropriate id field
 (``cmf_id`` / ``family_id`` / ``shard_id``) and existing ids are skipped
 on rerun.  This matches the trajectory-stage dedup pattern and means we
 can safely re-invoke the pipeline without growing the files.
+
+Shard reconstruction (no pickle needed):
+  ``load_shards_from_export(export_root, constants)`` reads the formatter
+  JSON + shards JSONL and reconstructs live ``Shard`` objects entirely from
+  JSON-serialisable data.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from typing import Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set
 
 import numpy as np
 from ramanujantools.cmf import CMF, pFq
+from ramanujantools import Position
 
 from dreamer.extraction.shard import Shard
 from dreamer.utils.constants.constant import Constant
@@ -439,3 +447,133 @@ def read_shard_records(
             except (json.JSONDecodeError, KeyError, TypeError):
                 continue
     return out
+
+
+# ---------------------------------------------------------------------------
+# Shard reconstruction from JSONL (no pickle required)
+# ---------------------------------------------------------------------------
+
+def reconstruct_shard_from_dto(
+    dto: "ShardDTO",
+    cmf_data,
+    constants: List[Constant],
+) -> Optional[Shard]:
+    """Reconstruct a live ``Shard`` object from a ``ShardDTO`` + ``CMFData``.
+
+    Hyperplanes are recomputed deterministically from the CMF (same logic
+    as the extraction stage) so no separate hyperplane serialisation is
+    needed.  Returns ``None`` when the encoding length does not match the
+    current hyperplane count (stale cache from a changed CMF).
+
+    Parameters
+    ----------
+    dto:
+        Cached shard record.
+    cmf_data:
+        The CMFData (CMF object + shift) produced by the corresponding
+        formatter's ``.to_cmf()``.
+    constants:
+        Constants to associate with the reconstructed shard.
+    """
+    from dreamer.extraction.extractor import extract_cmf_hyperplanes
+
+    hps = extract_cmf_hyperplanes(cmf_data)
+    if len(hps) != len(dto.shard_encoding):
+        return None  # stale — encoding doesn't match current hyperplane set
+
+    encoding = list(dto.shard_encoding)
+    interior_point: Optional[Position] = None
+    if dto.interior_point is not None:
+        symbols = list(cmf_data.cmf.matrices.keys())
+        interior_point = Position(
+            {s: int(v) for s, v in zip(symbols, dto.interior_point)}
+        )
+
+    return Shard.from_cmf_data(
+        cmf_data,
+        constants,
+        hps,
+        encoding,
+        interior_point,
+        hyperplanes_already_shifted=False,
+    )
+
+
+def load_shards_from_export(
+    export_root: str,
+    constants: List[Constant],
+    relevant_cmf_names: Optional[Dict[str, Optional[set]]] = None,
+) -> Dict[Constant, List[Shard]]:
+    """Load previously-extracted shards from ``export_root`` without pickle.
+
+    For each constant, scans ``<export_root>/<const>/`` for formatter JSON
+    files (written by the loading stage as ``<cmf_name>.json``).  For each
+    formatter, reconstructs a ``CMFData`` via ``.to_cmf()``, then loads the
+    matching ``<cmf>__shards.jsonl`` and reconstructs ``Shard`` objects.
+
+    A shard is included for a constant only when the constant's name appears
+    in ``shard_dto.found_constants`` (populated after analysis).
+
+    Parameters
+    ----------
+    export_root:
+        ``sys_config.EXPORT_CMFS`` — contains per-constant formatter JSONs
+        and flat ``<cmf>__shards.jsonl`` files.
+    constants:
+        Constants to load shards for.
+    relevant_cmf_names:
+        Optional per-constant filter.  ``None`` value for a constant = load
+        all CMFs under that constant.  Mirrors ``__derive_relevant_cmf_names``
+        in ``System``.
+    """
+    from dreamer.loading.funcs.formatter import Formatter
+    from dreamer.utils.logger import Logger
+
+    result: Dict[Constant, List[Shard]] = {}
+
+    for const in constants:
+        safe_key = "".join(c for c in const.name if c.isalnum() or c in ("-", "_"))
+        const_path = os.path.join(export_root, safe_key)
+        if not os.path.isdir(const_path):
+            continue
+
+        allowed = (relevant_cmf_names or {}).get(const.name)  # None → all CMFs
+
+        shards_for_const: List[Shard] = []
+
+        for fname in sorted(os.listdir(const_path)):
+            if not fname.endswith(".json"):
+                continue
+            cmf_name = os.path.splitext(fname)[0]
+            if allowed is not None and cmf_name not in allowed:
+                continue
+
+            formatter_path = os.path.join(const_path, fname)
+            try:
+                with open(formatter_path, "r") as fh:
+                    raw = json.load(fh)
+                formatter = Formatter.from_json_obj(raw)
+                cmf_data = formatter.to_cmf()
+            except Exception as exc:
+                Logger(
+                    f"load_shards_from_export: could not load formatter "
+                    f"{formatter_path}: {exc}",
+                    Logger.Levels.warning,
+                ).log()
+                continue
+
+            dtos = read_shard_records(export_root, cmf_data.cmf_name)
+            if not dtos:
+                continue
+
+            for dto in dtos:
+                if const.name not in (dto.found_constants or []):
+                    continue  # not identified for this constant yet
+                shard = reconstruct_shard_from_dto(dto, cmf_data, [const])
+                if shard is not None:
+                    shards_for_const.append(shard)
+
+        if shards_for_const:
+            result[const] = shards_for_const
+
+    return result

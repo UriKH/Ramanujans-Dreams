@@ -73,8 +73,8 @@ class BaseCMF(Formatter):
         Converts the CMF to a Shift CMF.
         :return: A Shift CMF object
         """
-        self.shifts = Position({k: v for k, v in zip(self.cmf.matrices.keys(), self.shifts)})
-        return CMFData(self.cmf, self.shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
+        shifts = Position({k: v for k, v in zip(self.cmf.matrices.keys(), self.shifts)})
+        return CMFData(self.cmf, shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
 
     def __repr__(self):
         return json.dumps(self._to_json_obj())

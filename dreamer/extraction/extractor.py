@@ -8,8 +8,6 @@ from dreamer.utils.schemes.extraction_scheme import ExtractionScheme, Extraction
 from dreamer.utils.logger import Logger
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.schemes.searchable import Searchable
-from dreamer.utils.storage.exporter import Exporter
-from dreamer.utils.storage.formats import Formats
 from dreamer.utils.storage.atlas_writer import (
     read_shard_records,
     update_cmf_hyperplanes,
@@ -31,6 +29,91 @@ from functools import partial
 from ramanujantools.cmf import pFq as rt_pFq
 from ramanujantools import Position
 from typing import Dict, List, Optional, Set, Tuple, Union
+
+
+def extract_cmf_hyperplanes(cmf_data: CMFData) -> List[Hyperplane]:
+    """Compute and return the canonically-ordered hyperplanes of *cmf_data*.
+
+    Exposed at module level so callers (e.g. shard reconstruction from a
+    cached ``ShardDTO``) don't need a full ``ShardExtractor`` instance.
+
+    The ordering is deterministic (sorted by ``str(hp.expr)``) and matches
+    what ``ShardExtractor._extract_cmf_hps`` produces, so
+    ``shard_encoding[i]`` unambiguously labels ``hyperplanes[i]``.
+    """
+    cmf = cmf_data.cmf
+    shift = cmf_data.shift
+    symbols = list(cmf.matrices.keys())
+    hps: Set[Hyperplane] = set()
+
+    for s in symbols:
+        if isinstance(cmf, rt_pFq):
+            det = rt_pFq.determinant(cmf.p, cmf.q, cmf.z, s)
+        else:
+            det = cmf.matrices[s].det()
+        zeros = sp.solve(det)
+        zeros = [Hyperplane(lhs - rhs, symbols) for sol in zeros for lhs, rhs in sol.items()]
+        hps.update(zeros)
+
+        poles: Set[Hyperplane] = set()
+        for v in cmf.matrices[s].iter_values():
+            if (den := v.as_numer_denom()[1]) == 1:
+                continue
+            solutions = {
+                (sym, sol)
+                for sym in den.free_symbols
+                for sol in sp.solve(sp.simplify(den), sym)
+            }
+            for lhs, rhs in solutions:
+                poles.add(Hyperplane(lhs - rhs, symbols))
+        hps.update(poles)
+
+    filtered = [hp for hp in hps if hp.apply_shift(shift).is_in_integer_shift()]
+    filtered.sort(key=lambda hp: str(hp.expr))
+    return filtered
+
+
+def extract_cmf_hyperplanes(cmf_data: CMFData) -> List[Hyperplane]:
+    """Compute and return the canonically-ordered hyperplanes of *cmf_data*.
+
+    This is the same computation as ``ShardExtractor._extract_cmf_hps`` but
+    exposed as a module-level function so callers (e.g. shard reconstruction
+    from a cached ShardDTO) don't need to construct a full ``ShardExtractor``.
+
+    The result is sorted by ``str(hp.expr)`` for determinism: the same CMF
+    always produces the same hyperplane ordering, so ``shard_encoding[i]``
+    unambiguously labels ``hyperplanes[i]`` across runs.
+    """
+    cmf = cmf_data.cmf
+    shift = cmf_data.shift
+    symbols = list(cmf.matrices.keys())
+    hps: Set[Hyperplane] = set()
+
+    for s in symbols:
+        if isinstance(cmf, rt_pFq):
+            det = rt_pFq.determinant(cmf.p, cmf.q, cmf.z, s)
+        else:
+            det = cmf.matrices[s].det()
+        zeros = sp.solve(det)
+        zeros = [Hyperplane(lhs - rhs, symbols) for sol in zeros for lhs, rhs in sol.items()]
+        hps.update(zeros)
+
+        poles: Set[Hyperplane] = set()
+        for v in cmf.matrices[s].iter_values():
+            if (den := v.as_numer_denom()[1]) == 1:
+                continue
+            solutions = {
+                (sym, sol)
+                for sym in den.free_symbols
+                for sol in sp.solve(sp.simplify(den), sym)
+            }
+            for lhs, rhs in solutions:
+                poles.add(Hyperplane(lhs - rhs, symbols))
+        hps.update(poles)
+
+    filtered = [hp for hp in hps if hp.apply_shift(shift).is_in_integer_shift()]
+    filtered.sort(key=lambda hp: str(hp.expr))
+    return filtered
 
 
 class ShardExtractorMod(ExtractionModScheme):
@@ -90,16 +173,6 @@ class ShardExtractorMod(ExtractionModScheme):
             for const in consts:
                 all_shards[const] += shards
 
-                # Pickle export (per-constant searchables directory)
-                if sys_config.PATH_TO_SEARCHABLES:
-                    with Exporter.export_stream(
-                            os.path.join(sys_config.PATH_TO_SEARCHABLES, const.name),
-                            exists_ok=True,
-                            clean_exists=True,
-                            fmt=Formats(sys_config.EXPORT_SEARCHABLES_FORMAT),
-                    ) as export_stream:
-                        export_stream(shards, cmd_data.cmf_name)
-
             # DB-ready ShardDTO records (flat file per CMF at root).
             if sys_config.EXPORT_CMFS:
                 write_shard_records(
@@ -145,49 +218,8 @@ class ShardExtractor(ExtractionScheme):
         return list(self.cmf_data.cmf.matrices.keys())
 
     def _extract_cmf_hps(self) -> List[Hyperplane]:
-        """
-        Compute the hyperplanes of the CMF - zeros of the characteristic polynomial of each matrix and the poles of each
-         matrix entry.
-
-        The result is **sorted by ``str(hp.expr)``** so the ordering is
-        deterministic across runs: ``Hyperplane`` already canonicalises
-        its expression in ``__post_init__`` (LCM denominators, GCD coeffs,
-        leading-coefficient sign), so the sort key is stable.  A canonical
-        order is what lets ``Shard.encoding`` (the ±1 sign vector) be a
-        meaningful, hash-stable label for a shard.
-        :return: A canonically-ordered list of filtered hyperplanes.
-        """
-        hps = set()
-        symbols = list(self.cmf_data.cmf.matrices.keys())
-        for s in symbols:
-            if isinstance(self.cmf_data.cmf, rt_pFq):
-                det = rt_pFq.determinant(self.cmf_data.cmf.p, self.cmf_data.cmf.q, self.cmf_data.cmf.z, s)
-            else:
-                det = self.cmf_data.cmf.matrices[s].det()
-            zeros = sp.solve(det)
-            zeros = [Hyperplane(lhs - rhs, symbols) for solution in zeros for lhs, rhs in solution.items()]
-            hps.update(set(zeros))
-
-            poles = set()
-            for v in self.cmf_data.cmf.matrices[s].iter_values():
-                if (den := v.as_numer_denom()[1]) == 1:
-                    continue
-
-                solutions = {
-                    (sym, sol) for sym in den.free_symbols for sol in sp.solve(sp.simplify(den), sym)
-                }
-                for lhs, rhs in solutions:
-                    poles.add(Hyperplane(lhs - rhs, symbols))
-            hps.update(poles)
-
-        # compute the relevant hyperplanes with respect to the shift, then
-        # sort to give Shard.encoding[i] a stable meaning.
-        filtered_hps = [
-            hp for hp in hps
-            if hp.apply_shift(self.cmf_data.shift).is_in_integer_shift()
-        ]
-        filtered_hps.sort(key=lambda hp: str(hp.expr))
-        return filtered_hps
+        """Delegate to the module-level ``extract_cmf_hyperplanes`` function."""
+        return extract_cmf_hyperplanes(self.cmf_data)
 
     def extract(self, call_number=None) -> List[Shard]:
         """

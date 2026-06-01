@@ -81,8 +81,8 @@ class pFq(Formatter):
         :return: A tuple (CMF, shifts)
         """
         cmf = rt_pFq(self.p, self.q, self.z)
-        self.shifts = Position({k: v for k, v in zip(cmf.matrices.keys(), self.shifts)})
-        return CMFData(cmf, self.shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
+        shifts = Position({k: v for k, v in zip(cmf.matrices.keys(), self.shifts)})
+        return CMFData(cmf, shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
 
     def __repr__(self):
         return json.dumps(self._to_json_obj())

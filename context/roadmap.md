@@ -79,7 +79,17 @@ The system is desigend as a modular pipeline:
     - New helper `update_found_constants` in `atlas_writer.py`.
     - `summary.py` `_load_cmf_metadata` reads from flat root.
     - 428 tests pass (1 pre-existing unrelated failure).
-  * **Task 7 (design, pending) — shards reconstructable from JSONL:**  See open question in Notes section.
+  * **Task 7 — self-sustaining JSONL pipeline (no pickle files):**
+    - `pFq.to_cmf()`, `MeijerG.to_cmf()`, `BaseCMF.to_cmf()` no longer mutate `self.shifts` — they now create a local `Position` for the `CMFData`, leaving the formatter's own `shifts` list intact so JSON round-trips are correct.
+    - `extract_cmf_hyperplanes(cmf_data)` added as a module-level function in `extractor.py`; `ShardExtractor._extract_cmf_hps()` delegates to it.  External callers (shard reconstruction) no longer need a full `ShardExtractor`.
+    - `reconstruct_shard_from_dto(dto, cmf_data, constants)` added to `atlas_writer.py`: given a `ShardDTO` (encoding + interior_point) and a live `CMFData`, recomputes hyperplanes deterministically and reconstructs the `Shard` object.  Returns `None` on encoding-length mismatch (stale cache).
+    - `load_shards_from_export(export_root, constants)` added to `atlas_writer.py`: reads formatter JSON files from `<export_root>/<const>/<cmf_name>.json`, calls `Formatter.from_json_obj()` + `.to_cmf()`, loads ShardDTOs from `<cmf>__shards.jsonl`, and reconstructs live Shards.
+    - Loading stage: writes `<EXPORT_CMFS>/<const>/<cmf_name>.json` (formatter JSON) instead of `<const>/<cmf_name>.pkl`.  No pickle files are written for CMF data.  Uses `formatter.to_json_obj()` which includes the type tag for dispatch.
+    - Extraction stage: removed Shard pickle export (`PATH_TO_SEARCHABLES`-based `Exporter.export_stream` call).  Shards are now persisted only via `<cmf>__shards.jsonl`.
+    - `system.py` fallback (no extractor): replaced `__import_searchables(PATH_TO_SEARCHABLES)` with `load_shards_from_export(EXPORT_CMFS)`.
+    - Analysis priorities export: replaced `Exporter.export(data=shards, fmt=pkl)` with shard-ID JSON `{"cmf_name": ..., "const_name": ..., "shard_ids": [...]}`.
+    - Analysis priorities import: `__import_priorities` now reads shard-ID JSON files, looks up ShardDTOs from `EXPORT_CMFS/<cmf>__shards.jsonl`, and reconstructs Shard objects via `reconstruct_shard_from_dto`.
+    - 428 tests pass, 0 failures.
 
 
 
@@ -246,8 +256,7 @@ The system is desigend as a modular pipeline:
 
 <!-- Assumptions, blockers, design questions pending review -->
 
-- **Task 7 (open) — Shard reconstruction from JSONL / self-sustaining pipeline (2026-06-01).**
-  Currently `PATH_TO_SEARCHABLES` points to a dir of pickle files (`<const>/<cmf>.pkl`) that store full `CMFData` + deserialized `Shard` objects.  The user wants the pipeline to be self-sustaining: given `<cmf>__shards.jsonl` (which has `shard_encoding` + `interior_point`) and the CMF pickle (which has the CMF object and shift), a `Shard` can be fully reconstructed by recomputing hyperplanes from the CMF and applying the encoding + interior point.  `ShardExtractor._load_cached_encodings` already does exactly this.  The next step is to wire `PATH_TO_SEARCHABLES` to load from the flat JSONL instead of (or in addition to) the pickle files.  Similarly, analysis-priorities export could store shard IDs only (not full shard objects) and resolve them from `<cmf>__shards.jsonl` at load time.  **Decision needed:** keep pkl as runtime bridge (recommended — avoids re-parsing sympy matrices from JSON) and make the JSONL the canonical human-readable shard cache, or also serialize the CMF matrices to JSON for full pickle-independence?
+- **`to_cmf()` mutation bug fixed (2026-06-02).**  All three formatter `to_cmf()` methods (`pFq`, `MeijerG`, `BaseCMF`) were mutating `self.shifts` from `[int, ...]` to `Position({symbol: int})`.  Since `_to_json_obj()` reads `self.shifts`, calling `to_cmf()` before serializing would write symbol names instead of integers in the JSON, making round-trips silently incorrect.  Fixed by using a local variable inside `to_cmf()` without touching `self.shifts`.
 
 
 

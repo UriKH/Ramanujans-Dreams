@@ -91,7 +91,6 @@ class SearchConfig(Configurable):
             # ("eigenvalues", "if_identified"), ("eigenvalue_errors", "if_identified"), ("spectral_gap", "if_identified"),
             # ("companion_coboundary_rank", "if_identified"), ("asymptotics", "if_identified"),
             # ("convergence_class", "if_identified"), ("kamidelta", "if_identified"), ("gcd_slope", "if_identified")
-            ("asymptotics", "if_identified")
         ),
         metadata={"description": "Background-worker attributes computed asynchronously during search. Empty disables the worker/writer subprocesses entirely."},
     )

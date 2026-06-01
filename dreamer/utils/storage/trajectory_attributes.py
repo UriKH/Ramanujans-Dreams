@@ -975,7 +975,11 @@ class TrajectoryAttributesHandler:
             import random
             rand = random.randint(1, 1_000_000)
             Logger(f'computing asymptotics [id={rand}] ... ').log()
+            Logger(f'the linear recurrence [id={rand}] is: {self.linear_recurrence()}').log()
+            precision = 5
             result = self.linear_recurrence().asymptotics(precision)
+            Logger(f'asymptotics computed for prec = 5 [id={rand}]').log()
+            result = self.linear_recurrence().asymptotics(None)
             Logger(f'computation successful [id={rand}]!').log()
             return result
 

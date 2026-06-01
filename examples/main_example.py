@@ -57,9 +57,9 @@ if __name__ == '__main__':
     )
 
     System(
-        function_sources=[pFq([log(2), pi], 2, 1, -1)],
+        function_sources=[pFq([log(2)], 2, 1, -1)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
         searcher=search.SearcherModV1,
         post_processor=post_process.Tier3PostProcessModV1,
-    ).run(constants=[log(2), pi])
+    ).run(constants=[log(2)])
