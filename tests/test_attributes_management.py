@@ -517,11 +517,13 @@ class TestBuildTrajectoryDto:
         assert dto_a.trajectory_id != dto_b.trajectory_id
 
     def test_base_tier1_fields_populated(self, minimal_handler, symbols):
-        """build_trajectory_dto must fill every Tier-1 field.
+        """build_trajectory_dto fills the cheap Tier-1 fields.
 
-        ``recurrence_relation``, ``recurrence_order``, ``limit_value`` and
-        ``delta_estimate`` (now a dict) are Tier-1.  ``extended_metrics``
-        stays empty until Tier-2 workers (if any) write to it.
+        ``limit_value`` and ``delta_estimate`` (a dict) are Tier-1.  The
+        recurrence (``recurrence_relation`` / ``recurrence_order``) is **Tier-2**
+        and stays ``None`` unless ``compute_recurrence=True`` (it builds the
+        expensive symbolic ``LinearRecurrence``).  ``extended_metrics`` stays
+        empty until Tier-2 workers (if any) write to it.
         """
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
@@ -530,15 +532,29 @@ class TestBuildTrajectoryDto:
             cmf_id="c", shard_id="s", cmf_name="c",
             shard_encoding_str="enc", start=start, direction=direction,
         )
-        assert dto.recurrence_order >= 1
-        assert isinstance(dto.recurrence_relation, str)
-        assert dto.recurrence_relation != ""
+        # Recurrence is NOT computed on the default (hot) path.
+        assert dto.recurrence_relation is None
+        assert dto.recurrence_order is None
         # ``delta_estimate`` is a dict; each value is finite or the -inf sentinel.
         assert isinstance(dto.delta_estimate, dict)
         for delta_val in dto.delta_estimate.values():
             assert abs(delta_val) < 1e9 or delta_val == float("-inf")
         assert abs(float(dto.limit_value)) < 1e15
         assert dto.extended_metrics == {}   # workers haven't run yet
+
+    def test_compute_recurrence_opt_in_populates_recurrence(self, minimal_handler, symbols):
+        """``compute_recurrence=True`` populates the Tier-2 recurrence fields."""
+        start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        dto = build_trajectory_dto(
+            minimal_handler,
+            cmf_id="c", shard_id="s", cmf_name="c",
+            shard_encoding_str="enc", start=start, direction=direction,
+            compute_recurrence=True,
+        )
+        assert isinstance(dto.recurrence_relation, str)
+        assert dto.recurrence_relation != ""
+        assert dto.recurrence_order >= 1
 
     def test_p_and_q_vectors_are_dicts_or_none(self, minimal_handler, symbols):
         """``build_trajectory_dto`` stores p/q as dicts (const→tuple) or ``None``."""

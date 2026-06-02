@@ -61,7 +61,10 @@ def evaluate_in_flatland(
     In all cases the handler (if available) is stored in *handler_cache* for
     future same-shard cross-constant reuse.
     """
-    direction = geom.to_real(z)
+    # Always walk the GCD-reduced (primitive) ray: δ depends on the direction's
+    # angle, not its length, so scaled/doubled copies of ``z`` map to the same
+    # ray — same ``trajectory_id`` — and reuse the cached walk (Case A/B).
+    direction = geom.to_real_primitive(z)
     start_t = _position_to_tuple(start)
     dir_t = _position_to_tuple(direction)
     trajectory_id = derive_trajectory_id(

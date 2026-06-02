@@ -38,11 +38,22 @@ class FlatlandGeometry:
         if shard.is_whole_space or shard.A is None:
             self.Z_reduced = np.eye(d_orig, dtype=np.int64)
             self.B_reduced = np.empty((0, d_orig))
+            # No constraints → every direction is inside the cone.
+            self._M = None
         else:
             conditioner = HyperSpaceConditioner(np.asarray(shard.A, dtype=np.float64))
             self.Z_reduced, self.B_reduced, _ = conditioner.process()
+            # Cone-membership matrix in flatland: a flatland direction ``z`` is
+            # inside iff ``A @ (Z_reduced @ z) <= 0`` ⇔ ``M @ z <= 0`` where
+            # ``M = A @ Z_reduced``.  Precomputed once so membership is a pure
+            # NumPy matmul (no per-call sympy ``Position``).
+            A = np.asarray(shard.A, dtype=np.float64)
+            self._M = A @ self.Z_reduced.astype(np.float64)
 
         self.d_flat = self.Z_reduced.shape[1]
+
+    #: Tolerance for the ``M @ z <= 0`` cone test (matches ``is_valid_trajectory``).
+    _CONE_TOL = 1e-9
 
     # ------------------------------------------------------------------
     # Conversions
@@ -55,6 +66,23 @@ class FlatlandGeometry:
         :return: Position over the shard's symbols (sympy Integers).
         """
         v = self.Z_reduced @ np.asarray(z, dtype=np.int64)
+        return Position({sym: sp.Integer(int(val)) for sym, val in zip(self.symbols, v)})
+
+    def to_real_primitive(self, z: np.ndarray) -> Position:
+        """
+        Map a flatland direction ``z`` to its **GCD-reduced (primitive) ray** in
+        real space.
+
+        δ is a property of the trajectory's *ray angle*, so attribute computation
+        should always walk the primitive direction: scaled / doubled copies of a
+        direction (e.g. ``z`` and ``2z``) collapse to the same real ray and hence
+        the same cached walk.
+
+        :param z: Integer flatland coordinate vector (length ``d_flat``).
+        :return: Position over the shard's symbols for the primitive real ray.
+        """
+        v = self.Z_reduced @ np.asarray(z, dtype=np.int64)
+        v = reduce_to_primitive(v)
         return Position({sym: sp.Integer(int(val)) for sym, val in zip(self.symbols, v)})
 
     def to_flatland(self, v: Position) -> np.ndarray:
@@ -82,7 +110,23 @@ class FlatlandGeometry:
         :param z: Integer flatland direction.
         :return: True iff the real direction stays inside the shard cone.
         """
-        return self.shard.is_valid_trajectory(self.to_real(z))
+        if self._M is None:
+            return True
+        z = np.asarray(z, dtype=np.float64)
+        return bool(np.all(self._M @ z <= self._CONE_TOL))
+
+    def is_inside_many(self, Z: np.ndarray) -> np.ndarray:
+        """
+        Batch cone-membership test for many flatland directions at once.
+
+        :param Z: Integer array of shape ``(k, d_flat)`` — one direction per row.
+        :return: Boolean array of length ``k``; ``True`` where the row is inside
+            the shard cone.
+        """
+        Z = np.asarray(Z, dtype=np.float64)
+        if self._M is None:
+            return np.ones(Z.shape[0], dtype=bool)
+        return np.all((self._M @ Z.T) <= self._CONE_TOL, axis=0)
 
     def perturbations(self, z: np.ndarray, *, reduce: bool = True) -> Iterator[np.ndarray]:
         """

@@ -75,26 +75,27 @@ def snap_to_trajectory(
         return None
 
     unit = d / d_norm
-    best_z: Optional[np.ndarray] = None
-    best_cos = -np.inf
-    seen: set = set()
 
-    for length in range(1, int(np.floor(max_norm)) + 1):
-        z = np.rint(unit * length).astype(np.int64)
-        if not np.any(z):
-            continue
-        z_norm = float(np.linalg.norm(z))
-        if z_norm > max_norm:
-            continue
-        key = z.tobytes()
-        if key in seen:
-            continue
-        seen.add(key)
-        if not geom.is_inside(z):
-            continue
-        cos = float(np.dot(unit, z) / z_norm)
-        if cos > best_cos:
-            best_cos = cos
-            best_z = z
+    # Candidate integer directions: round ``unit * L`` for every integer length
+    # up to the cap, in one vectorised pass (trajectories are always integers).
+    lengths = np.arange(1, int(np.floor(max_norm)) + 1, dtype=np.int64)
+    candidates = np.rint(np.outer(lengths, unit)).astype(np.int64)  # (L, d)
 
-    return best_z
+    norms = np.linalg.norm(candidates, axis=1)
+    keep = (norms > 0.0) & (norms <= max_norm)
+    if not np.any(keep):
+        return None
+    candidates = candidates[keep]
+
+    # Dedup identical rounded directions (small L collapse to the same vector).
+    candidates = np.unique(candidates, axis=0)
+
+    # Keep only in-cone candidates (single batched NumPy cone test).
+    inside = geom.is_inside_many(candidates)
+    if not np.any(inside):
+        return None
+    candidates = candidates[inside]
+
+    # Pick the angle-best candidate: maximal cosine similarity to ``d``.
+    cos = (candidates @ unit) / np.linalg.norm(candidates, axis=1)
+    return candidates[int(np.argmax(cos))].astype(np.int64)

@@ -189,6 +189,40 @@ class TestRotateToward:
         np.testing.assert_allclose(rotate_toward(np.zeros(2), 0, 0.4), [0.0, 0.0])
 
 
+class TestPrimitiveRayAndBatchCone:
+    """Geometry helpers added for the perf pass: primitive ray + batched cone test."""
+
+    def test_to_real_primitive_collapses_scaled_directions(self, simple_shard):
+        """z and 2z must map to the SAME primitive real ray (one cached walk)."""
+        geom = FlatlandGeometry(simple_shard)
+        z = np.zeros(geom.d_flat, dtype=np.int64)
+        z[0] = 1
+        p1 = geom.to_real_primitive(z)
+        p2 = geom.to_real_primitive(2 * z)
+        assert [int(p1[s]) for s in simple_shard.symbols] == [int(p2[s]) for s in simple_shard.symbols]
+
+    def test_to_real_primitive_is_gcd_one(self, whole_space_shard):
+        """The returned real ray is primitive (GCD of components == 1)."""
+        import math
+        geom = FlatlandGeometry(whole_space_shard)
+        z = np.zeros(geom.d_flat, dtype=np.int64)
+        z[0] = 4  # 4*e0 -> primitive e0
+        p = geom.to_real_primitive(z)
+        comps = [abs(int(p[s])) for s in whole_space_shard.symbols if int(p[s]) != 0]
+        g = comps[0]
+        for c in comps[1:]:
+            g = math.gcd(g, c)
+        assert g == 1
+
+    def test_is_inside_many_matches_is_inside(self, simple_shard):
+        """Batched cone test agrees with the scalar one row-by-row."""
+        geom = FlatlandGeometry(simple_shard)
+        Z = np.array([[1, 0], [0, 1], [-1, 0], [1, 1]], dtype=np.int64)[:, : geom.d_flat]
+        batch = geom.is_inside_many(Z)
+        scalar = np.array([geom.is_inside(z) for z in Z])
+        np.testing.assert_array_equal(batch, scalar)
+
+
 class TestSnapToTrajectory:
     def test_returns_in_cone_capped_integer(self, simple_shard):
         geom = FlatlandGeometry(simple_shard)

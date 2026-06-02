@@ -139,6 +139,7 @@ def build_trajectory_dto(
     start,
     direction,
     constants=None,
+    compute_recurrence: bool = False,
 ) -> "TrajectoryDTO":
     """Build a ``TrajectoryDTO`` carrying Tier-1 attributes from a handler.
 
@@ -164,6 +165,13 @@ def build_trajectory_dto(
         Iterable of ``sympy.Expr`` objects to evaluate.  When ``None``,
         falls back to ``handler.constant()`` (backward-compatible path for
         single-constant callers).
+    compute_recurrence:
+        When ``True``, populate ``recurrence_relation`` (``formula_str``) and
+        ``recurrence_order`` (``order``).  Default ``False`` because building
+        the symbolic ``LinearRecurrence`` dominates the per-trajectory cost
+        (~80% in profiling) and is rarely needed on the hot search/analysis
+        path.  Request it through the Tier-2 ``"formula"`` / ``"order"``
+        attributes instead when only some trajectories need it.
     """
     from dreamer.utils.storage.dtos import TrajectoryDTO  # lazy import avoids circular dep
 
@@ -207,14 +215,19 @@ def build_trajectory_dto(
         q_dict[c_name] = tuple(_pq_to_jsonsafe(x) for x in q) if q else None
         identified_dict[c_name] = bool(ided)
 
+    # Recurrence (formula + order) builds the symbolic LinearRecurrence — the
+    # dominant per-trajectory cost — so compute it only when explicitly asked.
+    recurrence_relation = handler.formula_str() if compute_recurrence else None
+    recurrence_order = handler.order() if compute_recurrence else None
+
     return TrajectoryDTO(
         trajectory_id=trajectory_id,
         cmf_id=cmf_id,
         shard_id=shard_id,
         start_point=start_t,
         direction=dir_t,
-        recurrence_relation=handler.formula_str(),
-        recurrence_order=handler.order(),
+        recurrence_relation=recurrence_relation,
+        recurrence_order=recurrence_order,
         limit_value=float(handler.limit()),
         delta_estimate=delta_dict,
         p_vector=p_dict if p_dict else None,
@@ -320,12 +333,15 @@ class TrajectoryAttributesHandler:
         return self._utility_cache[key]
 
     def clear_cache(self):
+        """Drop all cached core (Tier-1/2) attribute results."""
         self._cache.clear()
 
     def clear_utility_cache(self):
+        """Drop all cached utility results (walks, p/q vectors)."""
         self._utility_cache.clear()
 
     def computed_attributes(self) -> list:
+        """:return: Names of the core attributes computed and cached so far."""
         return list(self._cache.keys())
 
     # ==================================================================
