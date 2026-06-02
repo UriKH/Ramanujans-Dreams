@@ -62,8 +62,6 @@ The system is desigend as a modular pipeline:
 
 ## Near-Term Tasks (Active / Next Up)
 
-- [ ] Add the Simulated Annealing and genetic search methods described in [SEARCH_ALGORITHMS.md](SEARCH_ALGORITHMS.md). Make sure to adapt these into the current code structure (e.g. add relevant classes etc.).
-- [ ] Add two search modules, one which uses Simulated Annealing and the other Genetic Search as its search method.
 
 - [x] 2026-06-01 — UX improvements + bug fixes (6 tasks, branch `feature/ux-improvements-june`).
   * **Task 1 — "not identified" print:** `AnalyzerModV1` now logs `"Shard … not identified"` for each constant that fails the identification threshold, matching the old per-constant behavior.
@@ -174,6 +172,22 @@ The system is desigend as a modular pipeline:
 ---
 
 ## Completed
+
+- [x] 2026-06-02 — **Genetic Search** method + **Simulated Annealing** method + two search modules.
+  * **GeneticSearch** in [genetic_scan.py](dreamer/search/methods/genetic_search/genetic_scan.py),
+    **GeneticSearchModV2** in [genetic_search_mod.py](dreamer/search/searchers/genetic_search_mod.py).
+    Operators faithful to reference (`genetic.py`): single-point crossover, `random.choice(elites)`,
+    refine_prob 0.7/0.3 child asymmetry, δ-invalid resampling.  Flatland genomes, no GCD reduction.
+  * **SimulatedAnnealingSearch** in [annealing_scan.py](dreamer/search/methods/annealing/annealing_scan.py),
+    **SimulatedAnnealingMod** in [annealing_mod.py](dreamer/search/searchers/annealing_mod.py).
+    Faithful to reference (`annealing.py`): raw ±1 neighbours, Metropolis accept, tabu list (size 70),
+    cooling on accepted moves only, fixed doubling-on-rejection (fixed intent of reference's dead branch).
+  * Shared **FlatlandGeometry** (with `reduce` param for raw neighbours) + **evaluate_in_flatland**
+    extracted to [dreamer/search/methods/flatland/](dreamer/search/methods/flatland/);
+    `small_angle/flatland.py` now re-exports for back-compat.
+  * New `ANNEAL_*` config knobs in [search.py](dreamer/configs/search.py).
+  * `SmallAngleSearch._evaluate` delegates to the shared evaluator.
+  * Exported `GeneticSearchModV2`, `SimulatedAnnealingMod` from `dreamer/search/__init__.py`.
 
 - [x] 2026-06-02 — **Small Angle Search** method + search module (search-only scope).
   * **What:** the two first active tasks — added the `SmallAngleSearch` method

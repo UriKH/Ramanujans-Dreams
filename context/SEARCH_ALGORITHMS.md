@@ -51,15 +51,51 @@ Implementation notes / decisions (search-only scope; analysis-mode branch deferr
 Algorithm basic implementation is provided in [genetic.py](context/resources/code/algos/genetic.py).
 More details in: [resources](context/resources/).
 
-Needed work: Adapt and upgrade current implementation into the system pipline format.
+**Implemented: Full (search).**  Method `GeneticSearch` + error `NoInitialPopulation` in
+[genetic_scan.py](dreamer/search/methods/genetic_search/genetic_scan.py);
+search module `GeneticSearchModV2` in
+[genetic_search_mod.py](dreamer/search/searchers/genetic_search_mod.py).
+Shared geometry / evaluator in
+[dreamer/search/methods/flatland/](dreamer/search/methods/flatland/).
+Config knobs `GA_*` (existing) in [search.py](dreamer/configs/search.py).
 
-**Implemented: Partial**
+Implementation notes / decisions (search-only scope):
+- **Flatland genomes** — populations are integer vectors `z` in the
+  LLL-reduced basis from `FlatlandGeometry`; `geom.is_inside(z)` enforces
+  shard membership exactly.
+- **No GCD reduction** — raw integer coords so that the `2*z ± 1` refinement
+  move and magnitude growth remain meaningful (reference behaviour).
+- **Operators faithful to reference** — single-point crossover, `random.choice(elites)`
+  parent selection, refine_prob 0.7 (child-1) / 0.3 (child-2) asymmetry,
+  δ-invalid resampling from the shard sampler.
+- **Early-stop** on `GA_MAX_NO_IMPROVEMENT_COUNT_RETRY` unchanged-best generations
+  (user decision; deliberate deviation from the fixed-generation reference).
+- **Per-constant** — one GA run per identified constant; walk-reuse via `handler_cache`.
 
 ## Simulated Annealing
 
 Algorithm basic implementation is provided in [annealing.py](context/resources/code/algos/annealing.py).
 More details in: [resources](context/resources/).
 
-Needed work: Adapt and upgrade current implementation into the system pipline format.
+**Implemented: Full (search).**  Method `SimulatedAnnealingSearch` + error
+`NoInitialIdentification` in
+[annealing_scan.py](dreamer/search/methods/annealing/annealing_scan.py);
+search module `SimulatedAnnealingMod` in
+[annealing_mod.py](dreamer/search/searchers/annealing_mod.py).
+Shared geometry / evaluator in
+[dreamer/search/methods/flatland/](dreamer/search/methods/flatland/).
+Config knobs `ANNEAL_*` in [search.py](dreamer/configs/search.py).
 
-**Implemented: Partial**
+Implementation notes / decisions (search-only scope):
+- **Flatland genomes** — current position is an integer vector `z`; neighbours
+  are raw ±1 unit steps (`geom.perturbations(reduce=False)`), filtered by
+  `geom.is_inside` and excluding tabu entries.
+- **No GCD reduction** — raw coords; `2*z` doubling stays meaningful.
+- **Tabu list** — bounded recent-position list of size `ANNEAL_TABU_SIZE`
+  (default 70, matching reference `14*5`).
+- **Temperature schedule** — `linear` (T0/(k+1)) or `log` (T0/log(k+1)),
+  advancing only on accepted moves (reference semantics).
+- **Adaptive scaling** — on rejection, `z = 2*z`; after `ANNEAL_MAX_DOUBLINGS`
+  consecutive doublings, reset and reseed a fresh direction (reference's
+  dead "give up" branch fixed to its evident intent).
+- **Per-constant** — one SA run per identified constant; walk-reuse via `handler_cache`.

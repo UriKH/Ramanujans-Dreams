@@ -128,7 +128,7 @@ class SearchConfig(Configurable):
     )
     GA_REFINE_PROB: float = field(
         default=0.5,
-        metadata={"description": "Probability of entering local-refinement mutation mode."},
+        metadata={"description": "Probability of entering local-refinement mutation mode (used by legacy GeneticSearchMethod only; GeneticSearch uses the reference 0.7/0.3 asymmetry)."},
     )
     GA_REFINE_COORD_PROB: float = field(
         default=0.5,
@@ -161,6 +161,35 @@ class SearchConfig(Configurable):
         metadata={"description": "Number of initial candidate trajectories sampled for small-angle seed selection."},
     )
 
+    # ============================== Simulated Annealing settings ==============================
+    ANNEAL_T0: float = field(
+        default=1.0,
+        metadata={"description": "Initial temperature for simulated annealing cooling schedule."},
+    )
+    ANNEAL_TMIN: float = field(
+        default=1e-3,
+        metadata={"description": "Minimum temperature threshold; annealing stops when T drops below this."},
+    )
+    ANNEAL_SCHEDULE: str = field(
+        default="linear",
+        metadata={"description": "Cooling schedule type: 'linear' (T0/(k+1)) or 'log' (T0/log(k+1))."},
+    )
+    ANNEAL_MAX_ITERS: int = field(
+        default=200,
+        metadata={"description": "Maximum number of accepted moves (iterations) for simulated annealing."},
+    )
+    ANNEAL_MAX_DOUBLINGS: int = field(
+        default=10,
+        metadata={"description": "Cap on consecutive trajectory length-doublings on rejection before reseeding."},
+    )
+    ANNEAL_TABU_SIZE: int = field(
+        default=70,
+        metadata={"description": "Maximum number of recent positions kept in the tabu list (reference: 14*5)."},
+    )
+    ANNEAL_RESERVOIR_SIZE: int = field(
+        default=10,
+        metadata={"description": "Number of initial candidate trajectories sampled for the SA seed selection."},
+    )
     # ============================== Raycaster settings ==============================
     MAX_TRAJECTORY_LENGTH: int = field(
         default=100,
