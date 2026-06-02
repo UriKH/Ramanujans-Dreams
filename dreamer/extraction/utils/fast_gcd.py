@@ -26,3 +26,17 @@ def get_gcd_of_array(arr) -> int:
         if result == 1:
             return 1
     return result
+
+
+@njit(cache=True)
+def reduce_to_primitive(arr):
+    """
+    Divide an integer vector by the GCD of its entries so the result is primitive
+    (GCD == 1).  No-op when the GCD is 0 (zero vector) or 1.
+    :param arr: An integer vector.
+    :return: A new vector with the same direction and GCD 1 (or the input unchanged).
+    """
+    g = get_gcd_of_array(arr)
+    if g <= 1:
+        return arr.copy()
+    return arr // g

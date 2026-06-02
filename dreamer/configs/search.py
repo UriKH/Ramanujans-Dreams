@@ -88,9 +88,9 @@ class SearchConfig(Configurable):
     #            yet implemented; will run as a separate pipeline pass.
     TIER2_ATTRIBUTES: Tuple[str, ...] = field(
         default=(
-            # ("eigenvalues", "if_identified"), ("eigenvalue_errors", "if_identified"), ("spectral_gap", "if_identified"),
-            # ("companion_coboundary_rank", "if_identified"), ("asymptotics", "if_identified"),
-            # ("convergence_class", "if_identified"), ("kamidelta", "if_identified"), ("gcd_slope", "if_identified")
+            ("eigenvalues", "if_identified"), ("eigenvalue_errors", "if_identified"), ("spectral_gap", "if_identified"),
+            ("companion_coboundary_rank", "if_identified"), #("asymptotics", "if_identified"),
+            ("convergence_class", "if_identified"), ("kamidelta", "if_identified"), ("gcd_slope", "if_identified")
         ),
         metadata={"description": "Background-worker attributes computed asynchronously during search. Empty disables the worker/writer subprocesses entirely."},
     )
@@ -137,6 +137,28 @@ class SearchConfig(Configurable):
     GA_MAX_NO_IMPROVEMENT_COUNT_RETRY: int = field(
         default=5,
         metadata={"description": "Retry budget before stopping when no GA improvement is observed."},
+    )
+
+    # ============================== Small Angle Search settings ==============================
+    SA_MAX_DEPTH: int = field(
+        default=50,
+        metadata={"description": "Maximum number of small-angle hill-climb iterations (the search depth)."},
+    )
+    SA_IMPROVE_THRESHOLD: float = field(
+        default=1e-3,
+        metadata={"description": "Minimum delta gain counted as an improvement during the hill-climb."},
+    )
+    SA_PATIENCE: int = field(
+        default=5,
+        metadata={"description": "Consecutive non-improving iterations tolerated before early-stopping the climb."},
+    )
+    SA_MAX_DOUBLINGS: int = field(
+        default=10,
+        metadata={"description": "Cap on consecutive trajectory length-doublings when no perturbation stays inside the shard."},
+    )
+    SA_RESERVOIR_SIZE: int = field(
+        default=10,
+        metadata={"description": "Number of initial candidate trajectories sampled for small-angle seed selection."},
     )
 
     # ============================== Raycaster settings ==============================

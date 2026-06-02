@@ -62,6 +62,9 @@ The system is desigend as a modular pipeline:
 
 ## Near-Term Tasks (Active / Next Up)
 
+- [ ] Add the Simulated Annealing and genetic search methods described in [SEARCH_ALGORITHMS.md](SEARCH_ALGORITHMS.md). Make sure to adapt these into the current code structure (e.g. add relevant classes etc.).
+- [ ] Add two search modules, one which uses Simulated Annealing and the other Genetic Search as its search method.
+
 - [x] 2026-06-01 — UX improvements + bug fixes (6 tasks, branch `feature/ux-improvements-june`).
   * **Task 1 — "not identified" print:** `AnalyzerModV1` now logs `"Shard … not identified"` for each constant that fails the identification threshold, matching the old per-constant behavior.
   * **Task 2 — per-shard progress bars:** Inner trajectory loops in `_analyze_shard` (analyzer) and `_produce` (searcher) are now wrapped with `SmartTQDM(leave=False)` so a sub-bar appears under each shard row.
@@ -171,6 +174,36 @@ The system is desigend as a modular pipeline:
 ---
 
 ## Completed
+
+- [x] 2026-06-02 — **Small Angle Search** method + search module (search-only scope).
+  * **What:** the two first active tasks — added the `SmallAngleSearch` method
+    ([small_angle_scan.py](dreamer/search/methods/small_angle/small_angle_scan.py)) and the
+    `SmallAngleSearchMod` search module
+    ([small_angle_mod.py](dreamer/search/searchers/small_angle_mod.py), modelled on
+    `SearcherModV1`, NOT the pre-DTO `genetic_mod.py`).
+  * **Geometry:** new `FlatlandGeometry`
+    ([flatland.py](dreamer/search/methods/small_angle/flatland.py)) wraps `HyperSpaceConditioner`
+    (conditioned once per shard): `to_real`/`to_flatland` conversions, `is_inside` (delegates to
+    `Shard.is_valid_trajectory`), and `±1` `perturbations` (GCD-reduced).  New njit helper
+    `reduce_to_primitive` in [fast_gcd.py](dreamer/extraction/utils/fast_gcd.py).
+  * **Algorithm:** per-constant hill-climb.  Seed = first reservoir trajectory (sampler, ascending
+    L2 norm) that identifies the constant; else `NoInitialIdentification` (caught + logged in the
+    module).  Each step probes in-cone primitive-direction perturbations and re-centers on best δ;
+    when no perturbation stays inside, the trajectory length doubles (no GCD reduce).  Stops at
+    `SA_MAX_DEPTH` or after `SA_PATIENCE` non-improving iters.  Emits one Tier-1 DTO per evaluated
+    trajectory via the shared `worker_pool` sink (same JSONL output as `SearcherModV1`).
+  * **Config:** `SA_MAX_DEPTH`, `SA_IMPROVE_THRESHOLD`, `SA_PATIENCE`, `SA_MAX_DOUBLINGS`,
+    `SA_RESERVOIR_SIZE` added to `SearchConfig`.  Exported `SmallAngleSearchMod` from
+    `dreamer/search/__init__.py`.
+  * **Decisions:** initial seed comes from the sampler reservoir (not an LP solver as the spec
+    literally suggested) — the user chose this; perturbations are GCD-reduced so the climb explores
+    *directions*, magnitude growth is the doubling branch; analysis-mode branch (spec step 3)
+    deferred — this scope is search-only.
+  * **Tests:** `tests/test_small_angle_search.py` (15 cases): `reduce_to_primitive`,
+    `FlatlandGeometry` round-trip/membership/perturbations, reservoir seed L2-ordering +
+    `NoInitialIdentification`, hill-climb climb/doubling/patience (mocked `_evaluate`), module
+    per-constant orchestration + error catch.  Full suite **443 passed**.  End-to-end smoke on
+    pFq(log(2),2,1,-1): 18 JSONL files, best δ(log-2)=0.281.
 
 - [x] 2026-05-30 — Heuristic stopping criterion → Good-Turing missing-mass + face-aligned shooting (P2).
   * **Stopping criterion (the real fix).** The running-total marginal-gain stop (`new / total_found < rel_improvement`) was statistically wrong: it fires merely because the running total is large, even while yield is still linear (the user found 5e-3→O(10k), 1e-3→140k, 1e-4→800k on 6F5).  A naive `new / batch_size` is a single-batch estimate of the missing mass — highest variance.  Replaced with the **Good-Turing** estimator `m̂ = f1 / n` (`f1` = cells seen exactly once, `n` = samples landed), maintained O(1) per sample in `_collect_unique_cells_into`.  It estimates P(next sample is a new cell), so a still-large reservoir keeps `f1` high and **refuses to stop** — structurally immune to the "plateau then spike" failure the user worried about.  Config knob renamed `HEURISTIC_REL_IMPROVEMENT` → `HEURISTIC_MISSING_MASS` (default 5e-4).
