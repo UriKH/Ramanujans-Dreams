@@ -63,7 +63,23 @@ The system is desigend as a modular pipeline:
 - [x] 2026-06-02 — **Gradient Ascent** search method + module (see Completed). Continuous-angle
   ascent of δ with selectable optimizer variants (vanilla / momentum / RMSprop / Adam).
 
-- [ ] Review the [CODE_QUALITY.md](context/CODE_QUALITY.md) file. How to ensure you will follow the described instruction? Discuss this with the user.
+- [x] 2026-06-02 — Review [CODE_QUALITY.md](context/background/CODE_QUALITY.md) + ensure the
+  standards are followed.  **Resolution:** the standard was already written down (CODE_QUALITY.md
+  + DEFINITION_OF_DONE.md §2); the gap was *enforcement*.  Added a mechanical **commit gate**
+  (chosen with the user, who was mainly worried about documentation drifting below standard):
+  * `tools/check_docs.py` — AST docstring checker.  **Blocks** on any public class/function/method
+    lacking a docstring; **warns** on incomplete `:param` / missing `:return`.  Inspects only
+    module-level defs + class methods (not nested closures); exempts test files (validated by
+    running pytest, names are descriptive per policy).
+  * `tools/precommit_hook.py` — Claude Code `PreToolUse` gate: on `git commit` runs the doc check
+    on staged `*.py` + the full pytest suite, blocking (exit 2) with the reason surfaced if either
+    fails.  Verified end-to-end: blocks on an undocumented staged file before pytest.
+  * Wired via `.claude/settings.json` (gitignored → local to this clone) with an
+    `if: Bash(git commit*)` filter.  **Caveat:** a settings file created mid-session needs a
+    `/hooks` open or CLI restart before the harness activates it.
+  * **Open for the user:** the DoD also mandates PR-delivery and keeping
+    `GLOBAL_TEST_REPORT.md` / `tests/TEST_AUDIT_REPORT.md` current — current practice (local
+    commits, no report updates) has drifted from that; decide whether to enforce or relax the doc.
 
 - [x] 2026-06-01 — UX improvements + bug fixes (6 tasks, branch `feature/ux-improvements-june`).
   * **Task 1 — "not identified" print:** `AnalyzerModV1` now logs `"Shard … not identified"` for each constant that fails the identification threshold, matching the old per-constant behavior.
