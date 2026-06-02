@@ -46,9 +46,15 @@ class VanillaGrad(GradOptimizer):
     """Plain gradient ascent — the update is the raw gradient."""
 
     def step(self, grad: np.ndarray) -> np.ndarray:
+        """Return the gradient unchanged as the ascent update.
+
+        :param grad: Estimated gradient.
+        :return: ``grad`` itself.
+        """
         return np.asarray(grad, dtype=np.float64)
 
     def reset(self) -> None:
+        """No internal state to clear (stateless optimizer)."""
         return None
 
 
@@ -70,10 +76,16 @@ class Momentum(GradOptimizer):
         self._v = np.zeros(dim, dtype=np.float64)
 
     def step(self, grad: np.ndarray) -> np.ndarray:
+        """Accumulate the gradient into the velocity and return it.
+
+        :param grad: Estimated gradient.
+        :return: The updated velocity ``v = beta*v + grad``.
+        """
         self._v = self.beta * self._v + np.asarray(grad, dtype=np.float64)
         return self._v.copy()
 
     def reset(self) -> None:
+        """Clear the accumulated velocity."""
         self._v = np.zeros(self.dim, dtype=np.float64)
 
 
@@ -96,11 +108,17 @@ class RMSprop(GradOptimizer):
         self._s = np.zeros(dim, dtype=np.float64)
 
     def step(self, grad: np.ndarray) -> np.ndarray:
+        """Scale the gradient per-coordinate by its running RMS.
+
+        :param grad: Estimated gradient.
+        :return: ``grad / (sqrt(s) + eps)`` with the updated second moment ``s``.
+        """
         g = np.asarray(grad, dtype=np.float64)
         self._s = self.beta2 * self._s + (1.0 - self.beta2) * g * g
         return g / (np.sqrt(self._s) + self.epsilon)
 
     def reset(self) -> None:
+        """Clear the squared-gradient running average."""
         self._s = np.zeros(self.dim, dtype=np.float64)
 
 
@@ -128,6 +146,11 @@ class Adam(GradOptimizer):
         self._t = 0
 
     def step(self, grad: np.ndarray) -> np.ndarray:
+        """Return the bias-corrected Adam update for the gradient.
+
+        :param grad: Estimated gradient.
+        :return: ``m_hat / (sqrt(s_hat) + eps)`` after updating both moments.
+        """
         g = np.asarray(grad, dtype=np.float64)
         self._t += 1
         self._m = self.beta1 * self._m + (1.0 - self.beta1) * g
@@ -137,6 +160,7 @@ class Adam(GradOptimizer):
         return m_hat / (np.sqrt(s_hat) + self.epsilon)
 
     def reset(self) -> None:
+        """Clear both moment estimates and the step counter."""
         self._m = np.zeros(self.dim, dtype=np.float64)
         self._s = np.zeros(self.dim, dtype=np.float64)
         self._t = 0
@@ -146,6 +170,9 @@ class UnknownGradVariant(ValueError):
     """Raised when an unrecognised gradient-ascent variant name is requested."""
 
     def __init__(self, name: str):
+        """
+        :param name: The unrecognised variant name that was requested.
+        """
         self.name = name
         super().__init__(
             f"Unknown gradient-ascent variant '{name}'. "

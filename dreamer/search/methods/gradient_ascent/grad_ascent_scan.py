@@ -50,6 +50,10 @@ class NoInitialIdentification(Exception):
     """Raised when no reservoir trajectory identifies the constant in a shard."""
 
     def __init__(self, shard_id: str, constant: Constant):
+        """
+        :param shard_id: Id of the shard whose reservoir produced no identification.
+        :param constant: The constant that could not be seeded.
+        """
         self.shard_id = shard_id
         self.constant = constant
         super().__init__(
@@ -66,6 +70,11 @@ class SearchStalled(Exception):
     """
 
     def __init__(self, shard_id: str, constant: Constant, tries: int):
+        """
+        :param shard_id: Id of the shard whose search stalled.
+        :param constant: The constant being searched when the stall occurred.
+        :param tries: Number of diffraction attempts that failed before giving up.
+        """
         self.shard_id = shard_id
         self.constant = constant
         self.tries = tries
@@ -94,7 +103,11 @@ class GradientAscentSearch(SearchMethod):
     # ------------------------------------------------------------------
 
     def search(self, starts=None):
-        """Standalone entry point — collect emitted DTOs into a list."""
+        """Standalone entry point — collect emitted DTOs into a list.
+
+        :param starts: Unused; present for the :class:`SearchMethod` interface.
+        :return: The list of ``(traj_matrix, const_sympy, dto)`` items emitted.
+        """
         collected: list = []
         self.run(
             constant=self.constant,
