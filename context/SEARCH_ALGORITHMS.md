@@ -99,3 +99,39 @@ Implementation notes / decisions (search-only scope):
   consecutive doublings, reset and reseed a fresh direction (reference's
   dead "give up" branch fixed to its evident intent).
 - **Per-constant** — one SA run per identified constant; walk-reuse via `handler_cache`.
+
+
+## Gradient Ascent + variants
+
+- A per-constant search method that **ascends** δ (larger δ is better) over the continuous
+  trajectory-direction *angle*.  δ is continuous and generally smooth in the angle
+  (non-differentiable only at a finite set of points), so a gradient method over a real-valued
+  direction space is well-posed.
+- The step is **semi-discrete**: the optimizer holds a real-valued direction; each update is
+  *realized* as the angle-best integer trajectory whose L2 norm does not exceed `GRAD_MAX_NORM`
+  (e.g. 100), then walked / evaluated.
+- The gradient is estimated by **forward differences in angle space** (rotate the direction by a
+  small angle toward each coordinate axis, realize + evaluate).
+- ML-optimizer variants are selectable via `GRAD_VARIANT`: `vanilla`, `momentum`, `rmsprop`,
+  `adam` (strategy pattern).
+- **Number of steps** is a manual knob (`GRAD_MAX_STEPS`).
+- **Convergence stop:** the ascent terminates when the gradient is too small (`GRAD_GRAD_TOL`),
+  the snapped step cannot move, patience is exhausted, or the step budget is spent — it never
+  spins on a local optimum.
+- **Non-identified trajectory handling (three-stage):** (1) *skip* the offending probe and keep
+  the last identified direction; (2) after `GRAD_SKIP_LIMIT` (=3) unproductive steps,
+  length-double to escape the dead region; (3) after `GRAD_MAX_DOUBLINGS` doublings, *diffract*
+  off the wall by drawing a random in-cone direction from the last identified trajectory; if all
+  `GRAD_DIFFRACT_TRIES` diffraction attempts fail, raise `SearchStalled` (caught + logged later).
+
+**Implemented: Full (search).**  Method `GradientAscentSearch` + errors `NoInitialIdentification`,
+`SearchStalled` in
+[grad_ascent_scan.py](dreamer/search/methods/gradient_ascent/grad_ascent_scan.py); optimizer
+strategies (`VanillaGrad`/`Momentum`/`RMSprop`/`Adam` + `optimizer_for`) in
+[optimizers.py](dreamer/search/methods/gradient_ascent/optimizers.py); lattice realization
+(`snap_to_trajectory`, `rotate_toward`) in
+[lattice.py](dreamer/search/methods/gradient_ascent/lattice.py); search module
+`GradientAscentMod` in
+[gradient_ascent_mod.py](dreamer/search/searchers/gradient_ascent_mod.py).  Shared geometry /
+evaluator reused from [dreamer/search/methods/flatland/](dreamer/search/methods/flatland/).
+Config knobs `GRAD_*` in [search.py](dreamer/configs/search.py).

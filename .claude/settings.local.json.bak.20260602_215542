@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($p=\"c:\\\\Dev\\\\Ramanujan Machine\\\\Ramanujans-Dreams-fork\\\\tests\\\\test_extraction_v2.py\"; $b=[System.IO.File]::ReadAllBytes\\($p\\); \"CR=$\\(\\( $b | Where-Object {$_ -eq 13}\\).Count\\) LF=$\\(\\( $b | Where-Object {$_ -eq 10}\\).Count\\) bytes=$\\($b.Length\\)\")",
+      "PowerShell($p=\"c:\\\\Dev\\\\Ramanujan Machine\\\\Ramanujans-Dreams-fork\\\\tests\\\\test_extraction_v2.py\"; $b=[System.IO.File]::ReadAllBytes\\($p\\); \"first8: $\\([BitConverter]::ToString\\($b[0..7]\\)\\)\"; $b[0..120] | Group-Object | Sort-Object Count -Descending | Select-Object -First 6 | ForEach-Object { \"byte $\\($_.Name\\) x$\\($_.Count\\)\" })",
+      "PowerShell($p=\"c:\\\\Dev\\\\Ramanujan Machine\\\\Ramanujans-Dreams-fork\\\\tests\\\\test_extraction_v2.py\"; Copy-Item $p \"$env:TEMP\\\\t2_full.txt\" -Force; \\(Get-Item \"$env:TEMP\\\\t2_full.txt\"\\).Length)",
+      "PowerShell($p=\"c:\\\\Dev\\\\Ramanujan Machine\\\\Ramanujans-Dreams-fork\\\\tests\\\\test_extraction_v2.py\"; $t=[System.IO.File]::ReadAllText\\($p\\); foreach\\($name in 'def test_max_seconds_caps_the_shoot\\(','def test_plateau_patience_needs_consecutive_low_batches\\(','def test_heuristic_knobs_forwarded\\(','def test_collision_keeps_nearest_witness\\(','def test_refine_parallel_matches_serial\\(','def test_find_start_cell_widens_when_tight_box_unusable\\(','def test_witnesses_are_unique_per_cell\\(','num_rays=0'\\){ $c=\\([regex]::Matches\\($t,[regex]::Escape\\($name\\)\\)\\).Count; Write-Output \"$c  $name\" })",
+      "PowerShell($p=\"c:\\\\Dev\\\\Ramanujan Machine\\\\Ramanujans-Dreams-fork\\\\tests\\\\test_extraction_v2.py\"; $t=[System.IO.File]::ReadAllText\\($p\\); $names='def test_max_seconds_caps_the_shoot\\(','def test_plateau_patience_needs_consecutive_low_batches\\(','def test_heuristic_knobs_forwarded\\(','def test_collision_keeps_nearest_witness\\(','def test_refine_parallel_matches_serial\\(','def test_find_start_cell_widens_when_tight_box_unusable\\(','def test_witnesses_are_unique_per_cell\\(','num_rays=0'; $res=foreach\\($name in $names\\){ $c=\\([regex]::Matches\\($t,[regex]::Escape\\($name\\)\\)\\).Count; \"$c`t$name\" }; $res -join \"`n\" | Set-Content \"$env:TEMP\\\\counts.txt\" -Encoding utf8; Get-Content \"$env:TEMP\\\\counts.txt\")",
+      "PowerShell($p=\"c:\\\\Dev\\\\Ramanujan Machine\\\\Ramanujans-Dreams-fork\\\\tests\\\\test_extractor.py\"; $lines=[System.IO.File]::ReadAllLines\\($p\\); \"TOTAL=$\\($lines.Count\\)\"; for\\($i=149;$i -lt $lines.Count;$i++\\){ Write-Output \\(\"{0}: {1}\" -f \\($i+1\\), $lines[$i]\\) })",
+      "Bash(wsl.exe -e bash -lc 'cd /mnt/c/Dev/\"Ramanujan Machine\"/Ramanujans-Dreams-fork && sed -n \"28,60p\" tests/test_benchmark_extraction.py | cat -A | head -40')",
+      "Bash(wsl.exe -e bash -lc 'source ~/miniconda3/etc/profile.d/conda.sh && conda activate rama && cd /mnt/c/Dev/\"Ramanujan Machine\"/Ramanujans-Dreams-fork && python -m pytest -q 2>&1 | tail -8')",
+      "Bash(wsl bash *)"
+    ]
+  }
+}

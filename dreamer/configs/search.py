@@ -190,6 +190,76 @@ class SearchConfig(Configurable):
         default=10,
         metadata={"description": "Number of initial candidate trajectories sampled for the SA seed selection."},
     )
+    # ============================== Gradient Ascent settings ==============================
+    # Gradient *Ascent* over the continuous trajectory-direction angle (larger delta is
+    # better).  delta is continuous and generally smooth in the angle, so the optimizer
+    # works in a real-valued direction space; each updated direction is realized as the
+    # angle-best integer trajectory whose L2 norm does not exceed GRAD_MAX_NORM.
+    GRAD_VARIANT: str = field(
+        default="adam",
+        metadata={"description": "Gradient-ascent optimizer variant: 'vanilla' | 'momentum' | 'rmsprop' | 'adam'."},
+    )
+    GRAD_LR: float = field(
+        default=1.0,
+        metadata={"description": "Learning rate (step scale) applied to the optimizer update before snapping to the lattice."},
+    )
+    GRAD_MOMENTUM: float = field(
+        default=0.9,
+        metadata={"description": "Momentum coefficient (beta) for the 'momentum' variant."},
+    )
+    GRAD_BETA1: float = field(
+        default=0.9,
+        metadata={"description": "First-moment decay (beta1) for the Adam variant."},
+    )
+    GRAD_BETA2: float = field(
+        default=0.999,
+        metadata={"description": "Second-moment decay (beta2) for the RMSprop / Adam variants."},
+    )
+    GRAD_EPSILON: float = field(
+        default=1e-8,
+        metadata={"description": "Numerical-stability epsilon in the RMSprop / Adam denominator."},
+    )
+    GRAD_MAX_STEPS: int = field(
+        default=50,
+        metadata={"description": "Maximum number of gradient-ascent steps per constant (the manual step budget)."},
+    )
+    GRAD_PATIENCE: int = field(
+        default=5,
+        metadata={"description": "Consecutive non-improving steps tolerated before early-stopping the ascent."},
+    )
+    GRAD_IMPROVE_THRESHOLD: float = field(
+        default=1e-3,
+        metadata={"description": "Minimum delta gain counted as an improvement during the ascent."},
+    )
+    GRAD_GRAD_TOL: float = field(
+        default=1e-6,
+        metadata={"description": "Convergence stop: terminate when the estimated gradient L2 norm falls below this (no better step to take)."},
+    )
+    GRAD_MAX_NORM: float = field(
+        default=100.0,
+        metadata={"description": "Maximum L2 norm of a realized integer trajectory direction when snapping a real direction onto the lattice."},
+    )
+    GRAD_FD_ANGLE: float = field(
+        default=0.1,
+        metadata={"description": "Finite-difference rotation angle (radians) used to estimate the gradient by forward differences in angle space."},
+    )
+    GRAD_SKIP_LIMIT: int = field(
+        default=3,
+        metadata={"description": "Consecutive unproductive (non-identified) steps tolerated by 'skip' before the length-doubling fallback fires."},
+    )
+    GRAD_MAX_DOUBLINGS: int = field(
+        default=10,
+        metadata={"description": "Cap on consecutive length-doublings before falling back to diffraction off the unidentified wall."},
+    )
+    GRAD_DIFFRACT_TRIES: int = field(
+        default=10,
+        metadata={"description": "Number of random in-cone 'diffraction' directions tried from the last identified trajectory before the shard search is abandoned (SearchStalled)."},
+    )
+    GRAD_RESERVOIR_SIZE: int = field(
+        default=10,
+        metadata={"description": "Number of initial candidate trajectories sampled for gradient-ascent seed selection."},
+    )
+
     # ============================== Raycaster settings ==============================
     MAX_TRAJECTORY_LENGTH: int = field(
         default=100,

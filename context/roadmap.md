@@ -46,8 +46,6 @@ The system is desigend as a modular pipeline:
 
 - Add coverage policy.
 - Add definition of done.
-- Add coding standards file.
-- Add git interactions instructions.
 - Discuss pickle files usage. Were do we want pickle files and should we use them only temporarily?
 - Remind to update the Next Up task list.
 
@@ -62,6 +60,26 @@ The system is desigend as a modular pipeline:
 
 ## Near-Term Tasks (Active / Next Up)
 
+- [x] 2026-06-02 — **Gradient Ascent** search method + module (see Completed). Continuous-angle
+  ascent of δ with selectable optimizer variants (vanilla / momentum / RMSprop / Adam).
+
+- [x] 2026-06-02 — Review [CODE_QUALITY.md](context/background/CODE_QUALITY.md) + ensure the
+  standards are followed.  **Resolution:** the standard was already written down (CODE_QUALITY.md
+  + DEFINITION_OF_DONE.md §2); the gap was *enforcement*.  Added a mechanical **commit gate**
+  (chosen with the user, who was mainly worried about documentation drifting below standard):
+  * `tools/check_docs.py` — AST docstring checker.  **Blocks** on any public class/function/method
+    lacking a docstring; **warns** on incomplete `:param` / missing `:return`.  Inspects only
+    module-level defs + class methods (not nested closures); exempts test files (validated by
+    running pytest, names are descriptive per policy).
+  * `tools/precommit_hook.py` — Claude Code `PreToolUse` gate: on `git commit` runs the doc check
+    on staged `*.py` + the full pytest suite, blocking (exit 2) with the reason surfaced if either
+    fails.  Verified end-to-end: blocks on an undocumented staged file before pytest.
+  * Wired via `.claude/settings.json` (gitignored → local to this clone) with an
+    `if: Bash(git commit*)` filter.  **Caveat:** a settings file created mid-session needs a
+    `/hooks` open or CLI restart before the harness activates it.
+  * **Open for the user:** the DoD also mandates PR-delivery and keeping
+    `GLOBAL_TEST_REPORT.md` / `tests/TEST_AUDIT_REPORT.md` current — current practice (local
+    commits, no report updates) has drifted from that; decide whether to enforce or relax the doc.
 
 - [x] 2026-06-01 — UX improvements + bug fixes (6 tasks, branch `feature/ux-improvements-june`).
   * **Task 1 — "not identified" print:** `AnalyzerModV1` now logs `"Shard … not identified"` for each constant that fails the identification threshold, matching the old per-constant behavior.
@@ -128,8 +146,6 @@ The system is desigend as a modular pipeline:
 
 - [ ] **Shard streaming + RAM cap during extraction.** See full issue spec in [`context/shard_extraction/ISSUE_RAM_STREAMING.md`](shard_extraction/ISSUE_RAM_STREAMING.md).  Short version: `out` (witnesses) + `counts` (Good-Turing) are held entirely in memory — 5–7 GB for a 1M-shard run, forced shutdown loses everything.  Chosen fix: stream witnesses to `shards.jsonl` every 10k shards + compact `seen: Set[bytes]` for dedup; `counts` stays exact (it is already per-phase).  **RAM policy (general):** any stage accumulating large in-memory dicts should checkpoint periodically — ask "what happens on forced shutdown after 2 hours?" before finalising any long-running stage.
 
-
-
 - [ ] Implement shard extraction (upgrade). See full instructions in `SHARD_EXTRACTION_PLAN.md`.
   * Done in two steps on 2026-05-27: (1) v1 strategy-pattern package landed in `dreamer/extraction/v2/`; (2) `ExtractionManager` is now the default path via `extraction_config.STRATEGY="auto"` with timeout-protected fallback to heuristic.  Legacy lattice scan is retained behind `STRATEGY="legacy"`.  See Completed for both entries plus the benchmark numbers.
   * **Still open under this task:** pFq-symmetry deduplication in v2 (v2 currently finds the symmetric duplicates that `IGNORE_DUPLICATE_SEARCHABLES=True` was filtering in legacy — see the backlog item "shard symmetry utilization"), and a real-CMF correctness sweep beyond the small benchmark.
@@ -172,6 +188,34 @@ The system is desigend as a modular pipeline:
 ---
 
 ## Completed
+
+- [x] 2026-06-02 — **Gradient Ascent** search method + module (branch `feature/gradient-ascent-search`).
+  * **Insight (user):** δ is continuous and generally smooth in the trajectory *angle*
+    (non-differentiable only at finitely many points), so the optimizer ascends δ over a
+    real-valued direction space; each updated direction is *realized* as the angle-best integer
+    trajectory with bounded L2 norm (`GRAD_MAX_NORM`, default 100) — a **semi-discrete** step.
+    Named **Gradient Ascent** (larger δ is better), not "descent".
+  * **Gradient:** forward differences in **angle** space (`rotate_toward` + `snap_to_trajectory`).
+  * **Variants (strategy pattern):** `VanillaGrad`, `Momentum`, `RMSprop`, `Adam` +
+    `optimizer_for` factory, selected by `GRAD_VARIANT`.  Files
+    [optimizers.py](dreamer/search/methods/gradient_ascent/optimizers.py),
+    [lattice.py](dreamer/search/methods/gradient_ascent/lattice.py),
+    [grad_ascent_scan.py](dreamer/search/methods/gradient_ascent/grad_ascent_scan.py),
+    [gradient_ascent_mod.py](dreamer/search/searchers/gradient_ascent_mod.py).
+  * **Convergence stop:** terminates when `‖g‖ < GRAD_GRAD_TOL`, the snapped step can't move,
+    `GRAD_PATIENCE` non-improving steps, or `GRAD_MAX_STEPS` — never spins on a local optimum.
+  * **Non-identified handling (three-stage):** skip → length-double after `GRAD_SKIP_LIMIT` (=3)
+    → diffract a random in-cone direction from the last identified trajectory; `SearchStalled`
+    after `GRAD_DIFFRACT_TRIES` failures (caught + logged by the module).
+  * **Config:** `GRAD_*` knobs in [search.py](dreamer/configs/search.py).  Exported
+    `GradientAscentMod` from `dreamer/search/__init__.py`.  Reuses the shared flatland geometry /
+    `evaluate_in_flatland` walk-reuse pipeline (same JSONL output as the other methods).
+  * **Tests:** `tests/test_gradient_ascent_search.py` (32 cases): optimizer math + reset +
+    factory, `rotate_toward`/`snap_to_trajectory`, forward-difference gradient (skips
+    non-identified), seed selection + `NoInitialIdentification`, convergence stop, recovery
+    ladder (skip/doubling/diffract → `SearchStalled`), module orchestration.  Full suite
+    **512 passed**.  End-to-end smoke on pFq(log(2),2,1,-1): 12 JSONL files, 85 records, best
+    δ(log-2)=0.281.
 
 - [x] 2026-06-02 — **Genetic Search** method + **Simulated Annealing** method + two search modules.
   * **GeneticSearch** in [genetic_scan.py](dreamer/search/methods/genetic_search/genetic_scan.py),
