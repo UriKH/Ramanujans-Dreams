@@ -37,6 +37,12 @@ Code should be thoroughly tested!
 - All tests shuold have readable descriptive names and be well documented and explain the rational behind the test case.
 - When finding missing tests report to user and explain which tests are missing and why in [MISSING_TESTS.md](context/background/TESTS.md).
 
+# Repository Workflow
+
+- Each task executed should be commited separately.
+- Commit names and descriptions must be concise, readable and informative. 
+- Development should be on a separate branch which will be commited and merged after each task.
+
 # Design
 The design should be clean and utilize OOP design patterns when possible to simplify the code and allow expandability. 
 

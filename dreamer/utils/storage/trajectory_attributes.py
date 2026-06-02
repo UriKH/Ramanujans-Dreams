@@ -477,7 +477,6 @@ class TrajectoryAttributesHandler:
         characteristic roots. For polynomial coefficients, these are
         the leading-term roots that govern asymptotic growth.
         """
-        # TODO: make sure eigenvalues we are interested in are the companion's!
         return self._get("sorted_eigenvalues", lambda: self.companion().sorted_eigenvals())
 
     def eigenvalue_errors(self) -> list:
@@ -491,7 +490,6 @@ class TrajectoryAttributesHandler:
             errors[1] = log|λ₁/λ₃|  (if d ≥ 3)
             etc.
         """
-        # TODO: make sure eigenvalues errors we are interested in are the companion's!
         def compute():
             # Using Ramanujan-tools implementation of errors() for caching
             lambdas = [e.evalf(chop=True) for e in self.sorted_eigenvalues()]
@@ -737,16 +735,11 @@ class TrajectoryAttributesHandler:
         Returns a list of predicted δ values (one per eigenvalue pair).
         For order-2 recurrences, this is a single-element list.
         """
-        # TODO: make sure this implementation is correct. eigenvalue-errors are
-        #  of the companion but gcd-slope is of the trajectory matrix!
         def compute():
             # Copied implementation from Ramanujan-Tools - utilizing cache here.
             errors = self.eigenvalue_errors()
             slope = self.gcd_slope(depth)
             return [-1 + error / slope for error in errors]
-        # return self._get(f"kamidelta_{depth}", lambda:
-        #     self.companion().kamidelta(depth)
-        # )
         return self._get(f'kamidelta_{depth}', compute)
 
     def gcd_slope(self, depth: int = 20):
@@ -756,10 +749,8 @@ class TrajectoryAttributesHandler:
 
         Used internally by kamidelta, but also useful on its own.
         """
-        # TODO: make sure this implementation is correct. gcd-slope computed for the trakectory matrix
-        #  or should it be the companion? It seems that recurrence limit is computed with the recurrence matrix so we use it here for the gcd_slope
         # return self._get(f"gcd_slope_{depth}", lambda: self.trajectory_matrix().gcd_slope(depth))
-        return self._get(f"gcd_slope_{depth}", lambda: self.linear_recurrence().recurrence_matrix.gcd_slope(depth))
+        return self._get(f"gcd_slope_{depth}", lambda: self.companion().gcd_slope(depth))
 
     # ==================================================================
     #  CONVERGENCE RATE
