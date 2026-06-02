@@ -12,11 +12,17 @@ def traj_from_dim(dim: int) -> int:
 def depth_from_len(traj_len, dim) -> int:
     return min(round(1500 / max(traj_len / math.sqrt(dim), 1)), 1500)
 
+# def ga_generations(dim: int) -> int:
+#     return 15 + 4 * dim
+#
+# def ga_population(dim: int) -> int:
+#     return 20 + 2 * dim ** 2
+
 def ga_generations(dim: int) -> int:
-    return 15 + 4 * dim
+    return 15 + 3 * dim
 
 def ga_population(dim: int) -> int:
-    return 20 + 2 * dim ** 2
+    return 20 + 2 * dim
 
 
 @dataclass
@@ -167,20 +173,24 @@ class SearchConfig(Configurable):
         metadata={"description": "Initial temperature for simulated annealing cooling schedule."},
     )
     ANNEAL_TMIN: float = field(
-        default=1e-3,
-        metadata={"description": "Minimum temperature threshold; annealing stops when T drops below this."},
+        default=1e-4,
+        metadata={"description": "Minimum temperature threshold; annealing stops when T drops below this. Lower than T0/(MAX_ITERS+1) means Tmin acts as a safety net rather than the primary stop condition."},
     )
     ANNEAL_SCHEDULE: str = field(
         default="linear",
         metadata={"description": "Cooling schedule type: 'linear' (T0/(k+1)) or 'log' (T0/log(k+1))."},
     )
     ANNEAL_MAX_ITERS: int = field(
-        default=200,
-        metadata={"description": "Maximum number of accepted moves (iterations) for simulated annealing."},
+        default=500,
+        metadata={"description": "Maximum number of accepted moves (primary stop condition). Primary termination criterion; Tmin is a secondary safety net."},
     )
     ANNEAL_MAX_DOUBLINGS: int = field(
         default=10,
         metadata={"description": "Cap on consecutive trajectory length-doublings on rejection before reseeding."},
+    )
+    ANNEAL_MAX_TOTAL_STEPS: int = field(
+        default=50_000,
+        metadata={"description": "Hard ceiling on total while-loop iterations (accepted + rejected) to prevent infinite stalls. Should be large enough never to trigger in normal operation; exists as a safety net for tabu-deadlock edge cases."},
     )
     ANNEAL_TABU_SIZE: int = field(
         default=70,
@@ -224,7 +234,7 @@ class SearchConfig(Configurable):
         metadata={"description": "Maximum number of gradient-ascent steps per constant (the manual step budget)."},
     )
     GRAD_PATIENCE: int = field(
-        default=5,
+        default=3,
         metadata={"description": "Consecutive non-improving steps tolerated before early-stopping the ascent."},
     )
     GRAD_IMPROVE_THRESHOLD: float = field(
@@ -232,11 +242,11 @@ class SearchConfig(Configurable):
         metadata={"description": "Minimum delta gain counted as an improvement during the ascent."},
     )
     GRAD_GRAD_TOL: float = field(
-        default=1e-6,
+        default=1e-4,
         metadata={"description": "Convergence stop: terminate when the estimated gradient L2 norm falls below this (no better step to take)."},
     )
     GRAD_MAX_NORM: float = field(
-        default=100.0,
+        default=60.0,
         metadata={"description": "Maximum L2 norm of a realized integer trajectory direction when snapping a real direction onto the lattice."},
     )
     GRAD_FD_ANGLE: float = field(
@@ -248,11 +258,11 @@ class SearchConfig(Configurable):
         metadata={"description": "Consecutive unproductive (non-identified) steps tolerated by 'skip' before the length-doubling fallback fires."},
     )
     GRAD_MAX_DOUBLINGS: int = field(
-        default=10,
+        default=2,
         metadata={"description": "Cap on consecutive length-doublings before falling back to diffraction off the unidentified wall."},
     )
     GRAD_DIFFRACT_TRIES: int = field(
-        default=10,
+        default=5,
         metadata={"description": "Number of random in-cone 'diffraction' directions tried from the last identified trajectory before the shard search is abandoned (SearchStalled)."},
     )
     GRAD_RESERVOIR_SIZE: int = field(
@@ -262,7 +272,7 @@ class SearchConfig(Configurable):
 
     # ============================== Raycaster settings ==============================
     MAX_TRAJECTORY_LENGTH: int = field(
-        default=100,
+        default=70,
         metadata={"description": "Upper bound for absolute trajectory coordinate values during search."},
     )
 
