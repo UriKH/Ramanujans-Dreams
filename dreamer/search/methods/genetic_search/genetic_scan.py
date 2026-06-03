@@ -16,7 +16,6 @@ DTO/JSONL refactor):
 """
 
 import random
-import threading
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -25,11 +24,16 @@ from ramanujantools import Position
 from dreamer.configs import config
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
-from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
+from dreamer.search.methods.flatland.evaluator import (
+    evaluate_in_flatland,
+    flatland_trajectory_key,
+)
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
+from dreamer.search.methods.genetic_search.parallel_eval import _pool_walk
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
+from dreamer.utils.storage.attribute_registry import attribute_name
 from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 
@@ -153,8 +157,16 @@ class GeneticSearch(SearchMethod):
         handler_cache: Optional[Dict[str, "TrajectoryAttributesHandler"]] = None,
         geom: Optional[FlatlandGeometry] = None,
         start=None,
+        pool=None,
     ) -> None:
         """Run the GA for a single constant, emitting DTOs to *sink*.
+
+        :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`
+            (see :func:`parallel_eval.make_eval_pool`).  When provided, each
+            generation's batch of genuinely-new trajectory walks is dispatched
+            to worker processes; the main process retains ownership of the
+            ``sink`` and the ``seen_trajectories`` / ``handler_cache`` dicts.
+            ``None`` evaluates serially (or via the legacy thread path).
 
         :param geom: Pre-built :class:`FlatlandGeometry` for the shard.  The
             flatland conditioning (integer nullspace + LLL/BKZ reduction) is
@@ -186,9 +198,11 @@ class GeneticSearch(SearchMethod):
             sink=sink,
             seen_trajectories=seen_trajectories,
             handler_cache=handler_cache,
-            # Guards the shared seen/handler caches across the parallel
-            # population-evaluation threads (GA_NUM_EVAL_WORKERS).
-            lock=threading.Lock(),
+            # No lock needed: population evaluation is parallelised across
+            # *processes* (each owns the walk), with the main process the sole
+            # owner of the sink / seen_trajectories / handler_cache.  The serial
+            # path runs single-threaded.
+            lock=None,
         )
 
         # Resolve GA schedule (callable or int).
@@ -208,7 +222,7 @@ class GeneticSearch(SearchMethod):
         population = self._init_population(geom, pop_size, shard_id, constant)
 
         # Evaluate initial population in parallel (Fix C).
-        deltas = self._eval_population(population, eval_ctx)
+        deltas = self._eval_population(population, eval_ctx, pool)
 
         last_best = None
         unchanged_count = 0
@@ -283,7 +297,7 @@ class GeneticSearch(SearchMethod):
             # Evaluate new children in parallel (elites already have cached deltas).
             children = [population[i] for i in range(len(population)) if next_deltas[i] is None]
             child_indices = [i for i in range(len(population)) if next_deltas[i] is None]
-            child_deltas = self._eval_population(children, eval_ctx)
+            child_deltas = self._eval_population(children, eval_ctx, pool)
             for idx, delta in zip(child_indices, child_deltas):
                 next_deltas[idx] = delta
             deltas = next_deltas
@@ -292,7 +306,7 @@ class GeneticSearch(SearchMethod):
         unevaluated = [(i, z) for i, z in enumerate(population) if deltas[i] is None]
         if unevaluated:
             idxs, zs = zip(*unevaluated)
-            for idx, delta in zip(idxs, self._eval_population(list(zs), eval_ctx)):
+            for idx, delta in zip(idxs, self._eval_population(list(zs), eval_ctx, pool)):
                 deltas[idx] = delta
 
     # ------------------------------------------------------------------
@@ -432,23 +446,114 @@ class GeneticSearch(SearchMethod):
         return delta
 
     def _eval_population(
-        self, population: List[np.ndarray], eval_ctx: dict
+        self, population: List[np.ndarray], eval_ctx: dict, pool=None
     ) -> List[float]:
         """
-        Evaluate a batch of genomes, optionally in parallel (Fix C).
-
-        Uses ``GA_NUM_EVAL_WORKERS`` threads.  Thread-safe: each genome has a
-        distinct trajectory_id; dict operations are atomic under Python's GIL.
+        Evaluate a batch of genomes, optionally in parallel via a process pool.
 
         :param population: List of flatland genome vectors to evaluate.
-        :param eval_ctx: Evaluation context dict.
+        :param eval_ctx: Evaluation context dict (forwarded to evaluate_in_flatland).
+        :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`.
+            When provided and the batch has more than one genome, genuinely-new
+            walks are dispatched to worker processes (see
+            :meth:`_eval_population_parallel`); otherwise the batch is evaluated
+            serially in this process.
         :return: List of δ values in the same order as *population*.
         """
         if not population:
             return []
-        n_workers = search_config.GA_NUM_EVAL_WORKERS
-        if n_workers > 1 and len(population) > 1:
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=min(len(population), n_workers)) as pool:
-                return list(pool.map(lambda z: self._eval_genome(z, eval_ctx), population))
+        if pool is not None and len(population) > 1:
+            return self._eval_population_parallel(population, eval_ctx, pool)
         return [self._eval_genome(z, eval_ctx) for z in population]
+
+    def _eval_population_parallel(
+        self, population: List[np.ndarray], eval_ctx: dict, pool
+    ) -> List[float]:
+        """
+        Evaluate a batch using a persistent per-shard process *pool*.
+
+        The main process owns all cache state and the sink, so it first resolves
+        the cheap cases inline and only dispatches the expensive symbolic walks:
+
+        * **Invalid** genome → δ = −∞ (no walk).
+        * **Case A** — δ already cached for this constant under the current
+          config fingerprint → reuse the stored value (no walk).
+        * **Case B** — a handler for this trajectory was already built this
+          shard-run (``handler_cache``) → recompute δ for this constant via the
+          serial :func:`evaluate_in_flatland` (reuses the cached walk; no new
+          walk).
+        * **Case C** — genuinely new trajectory → dispatched to the pool.
+          Identical genomes mapping to the same ``trajectory_id`` within the
+          batch are de-duplicated so each ray is walked once.
+
+        Worker results flow back as the same ``(trajectory_matrix, value_sympy,
+        dto)`` tuple the serial path produces; the main process feeds each to
+        the sink and records it in ``seen_trajectories``.
+
+        :param population: List of flatland genome vectors to evaluate.
+        :param eval_ctx: Evaluation context dict.
+        :param pool: Ready :class:`multiprocessing.Pool` for this shard.
+        :return: List of δ values in the same order as *population*.
+        """
+        geom: FlatlandGeometry = eval_ctx["geom"]
+        shard: Shard = eval_ctx["shard"]
+        start = eval_ctx["start"]
+        constant: Constant = eval_ctx["constant"]
+        sink: Callable = eval_ctx["sink"]
+        seen: dict = eval_ctx["seen_trajectories"]
+        handler_cache: dict = eval_ctx["handler_cache"]
+        cmf_id: str = eval_ctx["cmf_id"]
+        shard_id: str = eval_ctx["shard_id"]
+        shard_encoding_str: str = eval_ctx["shard_encoding_str"]
+        desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
+
+        n = len(population)
+        deltas: List[Optional[float]] = [None] * n
+        # trajectory_id -> (direction, fingerprint, [genome indices]) for Case C.
+        groups: Dict[str, tuple] = {}
+
+        for i, z in enumerate(population):
+            if not self._valid_genome(z, geom):
+                deltas[i] = float("-inf")
+                continue
+            direction, tid, fp = flatland_trajectory_key(
+                z, geom=geom, shard=shard, start=start,
+                shard_id=shard_id, shard_encoding_str=shard_encoding_str,
+            )
+            rec = seen.get(tid)
+            if rec is not None and rec.get("config_fingerprint") == fp:
+                dmap = rec.get("delta_estimate") or {}
+                if constant.name in dmap:  # Case A
+                    deltas[i] = float(dmap[constant.name])
+                    continue
+            if tid in handler_cache:  # Case B — cheap recompute, no new walk
+                deltas[i], _ = evaluate_in_flatland(z, **eval_ctx)
+                continue
+            # Case C — dedupe identical rays within the batch.
+            grp = groups.get(tid)
+            if grp is None:
+                groups[tid] = (direction, fp, [i])
+            else:
+                grp[2].append(i)
+
+        if groups:
+            args = [
+                (direction, constant, cmf_id, shard_id, shard_encoding_str)
+                for (direction, fp, idxs) in groups.values()
+            ]
+            results = pool.map(_pool_walk, args)
+            for (tid, (direction, fp, idxs)), (matrix, vsym, dto) in zip(
+                groups.items(), results
+            ):
+                sink((matrix, vsym, dto))
+                seen[tid] = {
+                    "extended_metrics": dict.fromkeys(desired),
+                    "delta_estimate": dict(dto.delta_estimate),
+                    "identified": dict(dto.identified),
+                    "config_fingerprint": fp,
+                }
+                d = float(dto.delta_estimate.get(constant.name, float("-inf")))
+                for i in idxs:
+                    deltas[i] = d
+
+        return [float(d) if d is not None else float("-inf") for d in deltas]

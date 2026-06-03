@@ -30,6 +30,42 @@ from dreamer.configs import config
 search_config = config.search
 
 
+def flatland_trajectory_key(
+    z,
+    *,
+    geom: FlatlandGeometry,
+    shard: Shard,
+    start,
+    shard_id: str,
+    shard_encoding_str: str,
+) -> Tuple[object, str, str]:
+    """Compute the cache key for a flatland direction *z* without walking it.
+
+    Centralises the (primitive direction → ``trajectory_id`` + Tier-1
+    fingerprint) derivation so the serial :func:`evaluate_in_flatland` and the
+    batched parallel evaluators (e.g. the GA process pool) agree exactly on how
+    a trajectory is identified and when a cached record is stale.
+
+    :param z: Integer flatland direction.
+    :param geom: Flatland geometry for the shard.
+    :param shard: The shard being searched.
+    :param start: Interior start :class:`Position`.
+    :param shard_id: Structural shard id.
+    :param shard_encoding_str: Comma-joined ±1 encoding string.
+    :return: ``(direction, trajectory_id, current_fp)`` — the primitive
+        real-space direction, its trajectory id, and the current Tier-1 config
+        fingerprint.
+    """
+    direction = geom.to_real_primitive(z)
+    start_t = _position_to_tuple(start)
+    dir_t = _position_to_tuple(direction)
+    trajectory_id = derive_trajectory_id(
+        shard_id, shard.cmf_name, shard_encoding_str, start_t, dir_t
+    )
+    current_fp = tier1_config_fingerprint(walk_depth_for(shard.cmf, direction))
+    return direction, trajectory_id, current_fp
+
+
 def evaluate_in_flatland(
     z,
     *,
@@ -84,25 +120,18 @@ def evaluate_in_flatland(
     # Always walk the GCD-reduced (primitive) ray: δ depends on the direction's
     # angle, not its length, so scaled/doubled copies of ``z`` map to the same
     # ray — same ``trajectory_id`` — and reuse the cached walk (Case A/B).
-    direction = geom.to_real_primitive(z)
-    start_t = _position_to_tuple(start)
-    dir_t = _position_to_tuple(direction)
-
-    trajectory_id = derive_trajectory_id(
-        shard_id, shard.cmf_name, shard_encoding_str, start_t, dir_t
+    # The fingerprint guards staleness: a cached record is only reusable when
+    # its stored fingerprint matches the current config (walk depth / walk type
+    # / identification tolerances), else the stored δ / identification are stale.
+    direction, trajectory_id, current_fp = flatland_trajectory_key(
+        z, geom=geom, shard=shard, start=start,
+        shard_id=shard_id, shard_encoding_str=shard_encoding_str,
     )
 
     desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
     with guard:
         seen_record = seen_trajectories.get(trajectory_id)
         cached_handler = handler_cache.get(trajectory_id)
-
-    # Fingerprint of the config knobs that influence this trajectory's Tier-1
-    # values, including the walk depth it will use.  A cached record is only
-    # reusable when its stored fingerprint matches — otherwise the config (e.g.
-    # walk depth / walk type / identification tolerances) changed and the stored
-    # δ / identification are stale and must be recomputed below.
-    current_fp = tier1_config_fingerprint(walk_depth_for(shard.cmf, direction))
 
     # --- Case A: delta already known for this constant (same config) ---
     if seen_record is not None and seen_record.get("config_fingerprint") == current_fp:
