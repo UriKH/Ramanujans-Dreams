@@ -179,6 +179,29 @@ class TestPopulationInit:
 # 4. Repair
 # ---------------------------------------------------------------------------
 
+class TestBatchValidity:
+    def test_batch_mask_agrees_with_scalar(self, simple_shard):
+        """The vectorised validity mask must select exactly the genomes the
+        scalar _valid_genome would accept."""
+        method = GeneticSearch(simple_shard, e, use_LIReC=False)
+        geom = FlatlandGeometry(simple_shard)
+        rng = np.random.default_rng(0)
+        Z = rng.integers(-40, 40, size=(50, geom.d_flat)).astype(np.int64)
+        # Include the all-zero genome explicitly (must be rejected).
+        Z = np.vstack([Z, np.zeros((1, geom.d_flat), dtype=np.int64)])
+        batch = method._valid_genomes_mask(Z, geom)
+        scalar = np.array([method._valid_genome(z, geom) for z in Z])
+        assert np.array_equal(batch, scalar)
+
+    def test_init_population_all_valid(self, simple_shard):
+        """Population produced via the batched path is still all-valid."""
+        method = GeneticSearch(simple_shard, e, use_LIReC=False)
+        geom = FlatlandGeometry(simple_shard)
+        pop = method._init_population(geom, pop_size=6, shard_id="t", constant=e)
+        assert len(pop) == 6
+        assert all(method._valid_genome(z, geom) for z in pop)
+
+
 class TestRepair:
     def test_valid_genome_unchanged(self, simple_shard):
         method = GeneticSearch(simple_shard, e, use_LIReC=False)

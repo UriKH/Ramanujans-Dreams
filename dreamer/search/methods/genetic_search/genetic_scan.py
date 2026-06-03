@@ -299,21 +299,40 @@ class GeneticSearch(SearchMethod):
     # Internals
     # ------------------------------------------------------------------
 
+    def _valid_genomes_mask(self, Z: np.ndarray, geom: FlatlandGeometry) -> np.ndarray:
+        """
+        Vectorised validity test for a stack of candidate genomes.
+
+        A genome is valid iff it is non-zero, in-cone, and within the
+        trajectory-length cap — identical to :meth:`_valid_genome`, but
+        evaluated for every row of *Z* in one batched NumPy pass (the cone
+        membership and the shard-space norm are single matmuls over the whole
+        stack via ``geom.is_inside_many`` / ``geom.traj_norm_many``).
+
+        :param Z: Integer array of shape ``(k, d_flat)`` — one genome per row.
+        :param geom: Flatland geometry for the current shard.
+        :return: Boolean array of length ``k``; ``True`` where the row is valid.
+        """
+        Z = np.atleast_2d(np.asarray(Z, dtype=np.int64))
+        if Z.size == 0:
+            return np.zeros(Z.shape[0], dtype=bool)
+        nonzero = np.any(Z != 0, axis=1)
+        inside = geom.is_inside_many(Z)
+        within = geom.traj_norm_many(Z, search_config.GA_TRAJ_NORM) <= search_config.GA_MAX_TRAJ_LEN
+        return nonzero & inside & within
+
     def _valid_genome(self, z: np.ndarray, geom: FlatlandGeometry) -> bool:
         """
         Return True iff *z* is a valid (in-cone, within traj-length cap) genome.
+
+        Thin scalar wrapper over :meth:`_valid_genomes_mask` so the single- and
+        batch-genome paths can never diverge.
 
         :param z: Flatland integer vector candidate.
         :param geom: Flatland geometry for the current shard.
         :return: True if the genome is acceptable for evaluation.
         """
-        if not np.any(z):
-            return False
-        if not geom.is_inside(z):
-            return False
-        if geom.traj_norm(z, search_config.GA_TRAJ_NORM) > search_config.GA_MAX_TRAJ_LEN:
-            return False
-        return True
+        return bool(self._valid_genomes_mask(np.asarray(z)[None, :], geom)[0])
 
     def _init_population(
         self,
@@ -337,12 +356,18 @@ class GeneticSearch(SearchMethod):
         trajectories = orchestrator.sample_trajectories(n_sample)
 
         population: List[np.ndarray] = []
-        for t in trajectories:
-            z = geom.to_flatland(t)
-            if self._valid_genome(z, geom):
-                population.append(z)
-            if len(population) >= pop_size:
-                break
+        traj_list = list(trajectories)
+        if traj_list:
+            # Convert all sampled trajectories to flatland and validate them in
+            # a single batched NumPy pass (one matmul for cone membership, one
+            # for the shard-space norm) instead of a per-genome scalar check.
+            Z = np.stack([geom.to_flatland(t) for t in traj_list])
+            mask = self._valid_genomes_mask(Z, geom)
+            for z, ok in zip(Z, mask):
+                if ok:
+                    population.append(np.array(z))
+                    if len(population) >= pop_size:
+                        break
 
         # Top up with small random perturbations of found seeds when short.
         attempts = 0
@@ -382,11 +407,14 @@ class GeneticSearch(SearchMethod):
             return z
         orchestrator = ShardSamplingOrchestrator(self.space)
         for _ in range(search_config.GA_MAX_RETRIES * 3):
-            trajectories = orchestrator.sample_trajectories(5)
-            for t in trajectories:
-                cand = geom.to_flatland(t)
-                if self._valid_genome(cand, geom):
-                    return cand
+            trajectories = list(orchestrator.sample_trajectories(5))
+            if not trajectories:
+                continue
+            Z = np.stack([geom.to_flatland(t) for t in trajectories])
+            mask = self._valid_genomes_mask(Z, geom)
+            valid_idx = np.nonzero(mask)[0]
+            if valid_idx.size:
+                return np.array(Z[valid_idx[0]])
         return z  # Fall back; _eval_genome returns −∞ for invalid genomes
 
     def _eval_genome(self, z: np.ndarray, eval_ctx: dict) -> float:
