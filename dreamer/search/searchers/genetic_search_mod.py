@@ -15,6 +15,7 @@ from typing import Dict, List, Set
 from dreamer.configs import config
 from dreamer.configs.system import sys_config
 from dreamer.extraction.shard import Shard
+from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.search.methods.genetic_search import GeneticSearch, NoInitialPopulation
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
@@ -90,6 +91,13 @@ class GeneticSearchModV2(SearcherModScheme):
 
         handler_cache: dict = {}
 
+        # Build the flatland geometry (integer nullspace + LLL/BKZ reduction)
+        # and interior start point ONCE per shard: both are constant-
+        # independent, so re-deriving them per identified constant would repeat
+        # the expensive lattice reduction needlessly.
+        geom = FlatlandGeometry(shard)
+        start = shard.get_interior_point()
+
         with worker_pool(
             num_workers=num_workers,
             worker_fn=compute_tier2_for_item,
@@ -109,6 +117,8 @@ class GeneticSearchModV2(SearcherModScheme):
                         sink=push,
                         seen_trajectories=seen_trajectories,
                         handler_cache=handler_cache,
+                        geom=geom,
+                        start=start,
                     )
                 except NoInitialPopulation as e:
                     Logger(str(e), Logger.Levels.warning).log()

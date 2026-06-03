@@ -151,17 +151,29 @@ class GeneticSearch(SearchMethod):
         sink: Callable,
         seen_trajectories: dict,
         handler_cache: Optional[Dict[str, "TrajectoryAttributesHandler"]] = None,
+        geom: Optional[FlatlandGeometry] = None,
+        start=None,
     ) -> None:
         """Run the GA for a single constant, emitting DTOs to *sink*.
 
+        :param geom: Pre-built :class:`FlatlandGeometry` for the shard.  The
+            flatland conditioning (integer nullspace + LLL/BKZ reduction) is
+            shard-dependent but **constant-independent**, so when a shard is
+            searched for several constants the caller builds the geometry once
+            and passes it in to avoid repeating the reduction per constant.
+            ``None`` builds it here (standalone / single-constant path).
+        :param start: Pre-fetched interior start :class:`Position` for the
+            shard (also constant-independent).  ``None`` fetches it here.
         :raises NoInitialPopulation: if no in-cone seed genome can be built.
         """
         if handler_cache is None:
             handler_cache = {}
 
         shard: Shard = self.space
-        geom = FlatlandGeometry(shard)
-        start = shard.get_interior_point()
+        if geom is None:
+            geom = FlatlandGeometry(shard)
+        if start is None:
+            start = shard.get_interior_point()
 
         eval_ctx = dict(
             geom=geom,
