@@ -22,6 +22,7 @@ Algorithm is faithful to ``context/resources/code/algos/annealing.py`` and
 
 import math
 import random
+import threading
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -157,6 +158,9 @@ class SimulatedAnnealingSearch(SearchMethod):
             sink=sink,
             seen_trajectories=seen_trajectories,
             handler_cache=handler_cache,
+            # Guards the shared seen/handler caches across the parallel
+            # neighbour-evaluation threads (ANNEAL_NUM_EVAL_WORKERS).
+            lock=threading.Lock(),
         )
 
         cur_z = self._select_seed(geom, eval_ctx, shard_id, constant)

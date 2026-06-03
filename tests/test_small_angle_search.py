@@ -264,7 +264,12 @@ class TestWalkReuse:
         dir_t = _position_to_tuple(geom.to_real(z))
         tid = derive_trajectory_id("sid", whole_space_shard.cmf_name, "", start_t, dir_t)
 
-        seen = {tid: {"extended_metrics": {}, "delta_estimate": {e.name: 2.5}, "identified": {e.name: True}}}
+        from dreamer.utils.storage.trajectory_attributes import (
+            tier1_config_fingerprint, walk_depth_for,
+        )
+        fp = tier1_config_fingerprint(walk_depth_for(whole_space_shard.cmf, geom.to_real_primitive(z)))
+        seen = {tid: {"extended_metrics": {}, "delta_estimate": {e.name: 2.5},
+                      "identified": {e.name: True}, "config_fingerprint": fp}}
         built = []
 
         from dreamer.search.methods.small_angle import small_angle_scan as sas
@@ -306,7 +311,12 @@ class TestWalkReuse:
         cached_handler.trajectory_matrix.return_value = MagicMock()
         cached_handler.compute_for_constant.return_value = (1.5, None, None, True)
 
-        seen = {tid: {"extended_metrics": {}, "delta_estimate": {pi.name: 0.9}, "identified": {pi.name: True}}}
+        from dreamer.utils.storage.trajectory_attributes import (
+            tier1_config_fingerprint, walk_depth_for,
+        )
+        fp = tier1_config_fingerprint(walk_depth_for(whole_space_shard.cmf, geom.to_real_primitive(z)))
+        seen = {tid: {"extended_metrics": {}, "delta_estimate": {pi.name: 0.9},
+                      "identified": {pi.name: True}, "config_fingerprint": fp}}
         emitted = []
 
         from dreamer.search.methods.small_angle import small_angle_scan as sas

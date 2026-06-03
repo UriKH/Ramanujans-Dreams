@@ -16,6 +16,7 @@ DTO/JSONL refactor):
 """
 
 import random
+import threading
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -39,6 +40,10 @@ class NoInitialPopulation(Exception):
     """Raised when no in-cone seed genome can be found for the shard."""
 
     def __init__(self, shard_id: str, constant: Constant):
+        """
+        :param shard_id: Identifier of the shard with no in-cone seed.
+        :param constant: Constant whose population could not be seeded.
+        """
         self.shard_id = shard_id
         self.constant = constant
         super().__init__(
@@ -169,6 +174,9 @@ class GeneticSearch(SearchMethod):
             sink=sink,
             seen_trajectories=seen_trajectories,
             handler_cache=handler_cache,
+            # Guards the shared seen/handler caches across the parallel
+            # population-evaluation threads (GA_NUM_EVAL_WORKERS).
+            lock=threading.Lock(),
         )
 
         # Resolve GA schedule (callable or int).

@@ -42,6 +42,7 @@ from dreamer.search.methods.gradient_ascent.optimizers import optimizer_for
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
+from dreamer.utils.ui.tqdm_config import SmartTQDM
 
 search_config = config.search
 
@@ -179,7 +180,7 @@ class GradientAscentSearch(SearchMethod):
         doubling_count = 0
         no_improve = 0
 
-        for _ in range(cfg.GRAD_MAX_STEPS):
+        for _ in SmartTQDM(range(cfg.GRAD_MAX_STEPS), desc='Ascending ... ', **config.system.TQDM_CONFIG):
             # --- 1. Estimate the gradient (forward differences in angle) ---
             grad, usable = self._estimate_gradient(d, cur_delta, eval_ctx, geom)
 
@@ -268,7 +269,7 @@ class GradientAscentSearch(SearchMethod):
 
         for i in range(geom.d_flat):
             d_rot = rotate_toward(d, i, h)
-            z_probe = snap_to_trajectory(d_rot, geom, max_norm)
+            z_probe = snap_to_trajectory(d_rot, geom, max_norm, search_config.GRAD_TRAJ_NORM)
             if z_probe is None:
                 continue
             delta_i, identified_i = evaluate_in_flatland(z_probe, **eval_ctx)
@@ -303,7 +304,7 @@ class GradientAscentSearch(SearchMethod):
         scale = lr
         d_new = d + scale * update
         for _ in range(5):
-            z_new = snap_to_trajectory(d_new, geom, max_norm)
+            z_new = snap_to_trajectory(d_new, geom, max_norm, search_config.GRAD_TRAJ_NORM)
             if z_new is not None:
                 return z_new, d_new
             scale *= 0.5
@@ -348,7 +349,7 @@ class GradientAscentSearch(SearchMethod):
         if doubling_count < cfg.GRAD_MAX_DOUBLINGS:
             # Stage 2 — length-doubling fallback (escape the dead region).
             doubled = last_identified_z * 2
-            if float(np.linalg.norm(doubled)) <= max_norm and geom.is_inside(doubled):
+            if geom.traj_norm(doubled, search_config.GRAD_TRAJ_NORM) <= max_norm and geom.is_inside(doubled):
                 delta, identified = evaluate_in_flatland(doubled, **eval_ctx)
                 if identified:
                     return (
@@ -393,7 +394,7 @@ class GradientAscentSearch(SearchMethod):
             kick /= (np.linalg.norm(kick) or 1.0)
             angle = self._rng.uniform(cfg.GRAD_FD_ANGLE, np.pi / 3.0)
             d_rand = np.cos(angle) * base + np.sin(angle) * np.linalg.norm(base) * kick
-            z = snap_to_trajectory(d_rand, geom, max_norm)
+            z = snap_to_trajectory(d_rand, geom, max_norm, search_config.GRAD_TRAJ_NORM)
             if z is None:
                 continue
             delta, identified = evaluate_in_flatland(z, **eval_ctx)

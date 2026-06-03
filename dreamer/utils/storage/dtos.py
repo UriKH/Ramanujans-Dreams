@@ -153,6 +153,16 @@ class TrajectoryDTO:
     # matrix (the dual recurrence); 2 → walked directly.
     walk_type: int = 1
 
+    # Walk depth used for this trajectory's Tier-1 values, and a fingerprint of
+    # all config knobs that influenced them (see
+    # ``trajectory_attributes.tier1_config_fingerprint``).  Stored so a later
+    # run with a different configuration (e.g. a deeper walk) can detect that a
+    # cached record is stale and recompute it instead of silently reusing the
+    # old δ / identification.  ``None`` on legacy records (treated as stale →
+    # recomputed on next encounter).
+    walk_depth: Optional[int] = None
+    config_fingerprint: Optional[str] = None
+
     # Recurrence attributes — **Tier-2 / optional**.  Building the symbolic
     # ``LinearRecurrence`` (companion matrix + relation string) dominates the
     # per-trajectory cost (~80% in profiling), so it is **not** computed on the
@@ -192,6 +202,8 @@ class TrajectoryDTO:
             q_vector=_restore_pq(d.get("q_vector")),
             identified=d.get("identified") or {},
             walk_type=int(d.get("walk_type", 1)),
+            walk_depth=d.get("walk_depth"),
+            config_fingerprint=d.get("config_fingerprint"),
             recurrence_relation=d.get("recurrence_relation"),
             recurrence_order=d.get("recurrence_order"),
             extended_metrics=d.get("extended_metrics", {}),

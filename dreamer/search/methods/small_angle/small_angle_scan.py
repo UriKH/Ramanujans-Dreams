@@ -51,6 +51,7 @@ from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
+from dreamer.utils.ui.tqdm_config import SmartTQDM
 
 search_config = config.search
 
@@ -59,6 +60,10 @@ class NoInitialIdentification(Exception):
     """Raised when no reservoir trajectory identifies the constant in a shard."""
 
     def __init__(self, shard_id: str, constant: Constant):
+        """
+        :param shard_id: Identifier of the shard with no identifying seed.
+        :param constant: Constant that could not be identified.
+        """
         self.shard_id = shard_id
         self.constant = constant
         super().__init__(
@@ -153,7 +158,10 @@ class SmallAngleSearch(SearchMethod):
         no_improve = 0
         doublings = 0
 
-        for _ in range(search_config.SA_MAX_DEPTH):
+        for _ in SmartTQDM(
+                range(search_config.SA_MAX_DEPTH),
+                desc='Searching small angle filters', **config.system.TQDM_CONFIG
+        ):
             best_z, best_score = self._best_inside_perturbation(z, ctx)
 
             if best_z is None:
@@ -210,7 +218,7 @@ class SmallAngleSearch(SearchMethod):
         geom: FlatlandGeometry = ctx["geom"]
         best_z: Optional[np.ndarray] = None
         best_score = float("-inf")
-        for cand in geom.perturbations(z):  # reduce=True (default, SmallAngle style)
+        for cand in geom.perturbations(z, reduce=False):  # TODO: reduce=True (default, SmallAngle style)
             if not geom.is_inside(cand):
                 continue
             delta, _ = self._evaluate(cand, **ctx)

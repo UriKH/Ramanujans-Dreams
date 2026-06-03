@@ -104,6 +104,64 @@ def derive_cmf_and_shard_ids(shard) -> tuple[str, str, str]:
     return cmf_id, shard_id, shard_encoding_str
 
 
+def walk_depth_for(cmf, direction) -> int:
+    """Walk depth a trajectory in *direction* through *cmf* will use.
+
+    Mirrors the default depth resolution inside
+    :meth:`TrajectoryAttributesHandler.from_cmf` —
+    ``search.DEPTH_FROM_TRAJECTORY_LEN(||direction||, cmf.dim())`` — so callers
+    can predict the depth of a (not-yet-built) trajectory cheaply (no walk).
+    Used by :func:`tier1_config_fingerprint` to detect when a re-run requests a
+    different (e.g. deeper) walk than a cached record was computed with.
+    """
+    return int(search_config.DEPTH_FROM_TRAJECTORY_LEN(_trajectory_norm(direction), cmf.dim()))
+
+
+def tier1_config_fingerprint(walk_depth: int) -> str:
+    """Stable fingerprint of the config knobs that influence Tier-1 values.
+
+    Two trajectory computations with the same ``trajectory_id`` are
+    interchangeable **only** when every configuration input that feeds the
+    Tier-1 attributes (``delta``, ``identified``, ``limit``, ``p``/``q``) is
+    unchanged.  When any of them differs, a cached record is stale and must be
+    recomputed — this is what lets a later run with, e.g., a deeper walk
+    (``DEPTH_FROM_TRAJECTORY_LEN``) or a different walk style
+    (``DEFAULT_USES_INV_T``) override previously stored values instead of
+    silently reusing them.
+
+    The inputs, and the attributes they affect:
+
+    * ``walk_depth`` — the per-trajectory walk depth (passed in; derived from
+      ``DEPTH_FROM_TRAJECTORY_LEN`` and the trajectory length).  Affects every
+      walk-derived value: ``limit``, ``delta``, ``p``/``q``.
+    * ``DEFAULT_USES_INV_T`` (walk type 1 vs 2) — changes the walked matrix, so
+      affects all of the above.
+    * ``DEPTH_CONVERGENCE_THRESHOLD``, ``LIMIT_DIFF_ERROR_BOUND`` — the
+      convergence sanity check inside ``delta``.
+    * ``MIN_ESTIMATE_DENOMINATOR`` — the denominator floor in ``delta_sequence``.
+    * ``CACHE_ACCEPTANCE_THRESHOLD``, ``IDENTIFY_CHECK_THRESHOLD`` — the LIReC
+      identification / cache-acceptance tolerances (``identified``, ``p``/``q``).
+    * ``CONSTANT_NO_DIGITS_HIGH_RES`` / ``CONSTANT_NO_DIGITS_LOW_RES`` — the
+      precision the target constant is evaluated at for identification and δ.
+
+    :param walk_depth: The walk depth used (or to be used) for this trajectory.
+    :return: A 16-hex-char stable fingerprint string.
+    """
+    walk_type = 1 if search_config.DEFAULT_USES_INV_T else 2
+    payload = {
+        "walk_depth": int(walk_depth),
+        "walk_type": walk_type,
+        "depth_convergence_threshold": list(search_config.DEPTH_CONVERGENCE_THRESHOLD),
+        "limit_diff_error_bound": float(search_config.LIMIT_DIFF_ERROR_BOUND),
+        "min_estimate_denominator": int(search_config.MIN_ESTIMATE_DENOMINATOR),
+        "cache_acceptance_threshold": float(search_config.CACHE_ACCEPTANCE_THRESHOLD),
+        "identify_check_threshold": float(search_config.IDENTIFY_CHECK_THRESHOLD),
+        "constant_digits_high_res": int(search_config.CONSTANT_NO_DIGITS_HIGH_RES),
+        "constant_digits_low_res": int(search_config.CONSTANT_NO_DIGITS_LOW_RES),
+    }
+    return _stable_id(json.dumps(payload, sort_keys=True))
+
+
 def derive_trajectory_id(
     shard_id: str,
     cmf_name: str,
@@ -234,6 +292,8 @@ def build_trajectory_dto(
         q_vector=q_dict if q_dict else None,
         identified=identified_dict,
         walk_type=int(handler.walk_type()),
+        walk_depth=int(handler.walk_depth()),
+        config_fingerprint=tier1_config_fingerprint(handler.walk_depth()),
     )
 
 
@@ -548,6 +608,10 @@ class TrajectoryAttributesHandler:
     def walk_type(self) -> int:
         """Return the walk type (1 or 2) for this handler."""
         return self._walk_type
+
+    def walk_depth(self) -> int:
+        """Return the walk depth this handler walks the trajectory matrix to."""
+        return self._depth
 
     def _effective_walk_values(self, depth: Optional[int] = None, walk_matrix: Optional[sp.Matrix] = None) -> Optional[list]:
         """Return the column of the (walked-and-transformed) matrix used for p/q projection.

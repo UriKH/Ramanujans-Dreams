@@ -37,6 +37,8 @@ from dreamer.utils.storage.trajectory_attributes import (
     build_trajectory_dto,
     derive_cmf_and_shard_ids,
     derive_trajectory_id,
+    tier1_config_fingerprint,
+    walk_depth_for,
 )
 from dreamer.utils.storage.attribute_registry import (
     ATTRIBUTE_REGISTRY,
@@ -1489,9 +1491,11 @@ class TestMergeOnRead:
             start_t = tuple(int(v) for v in start_p.values())
             dir_t = tuple(int(v) for v in traj_p.values())
             tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
+            fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
             seen_trajectories[tid] = {
                 "trajectory_id": tid,
                 "extended_metrics": {"eigenvalues": "dummy"},
+                "config_fingerprint": fp,
             }
 
         sink, items = self._collecting_sink()
@@ -1535,7 +1539,10 @@ class TestMergeOnRead:
             start_t = tuple(int(v) for v in start_p.values())
             dir_t = tuple(int(v) for v in traj_p.values())
             tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
-            seen_trajectories[tid] = {"trajectory_id": tid, "extended_metrics": {}}
+            fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
+            seen_trajectories[tid] = {
+                "trajectory_id": tid, "extended_metrics": {}, "config_fingerprint": fp,
+            }
 
         # Count handler constructions.
         calls = [0]
@@ -1729,9 +1736,11 @@ class TestMergeOnRead:
             start_t = tuple(int(v) for v in start_p.values())
             dir_t = tuple(int(v) for v in traj_p.values())
             tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
+            fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
             seen_trajectories[tid] = {
                 "trajectory_id": tid,
                 "extended_metrics": {present_attr: "pre-computed"},
+                "config_fingerprint": fp,
             }
 
         sink, items = self._collecting_sink()
@@ -1913,10 +1922,12 @@ class TestAnalyzerDedup:
                 start_t = tuple(int(v) for v in start_p.values())
                 dir_t = tuple(int(v) for v in traj_p.values())
                 tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
+                fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
                 fout.write(json.dumps({
                     "trajectory_id": tid,
                     "delta_estimate": {e.name: 2.5},
                     "identified": {e.name: True},
+                    "config_fingerprint": fp,
                 }) + "\n")
 
         calls = [0]
@@ -2027,11 +2038,13 @@ class TestAnalyzerDedup:
 
         # JSONL now lives flat under EXPORT_SEARCH_RESULTS.
         jsonl_path = tmp_path / f"{shard_id}.jsonl"
+        fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
         with open(jsonl_path, "w") as fout:
             fout.write(json.dumps({
                 "trajectory_id": tid,
                 "delta_estimate": {e.name: 1.0},
                 "identified": {e.name: True},
+                "config_fingerprint": fp,
             }) + "\n")
 
         calls = [0]

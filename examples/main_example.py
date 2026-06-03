@@ -6,10 +6,20 @@ from dreamer import log, pi
 
 # Because of pickling format we need to define these functions here
 def trajectory_compute_func(d):
+    """Number of search trajectories to sample for a CMF of dimension ``d``.
+
+    :param d: CMF dimensionality.
+    :return: Trajectory count (``max(10**d, 10)``).
+    """
     return max(10 ** d, 10)
 
 
 def trajectory_compute_func_analysis(d):
+    """Number of analysis trajectories to sample for a CMF of dimension ``d``.
+
+    :param d: CMF dimensionality.
+    :return: Trajectory count (``max(10**(d-1), 10)``).
+    """
     return max(10 ** (d - 1), 10)
 
 
@@ -49,17 +59,25 @@ if __name__ == '__main__':
             # number of trajectories to be auto-generated in search if needed by the module
             'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func,
             'DEFAULT_USES_INV_T': False,
-            'MAX_TRAJECTORY_LENGTH': 40
+            'MAX_TRAJECTORY_LENGTH': 15,
+            'GRAD_VARIANT': 'adam',
+            'GRAD_MAX_STEPS': 50,
+            'TIER2_ATTRIBUTES': (),
+            'GRAD_GRAD_TOL': 1e-3,
+            'SA_MAX_DEPTH': 50
         },
         logging={
             'GENERATE_LOGS': True
+        },
+        post_process={
+            'TIER3_ATTRIBUTES': ()
         }
     )
 
     System(
         function_sources=[pFq(log(2), 2, 1, -1)],
         extractor=extraction.extractor.ShardExtractorMod,
-        analyzers=[analysis.AnalyzerModV1],
-        searcher=search.GeneticSearchModV2,
+        # analyzers=[analysis.AnalyzerModV1],
+        searcher=search.GradientAscentMod,
         post_processor=post_process.Tier3PostProcessModV1,
     ).run(constants=[log(2)])

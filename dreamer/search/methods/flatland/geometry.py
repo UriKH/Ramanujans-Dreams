@@ -130,6 +130,31 @@ class FlatlandGeometry:
         # default / "l2"
         return float(np.linalg.norm(v))
 
+    def traj_norm_many(self, Z: np.ndarray, norm: str = "l2") -> np.ndarray:
+        """
+        Batch version of :meth:`traj_norm` — real shard-space length of many
+        flatland directions at once.
+
+        Each row of ``Z`` is mapped to real space (``Z_reduced @ z``) and
+        GCD-reduced to its primitive ray (so scaled copies share a length, and
+        the length matches the trajectory actually walked, which is the
+        primitive ray), then measured with the requested ``norm``.
+
+        :param Z: Integer array of shape ``(k, d_flat)`` — one direction per row.
+        :param norm: ``'linf'`` | ``'l1'`` | ``'l2'`` (see :meth:`traj_norm`).
+        :return: Float array of length ``k`` with the shard-space lengths.
+        """
+        Z = np.asarray(Z, dtype=np.int64)
+        V = (self.Z_reduced.astype(np.int64) @ Z.T).T  # (k, d_orig)
+        g = np.gcd.reduce(np.abs(V), axis=1)
+        g[g == 0] = 1
+        V = (V // g[:, None]).astype(np.float64)
+        if norm == "linf":
+            return np.max(np.abs(V), axis=1)
+        if norm == "l1":
+            return np.sum(np.abs(V), axis=1)
+        return np.linalg.norm(V, axis=1)
+
     def is_inside(self, z: np.ndarray) -> bool:
         """
         :param z: Integer flatland direction.

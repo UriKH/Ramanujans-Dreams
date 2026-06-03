@@ -6,10 +6,21 @@ import math
 
 
 def traj_from_dim(dim: int) -> int:
+    """Default number of trajectories to sample for a CMF of dimension ``dim``.
+
+    :param dim: CMF dimensionality.
+    :return: Trajectory count (``10 ** dim``).
+    """
     return 10 ** dim
 
 
 def depth_from_len(traj_len, dim) -> int:
+    """Default walk depth as a function of trajectory length and dimension.
+
+    :param traj_len: Trajectory length in real shard space.
+    :param dim: CMF dimensionality.
+    :return: Walk depth, capped at 1500.
+    """
     return min(round(1500 / max(traj_len / math.sqrt(dim), 1)), 1500)
 
 # def ga_generations(dim: int) -> int:
@@ -19,14 +30,27 @@ def depth_from_len(traj_len, dim) -> int:
 #     return 20 + 2 * dim ** 2
 
 def ga_generations(dim: int) -> int:
+    """Default genetic-algorithm generation count for dimension ``dim``.
+
+    :param dim: Flatland dimensionality.
+    :return: Number of generations (``15 + 3 * dim``).
+    """
     return 15 + 3 * dim
 
 def ga_population(dim: int) -> int:
+    """Default genetic-algorithm population size for dimension ``dim``.
+
+    :param dim: Flatland dimensionality.
+    :return: Population size (``20 + 2 * dim``).
+    """
     return 20 + 2 * dim
 
 
 @dataclass
 class SearchConfig(Configurable):
+    """Configuration knobs for all search methods (GA, SA, Gradient Ascent,
+    Small Angle) and the shared δ-evaluation / trajectory-sampling pipeline."""
+
     PARALLEL_SEARCH: bool = field(default=True, metadata={"description": "Enable parallel trajectory evaluation where available."})
     SEARCH_VECTOR_CHUNK: int = field(
         default=1,
@@ -274,7 +298,11 @@ class SearchConfig(Configurable):
     )
     GRAD_MAX_NORM: float = field(
         default=60.0,
-        metadata={"description": "Maximum L2 norm of a realized integer trajectory direction when snapping a real direction onto the lattice."},
+        metadata={"description": "Maximum trajectory length (in real shard space) of a realized integer trajectory direction when snapping a real direction onto the lattice. Interpretation controlled by GRAD_TRAJ_NORM."},
+    )
+    GRAD_TRAJ_NORM: str = field(
+        default="l2",
+        metadata={"description": "Norm used to measure trajectory length for the GRAD_MAX_NORM cap, in real shard space. Same options as ANNEAL_TRAJ_NORM: 'linf', 'l1', 'l2' (default 'l2' — gradient ascent reasons about Euclidean direction length)."},
     )
     GRAD_FD_ANGLE: float = field(
         default=0.1,
