@@ -170,6 +170,9 @@ class SimulatedAnnealingSearch(SearchMethod):
         max_doublings = search_config.ANNEAL_MAX_DOUBLINGS
         max_total_steps = search_config.ANNEAL_MAX_TOTAL_STEPS
         tabu_size = search_config.ANNEAL_TABU_SIZE
+        max_traj_len = search_config.ANNEAL_MAX_TRAJ_LEN
+        traj_norm = search_config.ANNEAL_TRAJ_NORM
+        n_workers = search_config.ANNEAL_NUM_EVAL_WORKERS
 
         T = T0
         iter_left = max_iters
@@ -189,12 +192,14 @@ class SimulatedAnnealingSearch(SearchMethod):
                 ).log()
                 break
 
-            # Generate in-cone, non-tabu neighbours (raw ±1, no GCD reduction).
+            # Generate in-cone, non-tabu, within-traj-length neighbours.
             neighbours: List[np.ndarray] = []
             for cand in geom.perturbations(cur_z, reduce=False):
                 if not geom.is_inside(cand):
                     continue
                 if cand.tobytes() in old_pos_list:
+                    continue
+                if geom.traj_norm(cand, traj_norm) > max_traj_len:
                     continue
                 neighbours.append(cand)
 
@@ -215,11 +220,18 @@ class SimulatedAnnealingSearch(SearchMethod):
                     doubling_count += 1
                 continue
 
-            # Evaluate all neighbours; pick best (reference picks best of batch).
-            neighbour_deltas: List[Tuple[float, np.ndarray]] = []
-            for nb in neighbours:
+            # Evaluate all neighbours in parallel; pick best (reference semantics).
+            def _eval_nb(nb: np.ndarray) -> Tuple[float, np.ndarray]:
                 d, _ = evaluate_in_flatland(nb, **eval_ctx)
-                neighbour_deltas.append((d, nb))
+                return d, nb
+
+            if n_workers > 1:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=min(len(neighbours), n_workers)) as pool:
+                    neighbour_deltas = list(pool.map(_eval_nb, neighbours))
+            else:
+                neighbour_deltas = [_eval_nb(nb) for nb in neighbours]
+
             neighbour_deltas.sort(key=lambda x: x[0], reverse=True)
             new_delta, new_z = neighbour_deltas[0]
 
@@ -263,7 +275,6 @@ class SimulatedAnnealingSearch(SearchMethod):
                 else:
                     cur_z = cur_z * 2  # no GCD reduce
                     doubling_count += 1
-
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

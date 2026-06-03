@@ -200,6 +200,33 @@ class SearchConfig(Configurable):
         default=10,
         metadata={"description": "Number of initial candidate trajectories sampled for the SA seed selection."},
     )
+    ANNEAL_MAX_TRAJ_LEN: int = field(
+        default=35,
+        metadata={"description": "Maximum allowed trajectory length in real shard space. Neighbours exceeding this bound are skipped, preventing expensive trajectory_matrix() calls for large-coordinate directions. Interpretation controlled by ANNEAL_TRAJ_NORM."},
+    )
+    ANNEAL_TRAJ_NORM: str = field(
+        default="linf",
+        metadata={"description": "Norm used to measure trajectory length for the ANNEAL_MAX_TRAJ_LEN cap. 'linf' = max absolute coordinate (default; directly bounds trajectory_matrix cost), 'l1' = sum of absolute coords (= exact trajectory_matrix symbolic mult count), 'l2' = Euclidean norm."},
+    )
+    ANNEAL_NUM_EVAL_WORKERS: int = field(
+        default=6,
+        metadata={"description": "Number of parallel threads for evaluating the neighbour batch in each SA step (Fix C). Uses ThreadPoolExecutor; 0 disables parallelism."},
+    )
+
+    # ============================== Genetic search — trajectory cap + parallelism ==============================
+    GA_MAX_TRAJ_LEN: int = field(
+        default=35,
+        metadata={"description": "Maximum allowed trajectory length for GA genomes in real shard space. Genomes and neighbours exceeding this bound are rejected/resampled. Interpretation controlled by GA_TRAJ_NORM."},
+    )
+    GA_TRAJ_NORM: str = field(
+        default="linf",
+        metadata={"description": "Norm used to measure trajectory length for the GA_MAX_TRAJ_LEN cap. Same options as ANNEAL_TRAJ_NORM: 'linf', 'l1', 'l2'."},
+    )
+    GA_NUM_EVAL_WORKERS: int = field(
+        default=6,
+        metadata={"description": "Number of parallel threads for evaluating GA population batches (initial population and per-generation children). 0 disables parallelism."},
+    )
+
     # ============================== Gradient Ascent settings ==============================
     # Gradient *Ascent* over the continuous trajectory-direction angle (larger delta is
     # better).  delta is continuous and generally smooth in the angle, so the optimizer

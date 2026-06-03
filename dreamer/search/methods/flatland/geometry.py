@@ -105,6 +105,31 @@ class FlatlandGeometry:
     # Membership + perturbation
     # ------------------------------------------------------------------
 
+    def traj_norm(self, z: np.ndarray, norm: str = "linf") -> float:
+        """
+        Compute the trajectory length of flatland vector ``z`` in real shard space.
+
+        The real-space direction is always GCD-reduced (primitive) first so that scaled
+        copies ``z`` and ``2z`` return the same norm.
+
+        :param z: Integer flatland coordinate vector.
+        :param norm: Which norm to use:
+            ``'linf'`` — max absolute coordinate (default; tightest bound on
+                ``trajectory_matrix()`` cost, which scales with Σ|coords|);
+            ``'l1'``  — sum of absolute coordinates (equals the exact symbolic-
+                multiplication count inside ``trajectory_matrix()``);
+            ``'l2'``  — Euclidean norm (used by ``depth_from_len``).
+        :return: Non-negative float.
+        """
+        v = self.Z_reduced @ np.asarray(z, dtype=np.int64)
+        v = reduce_to_primitive(v).astype(np.float64)
+        if norm == "linf":
+            return float(np.max(np.abs(v)))
+        if norm == "l1":
+            return float(np.sum(np.abs(v)))
+        # default / "l2"
+        return float(np.linalg.norm(v))
+
     def is_inside(self, z: np.ndarray) -> bool:
         """
         :param z: Integer flatland direction.

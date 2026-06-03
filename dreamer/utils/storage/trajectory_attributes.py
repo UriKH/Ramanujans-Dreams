@@ -308,10 +308,10 @@ class TrajectoryAttributesHandler:
         See ``__init__`` for ``constant``, ``walk_type``, ``searchable``.
         """
         tmat = cmf.trajectory_matrix(trajectory, start_point)
-        if hasattr(tmat, 'applyfunc'):
-            tmat = tmat.applyfunc(sp.cancel)
-        elif hasattr(tmat, 'matrix'):  # If tmat wraps a sympy matrix
-            tmat.matrix = tmat.matrix.applyfunc(sp.cancel)
+        # sp.cancel() intentionally NOT called here: the walk (numerical mpmath) and
+        # LIReC identification (numerical p/q) work correctly on the unsimplified form.
+        # Simplification is done lazily inside linear_recurrence() — only when symbolic
+        # Tier-2 attributes (eigenvalues, kamidelta, …) are actually requested.
         if walk_depth is None:
             walk_depth = search_config.DEPTH_FROM_TRAJECTORY_LEN(
                 _trajectory_norm(trajectory), cmf.dim(),
@@ -402,7 +402,17 @@ class TrajectoryAttributesHandler:
         All downstream attributes (recurrence_matrix, kamidelta, asymptotics)
         are methods on this object.
         """
-        return self._get("linear_recurrence", lambda: LinearRecurrence(self.trajectory_matrix()))
+        def _build():
+            tmat = self.trajectory_matrix()
+            # Simplify the symbolic form here (lazily) so that the companion matrix
+            # and recurrence coefficients are extracted from a fully-reduced expression.
+            # This is the only place sp.cancel() is needed; from_cmf skips it for speed.
+            if hasattr(tmat, 'applyfunc'):
+                tmat = tmat.applyfunc(sp.cancel)
+            elif hasattr(tmat, 'matrix'):
+                tmat.matrix = tmat.matrix.applyfunc(sp.cancel)
+            return LinearRecurrence(tmat)
+        return self._get("linear_recurrence", _build)
 
     # ==================================================================
     #  COMPANION MATRIX
