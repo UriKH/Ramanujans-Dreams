@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import warnings
+from functools import lru_cache
 from typing import List, Optional, TYPE_CHECKING, Tuple
 
 import sympy as sp
@@ -148,16 +149,50 @@ def tier1_config_fingerprint(walk_depth: int) -> str:
     :return: A 16-hex-char stable fingerprint string.
     """
     walk_type = 1 if search_config.DEFAULT_USES_INV_T else 2
+    # The result depends only on these config values + walk_depth, so memoise
+    # the JSON-serialise + hash step keyed on them.  Reading the config fresh on
+    # every call (cheap attribute lookups) and keying on the values means the
+    # cache stays correct under *any* config change — both ``config.configure``
+    # and a direct ``setattr`` (e.g. test monkeypatching) — with no manual
+    # invalidation, while still skipping the repeated dumps/hash on cache hits.
+    key = (
+        int(walk_depth),
+        walk_type,
+        tuple(float(x) for x in search_config.DEPTH_CONVERGENCE_THRESHOLD),
+        float(search_config.LIMIT_DIFF_ERROR_BOUND),
+        int(search_config.MIN_ESTIMATE_DENOMINATOR),
+        float(search_config.CACHE_ACCEPTANCE_THRESHOLD),
+        float(search_config.IDENTIFY_CHECK_THRESHOLD),
+        int(search_config.CONSTANT_NO_DIGITS_HIGH_RES),
+        int(search_config.CONSTANT_NO_DIGITS_LOW_RES),
+    )
+    return _tier1_fingerprint_for_key(key)
+
+
+@lru_cache(maxsize=8192)
+def _tier1_fingerprint_for_key(key: tuple) -> str:
+    """Memoised core of :func:`tier1_config_fingerprint`.
+
+    Reconstructs the exact same payload dict and serialisation the function
+    used before caching was added, so previously-stored fingerprints still
+    match (a cache that changed the bytes would force a spurious full recompute
+    of every cached trajectory).
+
+    :param key: Tuple of the Tier-1 config values, in a fixed order.
+    :return: A 16-hex-char stable fingerprint string.
+    """
+    (walk_depth, walk_type, depth_conv, limit_diff, min_denom,
+     cache_acc, identify_thr, digits_hi, digits_lo) = key
     payload = {
-        "walk_depth": int(walk_depth),
+        "walk_depth": walk_depth,
         "walk_type": walk_type,
-        "depth_convergence_threshold": list(search_config.DEPTH_CONVERGENCE_THRESHOLD),
-        "limit_diff_error_bound": float(search_config.LIMIT_DIFF_ERROR_BOUND),
-        "min_estimate_denominator": int(search_config.MIN_ESTIMATE_DENOMINATOR),
-        "cache_acceptance_threshold": float(search_config.CACHE_ACCEPTANCE_THRESHOLD),
-        "identify_check_threshold": float(search_config.IDENTIFY_CHECK_THRESHOLD),
-        "constant_digits_high_res": int(search_config.CONSTANT_NO_DIGITS_HIGH_RES),
-        "constant_digits_low_res": int(search_config.CONSTANT_NO_DIGITS_LOW_RES),
+        "depth_convergence_threshold": list(depth_conv),
+        "limit_diff_error_bound": limit_diff,
+        "min_estimate_denominator": min_denom,
+        "cache_acceptance_threshold": cache_acc,
+        "identify_check_threshold": identify_thr,
+        "constant_digits_high_res": digits_hi,
+        "constant_digits_low_res": digits_lo,
     }
     return _stable_id(json.dumps(payload, sort_keys=True))
 
