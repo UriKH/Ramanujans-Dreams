@@ -1,0 +1,228 @@
+"""
+Shared process-based batch δ-evaluation for the search methods.
+
+The Genetic / Simulated-Annealing / Gradient-Ascent methods all repeatedly need
+to evaluate a *batch* of flatland directions (GA population children, SA
+neighbours, GD forward-difference probes).  The per-direction cost is the
+symbolic walk (``TrajectoryAttributesHandler.from_cmf`` + δ / LIReC) — heavy,
+GIL-holding work that a thread pool barely speeds up.  A feasibility benchmark
+(``examples/benchmark_ga_parallel_eval.py``) showed the walk is ~380 ms while
+pickling the result back is ~0.3% of that, so a **persistent per-shard process
+pool** is a large, clean win shared by all three methods.
+
+Design
+------
+* The pool is created **once per shard** (the shard + start are constant-
+  independent, so they are handed to the workers a single time via the
+  ``initializer`` — copy-on-write / one pickle, not per task).
+* Each task sends only the small per-walk payload and returns the exact
+  ``(trajectory_matrix, value_sympy, dto)`` tuple the serial Case-C path feeds
+  to the ``sink``.  The main process keeps sole ownership of the
+  ``seen_trajectories`` / ``handler_cache`` dicts and the file sink, so the
+  cross-run dedup semantics are unchanged.
+
+:func:`evaluate_batch` is the single orchestration entry point: it resolves the
+cheap cases in the main process (invalid → −∞; Case A — δ already cached; Case B
+— handler cached this run → serial recompute, no walk) and dispatches only
+genuinely-new Case-C walks, de-duplicating directions that share a primitive
+ray.  ``pool=None`` evaluates serially in-process.
+"""
+
+from collections import namedtuple
+from multiprocessing import Pool
+from typing import Callable, Dict, List, Optional, Tuple
+
+from dreamer.configs import config
+from dreamer.search.methods.flatland.evaluator import (
+    evaluate_in_flatland,
+    flatland_trajectory_key,
+)
+from dreamer.utils.logger import Logger
+from dreamer.utils.storage.attribute_registry import attribute_name
+
+search_config = config.search
+
+
+#: Returned by :func:`_pool_walk` when the walk raises, so a single bad
+#: trajectory degrades to δ = −∞ (matching the serial evaluator's try/except)
+#: instead of propagating through ``pool.map`` and aborting the whole batch.
+WalkError = namedtuple("WalkError", ["message"])
+
+
+# Per-worker context, populated once by the pool initializer.
+_POOL_STATE: dict = {}
+
+
+def _pool_init(config_overrides: dict, shard, start) -> None:
+    """Pool initializer: re-apply config and stash the per-shard walk context.
+
+    :param config_overrides: ``config.export_configurations()`` from the parent.
+    :param shard: The shard being searched (constant-independent).
+    :param start: Interior start :class:`Position` (constant-independent).
+    """
+    config.configure(**config_overrides)
+    _POOL_STATE["shard"] = shard
+    _POOL_STATE["start"] = start
+
+
+def _pool_walk(args):
+    """Worker task: perform one Case-C walk and return the sink tuple.
+
+    :param args: ``(direction, constant, cmf_id, shard_id, shard_encoding_str)``.
+    :return: ``(trajectory_matrix, value_sympy, dto)`` on success — identical to
+        what the serial Case-C path passes to the sink — or a :class:`WalkError`
+        if the walk raised (so the main process can map it to δ = −∞ without the
+        exception aborting the whole batch).
+    """
+    from dreamer.utils.storage.trajectory_attributes import (
+        TrajectoryAttributesHandler,
+        build_trajectory_dto,
+    )
+
+    direction, constant, cmf_id, shard_id, shard_encoding_str = args
+    shard = _POOL_STATE["shard"]
+    start = _POOL_STATE["start"]
+    try:
+        handler = TrajectoryAttributesHandler.from_cmf(
+            shard.cmf, direction, start, constant=None, searchable=shard
+        )
+        dto = build_trajectory_dto(
+            handler,
+            cmf_id=cmf_id,
+            shard_id=shard_id,
+            cmf_name=shard.cmf_name,
+            shard_encoding_str=shard_encoding_str,
+            start=start,
+            direction=direction,
+            constants=[constant],
+        )
+        return (handler.trajectory_matrix(), constant.value_sympy, dto)
+    except Exception as exc:  # noqa: BLE001 — mirror serial evaluator resilience
+        return WalkError(str(exc))
+
+
+def make_eval_pool(shard, start, workers: int) -> Optional[Pool]:
+    """Create a persistent per-shard evaluation pool, or ``None`` if disabled.
+
+    :param shard: The shard being searched (handed to workers once).
+    :param start: Interior start :class:`Position`.
+    :param workers: Desired worker count; ``<= 1`` returns ``None`` (serial).
+    :return: A ready :class:`multiprocessing.Pool`, or ``None``.
+    """
+    if workers is None or workers <= 1:
+        return None
+    return Pool(
+        processes=workers,
+        initializer=_pool_init,
+        initargs=(config.export_configurations(), shard, start),
+    )
+
+
+def evaluate_batch(
+    z_list: List,
+    *,
+    eval_ctx: dict,
+    pool=None,
+    valid_fn: Optional[Callable] = None,
+) -> List[Tuple[float, bool]]:
+    """Evaluate a batch of flatland directions, optionally via a process *pool*.
+
+    :param z_list: Flatland integer direction vectors to evaluate.
+    :param eval_ctx: The evaluation context dict (the same kwargs
+        :func:`evaluate_in_flatland` takes: ``geom, shard, start, constant,
+        cmf_id, shard_id, shard_encoding_str, sink, seen_trajectories,
+        handler_cache`` and optional ``lock``).
+    :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`.
+        ``None`` (or a single-element batch) evaluates serially in-process.
+    :param valid_fn: Optional ``z -> bool`` predicate; directions for which it
+        returns ``False`` get ``(-inf, False)`` without a walk.  ``None`` treats
+        every direction as valid.
+    :return: List of ``(delta, identified)`` aligned with *z_list*.
+    """
+    n = len(z_list)
+    if n == 0:
+        return []
+
+    # --- Serial path ---------------------------------------------------
+    if pool is None or n <= 1:
+        out: List[Tuple[float, bool]] = []
+        for z in z_list:
+            if valid_fn is not None and not valid_fn(z):
+                out.append((float("-inf"), False))
+            else:
+                out.append(evaluate_in_flatland(z, **eval_ctx))
+        return out
+
+    # --- Parallel path -------------------------------------------------
+    geom = eval_ctx["geom"]
+    shard = eval_ctx["shard"]
+    start = eval_ctx["start"]
+    constant = eval_ctx["constant"]
+    sink: Callable = eval_ctx["sink"]
+    seen: dict = eval_ctx["seen_trajectories"]
+    handler_cache: dict = eval_ctx["handler_cache"]
+    cmf_id: str = eval_ctx["cmf_id"]
+    shard_id: str = eval_ctx["shard_id"]
+    shard_encoding_str: str = eval_ctx["shard_encoding_str"]
+    desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
+
+    results: List[Optional[Tuple[float, bool]]] = [None] * n
+    # trajectory_id -> (direction, fingerprint, [batch indices]) for Case C.
+    groups: Dict[str, tuple] = {}
+
+    for i, z in enumerate(z_list):
+        if valid_fn is not None and not valid_fn(z):
+            results[i] = (float("-inf"), False)
+            continue
+        direction, tid, fp = flatland_trajectory_key(
+            z, geom=geom, shard=shard, start=start,
+            shard_id=shard_id, shard_encoding_str=shard_encoding_str,
+        )
+        rec = seen.get(tid)
+        if rec is not None and rec.get("config_fingerprint") == fp:
+            dmap = rec.get("delta_estimate") or {}
+            if constant.name in dmap:  # Case A
+                imap = rec.get("identified") or {}
+                results[i] = (float(dmap[constant.name]),
+                              bool(imap.get(constant.name, False)))
+                continue
+        if tid in handler_cache:  # Case B — cheap recompute, no new walk
+            results[i] = evaluate_in_flatland(z, **eval_ctx)
+            continue
+        # Case C — dedupe directions that share a primitive ray.
+        grp = groups.get(tid)
+        if grp is None:
+            groups[tid] = (direction, fp, [i])
+        else:
+            grp[2].append(i)
+
+    if groups:
+        args = [
+            (direction, constant, cmf_id, shard_id, shard_encoding_str)
+            for (direction, fp, idxs) in groups.values()
+        ]
+        walked = pool.map(_pool_walk, args)
+        for (tid, (direction, fp, idxs)), res in zip(groups.items(), walked):
+            if isinstance(res, WalkError):
+                Logger(
+                    f"Parallel walk failed — shard {shard_id}, "
+                    f"trajectory {tid[:8]}…: {res.message}",
+                    Logger.Levels.warning,
+                ).log()
+                for i in idxs:
+                    results[i] = (float("-inf"), False)
+                continue
+            matrix, vsym, dto = res
+            sink((matrix, vsym, dto))
+            seen[tid] = {
+                "extended_metrics": dict.fromkeys(desired),
+                "delta_estimate": dict(dto.delta_estimate),
+                "identified": dict(dto.identified),
+                "config_fingerprint": fp,
+            }
+            d = float(dto.delta_estimate.get(constant.name, float("-inf")))
+            ided = bool(dto.identified.get(constant.name, False))
+            for i in idxs:
+                results[i] = (d, ided)
+
+    return [r if r is not None else (float("-inf"), False) for r in results]

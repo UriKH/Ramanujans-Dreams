@@ -24,16 +24,12 @@ from ramanujantools import Position
 from dreamer.configs import config
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
-from dreamer.search.methods.flatland.evaluator import (
-    evaluate_in_flatland,
-    flatland_trajectory_key,
-)
+from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
-from dreamer.search.methods.genetic_search.parallel_eval import _pool_walk, WalkError
+from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
-from dreamer.utils.storage.attribute_registry import attribute_name
 from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 
@@ -456,115 +452,20 @@ class GeneticSearch(SearchMethod):
         :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`.
             When provided and the batch has more than one genome, genuinely-new
             walks are dispatched to worker processes (see
-            :meth:`_eval_population_parallel`); otherwise the batch is evaluated
-            serially in this process.
+            :func:`flatland.parallel_eval.evaluate_batch`); otherwise the batch
+            is evaluated serially in this process.
         :return: List of δ values in the same order as *population*.
         """
         if not population:
             return []
         if pool is not None and len(population) > 1:
-            return self._eval_population_parallel(population, eval_ctx, pool)
-        return [self._eval_genome(z, eval_ctx) for z in population]
-
-    def _eval_population_parallel(
-        self, population: List[np.ndarray], eval_ctx: dict, pool
-    ) -> List[float]:
-        """
-        Evaluate a batch using a persistent per-shard process *pool*.
-
-        The main process owns all cache state and the sink, so it first resolves
-        the cheap cases inline and only dispatches the expensive symbolic walks:
-
-        * **Invalid** genome → δ = −∞ (no walk).
-        * **Case A** — δ already cached for this constant under the current
-          config fingerprint → reuse the stored value (no walk).
-        * **Case B** — a handler for this trajectory was already built this
-          shard-run (``handler_cache``) → recompute δ for this constant via the
-          serial :func:`evaluate_in_flatland` (reuses the cached walk; no new
-          walk).
-        * **Case C** — genuinely new trajectory → dispatched to the pool.
-          Identical genomes mapping to the same ``trajectory_id`` within the
-          batch are de-duplicated so each ray is walked once.
-
-        Worker results flow back as the same ``(trajectory_matrix, value_sympy,
-        dto)`` tuple the serial path produces; the main process feeds each to
-        the sink and records it in ``seen_trajectories``.
-
-        :param population: List of flatland genome vectors to evaluate.
-        :param eval_ctx: Evaluation context dict.
-        :param pool: Ready :class:`multiprocessing.Pool` for this shard.
-        :return: List of δ values in the same order as *population*.
-        """
-        geom: FlatlandGeometry = eval_ctx["geom"]
-        shard: Shard = eval_ctx["shard"]
-        start = eval_ctx["start"]
-        constant: Constant = eval_ctx["constant"]
-        sink: Callable = eval_ctx["sink"]
-        seen: dict = eval_ctx["seen_trajectories"]
-        handler_cache: dict = eval_ctx["handler_cache"]
-        cmf_id: str = eval_ctx["cmf_id"]
-        shard_id: str = eval_ctx["shard_id"]
-        shard_encoding_str: str = eval_ctx["shard_encoding_str"]
-        desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
-
-        n = len(population)
-        deltas: List[Optional[float]] = [None] * n
-        # trajectory_id -> (direction, fingerprint, [genome indices]) for Case C.
-        groups: Dict[str, tuple] = {}
-
-        for i, z in enumerate(population):
-            if not self._valid_genome(z, geom):
-                deltas[i] = float("-inf")
-                continue
-            direction, tid, fp = flatland_trajectory_key(
-                z, geom=geom, shard=shard, start=start,
-                shard_id=shard_id, shard_encoding_str=shard_encoding_str,
+            # Parallel path: the shared evaluator dispatches genuinely-new walks
+            # to the per-shard process pool; the main process keeps ownership of
+            # the sink / seen_trajectories / handler_cache.  GA only needs δ.
+            geom = eval_ctx["geom"]
+            results = evaluate_batch(
+                population, eval_ctx=eval_ctx, pool=pool,
+                valid_fn=lambda z: self._valid_genome(z, geom),
             )
-            rec = seen.get(tid)
-            if rec is not None and rec.get("config_fingerprint") == fp:
-                dmap = rec.get("delta_estimate") or {}
-                if constant.name in dmap:  # Case A
-                    deltas[i] = float(dmap[constant.name])
-                    continue
-            if tid in handler_cache:  # Case B — cheap recompute, no new walk
-                deltas[i], _ = evaluate_in_flatland(z, **eval_ctx)
-                continue
-            # Case C — dedupe identical rays within the batch.
-            grp = groups.get(tid)
-            if grp is None:
-                groups[tid] = (direction, fp, [i])
-            else:
-                grp[2].append(i)
-
-        if groups:
-            args = [
-                (direction, constant, cmf_id, shard_id, shard_encoding_str)
-                for (direction, fp, idxs) in groups.values()
-            ]
-            results = pool.map(_pool_walk, args)
-            for (tid, (direction, fp, idxs)), res in zip(groups.items(), results):
-                if isinstance(res, WalkError):
-                    # A failed walk degrades to −∞ for every genome on this ray,
-                    # matching the serial evaluator's try/except (no sink, no
-                    # cache write) instead of aborting the batch.
-                    Logger(
-                        f"GA parallel walk failed — shard {shard_id}, "
-                        f"trajectory {tid[:8]}…: {res.message}",
-                        Logger.Levels.warning,
-                    ).log()
-                    for i in idxs:
-                        deltas[i] = float("-inf")
-                    continue
-                matrix, vsym, dto = res
-                sink((matrix, vsym, dto))
-                seen[tid] = {
-                    "extended_metrics": dict.fromkeys(desired),
-                    "delta_estimate": dict(dto.delta_estimate),
-                    "identified": dict(dto.identified),
-                    "config_fingerprint": fp,
-                }
-                d = float(dto.delta_estimate.get(constant.name, float("-inf")))
-                for i in idxs:
-                    deltas[i] = d
-
-        return [float(d) if d is not None else float("-inf") for d in deltas]
+            return [delta for delta, _ in results]
+        return [self._eval_genome(z, eval_ctx) for z in population]
