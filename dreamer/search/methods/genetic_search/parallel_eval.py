@@ -24,10 +24,17 @@ here; Case A (δ already cached) and Case B (handler cached this run) are
 resolved cheaply in the main process before dispatch.
 """
 
+from collections import namedtuple
 from multiprocessing import Pool
 from typing import Optional
 
 from dreamer.configs import config
+
+
+#: Returned by :func:`_pool_walk` when the walk raises, so a single bad
+#: trajectory degrades to δ = −∞ (matching the serial evaluator's try/except)
+#: instead of propagating through ``pool.map`` and aborting the whole batch.
+WalkError = namedtuple("WalkError", ["message"])
 
 
 # Per-worker context, populated once by the pool initializer.
@@ -50,8 +57,10 @@ def _pool_walk(args):
     """Worker task: perform one Case-C walk and return the sink tuple.
 
     :param args: ``(direction, constant, cmf_id, shard_id, shard_encoding_str)``.
-    :return: ``(trajectory_matrix, value_sympy, dto)`` — identical to what the
-        serial Case-C path passes to the sink.
+    :return: ``(trajectory_matrix, value_sympy, dto)`` on success — identical to
+        what the serial Case-C path passes to the sink — or a :class:`WalkError`
+        if the walk raised (so the main process can map it to δ = −∞ without the
+        exception aborting the whole batch).
     """
     from dreamer.utils.storage.trajectory_attributes import (
         TrajectoryAttributesHandler,
@@ -61,20 +70,23 @@ def _pool_walk(args):
     direction, constant, cmf_id, shard_id, shard_encoding_str = args
     shard = _POOL_STATE["shard"]
     start = _POOL_STATE["start"]
-    handler = TrajectoryAttributesHandler.from_cmf(
-        shard.cmf, direction, start, constant=None, searchable=shard
-    )
-    dto = build_trajectory_dto(
-        handler,
-        cmf_id=cmf_id,
-        shard_id=shard_id,
-        cmf_name=shard.cmf_name,
-        shard_encoding_str=shard_encoding_str,
-        start=start,
-        direction=direction,
-        constants=[constant],
-    )
-    return (handler.trajectory_matrix(), constant.value_sympy, dto)
+    try:
+        handler = TrajectoryAttributesHandler.from_cmf(
+            shard.cmf, direction, start, constant=None, searchable=shard
+        )
+        dto = build_trajectory_dto(
+            handler,
+            cmf_id=cmf_id,
+            shard_id=shard_id,
+            cmf_name=shard.cmf_name,
+            shard_encoding_str=shard_encoding_str,
+            start=start,
+            direction=direction,
+            constants=[constant],
+        )
+        return (handler.trajectory_matrix(), constant.value_sympy, dto)
+    except Exception as exc:  # noqa: BLE001 — mirror serial evaluator resilience
+        return WalkError(str(exc))
 
 
 def make_eval_pool(shard, start, workers: int) -> Optional[Pool]:

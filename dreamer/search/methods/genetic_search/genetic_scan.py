@@ -29,7 +29,7 @@ from dreamer.search.methods.flatland.evaluator import (
     flatland_trajectory_key,
 )
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
-from dreamer.search.methods.genetic_search.parallel_eval import _pool_walk
+from dreamer.search.methods.genetic_search.parallel_eval import _pool_walk, WalkError
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
@@ -542,9 +542,20 @@ class GeneticSearch(SearchMethod):
                 for (direction, fp, idxs) in groups.values()
             ]
             results = pool.map(_pool_walk, args)
-            for (tid, (direction, fp, idxs)), (matrix, vsym, dto) in zip(
-                groups.items(), results
-            ):
+            for (tid, (direction, fp, idxs)), res in zip(groups.items(), results):
+                if isinstance(res, WalkError):
+                    # A failed walk degrades to −∞ for every genome on this ray,
+                    # matching the serial evaluator's try/except (no sink, no
+                    # cache write) instead of aborting the batch.
+                    Logger(
+                        f"GA parallel walk failed — shard {shard_id}, "
+                        f"trajectory {tid[:8]}…: {res.message}",
+                        Logger.Levels.warning,
+                    ).log()
+                    for i in idxs:
+                        deltas[i] = float("-inf")
+                    continue
+                matrix, vsym, dto = res
                 sink((matrix, vsym, dto))
                 seen[tid] = {
                     "extended_metrics": dict.fromkeys(desired),

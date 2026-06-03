@@ -276,6 +276,22 @@ class TestParallelEval:
         assert deltas == [42.0]
         assert sink_items == []  # no walk dispatched
 
+    def test_walk_error_degrades_to_neg_inf(self, whole_space_shard, monkeypatch):
+        """A worker walk failure (WalkError) maps to −∞ without aborting the
+        batch and without emitting to the sink."""
+        from dreamer.search.methods.genetic_search import genetic_scan as gs
+        from dreamer.search.methods.genetic_search.parallel_eval import WalkError
+
+        monkeypatch.setattr(gs, "_pool_walk", lambda args: WalkError("boom"))
+        method = GeneticSearch(whole_space_shard, e, use_LIReC=False)
+        ctx, sink_items = self._make_ctx(whole_space_shard, e)
+        d = ctx["geom"].d_flat
+        population = [np.array([1, 0], dtype=np.int64)[:d],
+                     np.array([0, 1], dtype=np.int64)[:d]]
+        deltas = method._eval_population_parallel(population, ctx, self._DummyPool())
+        assert deltas == [float("-inf"), float("-inf")]
+        assert sink_items == []  # nothing written for failed walks
+
     def test_invalid_genome_is_neg_inf(self, simple_shard, monkeypatch):
         """An out-of-cone genome gets −∞ and is never dispatched."""
         self._stub_walk(monkeypatch)
