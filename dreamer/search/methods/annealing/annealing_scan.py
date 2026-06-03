@@ -22,7 +22,6 @@ Algorithm is faithful to ``context/resources/code/algos/annealing.py`` and
 
 import math
 import random
-import threading
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -33,6 +32,7 @@ from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
+from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
@@ -120,6 +120,9 @@ class SimulatedAnnealingSearch(SearchMethod):
         sink: Callable,
         seen_trajectories: dict,
         handler_cache: Optional[Dict[str, "TrajectoryAttributesHandler"]] = None,
+        geom: Optional[FlatlandGeometry] = None,
+        start=None,
+        pool=None,
     ) -> None:
         """
         Run SA for a single constant, emitting Tier-1 DTOs to *sink*.
@@ -138,14 +141,24 @@ class SimulatedAnnealingSearch(SearchMethod):
         :param sink: Callable receiving ``(traj_matrix, sympy_const, dto)`` tuples.
         :param seen_trajectories: Mutable dict of already-evaluated trajectory records.
         :param handler_cache: Optional shared walk-cache (keyed by trajectory_id).
+        :param geom: Pre-built :class:`FlatlandGeometry` for the shard (built once
+            per shard by the module and shared across constants).  ``None`` builds
+            it here (standalone path).
+        :param start: Pre-fetched interior start :class:`Position`.  ``None``
+            fetches it here.
+        :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`;
+            each step's neighbour batch is walked across worker processes.  ``None``
+            evaluates serially.
         :raises NoInitialIdentification: if no reservoir seed identifies *constant*.
         """
         if handler_cache is None:
             handler_cache = {}
 
         shard: Shard = self.space
-        geom = FlatlandGeometry(shard)
-        start = shard.get_interior_point()
+        if geom is None:
+            geom = FlatlandGeometry(shard)
+        if start is None:
+            start = shard.get_interior_point()
 
         eval_ctx = dict(
             geom=geom,
@@ -158,9 +171,10 @@ class SimulatedAnnealingSearch(SearchMethod):
             sink=sink,
             seen_trajectories=seen_trajectories,
             handler_cache=handler_cache,
-            # Guards the shared seen/handler caches across the parallel
-            # neighbour-evaluation threads (ANNEAL_NUM_EVAL_WORKERS).
-            lock=threading.Lock(),
+            # No lock: neighbour batches are walked across *processes* (the main
+            # process is the sole owner of sink / seen_trajectories / handler_cache);
+            # single evaluations below run on the main thread.
+            lock=None,
         )
 
         cur_z = self._select_seed(geom, eval_ctx, shard_id, constant)
@@ -176,7 +190,6 @@ class SimulatedAnnealingSearch(SearchMethod):
         tabu_size = search_config.ANNEAL_TABU_SIZE
         max_traj_len = search_config.ANNEAL_MAX_TRAJ_LEN
         traj_norm = search_config.ANNEAL_TRAJ_NORM
-        n_workers = search_config.ANNEAL_NUM_EVAL_WORKERS
 
         T = T0
         iter_left = max_iters
@@ -224,17 +237,17 @@ class SimulatedAnnealingSearch(SearchMethod):
                     doubling_count += 1
                 continue
 
-            # Evaluate all neighbours in parallel; pick best (reference semantics).
-            def _eval_nb(nb: np.ndarray) -> Tuple[float, np.ndarray]:
-                d, _ = evaluate_in_flatland(nb, **eval_ctx)
-                return d, nb
-
-            if n_workers > 1:
-                from concurrent.futures import ThreadPoolExecutor
-                with ThreadPoolExecutor(max_workers=min(len(neighbours), n_workers)) as pool:
-                    neighbour_deltas = list(pool.map(_eval_nb, neighbours))
+            # Evaluate all neighbours; pick best (reference semantics).
+            # Neighbours are already filtered in-cone/non-tabu/within-cap above.
+            # With a pool the batch is walked across worker processes; otherwise
+            # each neighbour is walked serially in this process.
+            if pool is not None:
+                results = evaluate_batch(neighbours, eval_ctx=eval_ctx, pool=pool)
+                neighbour_deltas = [(d, nb) for (d, _), nb in zip(results, neighbours)]
             else:
-                neighbour_deltas = [_eval_nb(nb) for nb in neighbours]
+                neighbour_deltas = [
+                    (evaluate_in_flatland(nb, **eval_ctx)[0], nb) for nb in neighbours
+                ]
 
             neighbour_deltas.sort(key=lambda x: x[0], reverse=True)
             new_delta, new_z = neighbour_deltas[0]
