@@ -47,6 +47,7 @@ from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
+from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
@@ -120,6 +121,9 @@ class SmallAngleSearch(SearchMethod):
         sink: Callable,
         seen_trajectories: dict,
         handler_cache: Optional[Dict[str, "TrajectoryAttributesHandler"]] = None,
+        geom: Optional[FlatlandGeometry] = None,
+        start=None,
+        pool=None,
     ) -> None:
         """Run the hill-climb for a single constant, emitting DTOs to *sink*.
 
@@ -129,6 +133,14 @@ class SmallAngleSearch(SearchMethod):
             step) skip the expensive walk and reuse ``compute_for_constant`` only.
             Callers (``SmallAngleSearchMod._run_shard``) should create one dict per
             shard and pass it to every constant's ``run()`` call.
+        :param geom: Pre-built :class:`FlatlandGeometry` for the shard (built once
+            per shard by the module, shared across constants).  ``None`` builds it
+            here (standalone path).
+        :param start: Pre-fetched interior start :class:`Position`.  ``None``
+            fetches it here.
+        :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`;
+            each step's in-cone perturbation batch is walked across worker
+            processes.  ``None`` evaluates serially.
 
         :raises NoInitialIdentification: if no reservoir seed identifies *constant*.
         """
@@ -136,8 +148,10 @@ class SmallAngleSearch(SearchMethod):
             handler_cache = {}
 
         shard: Shard = self.space
-        geom = FlatlandGeometry(shard)
-        start = shard.get_interior_point()
+        if geom is None:
+            geom = FlatlandGeometry(shard)
+        if start is None:
+            start = shard.get_interior_point()
 
         # Context shared by every _evaluate call.
         ctx = dict(
@@ -162,7 +176,7 @@ class SmallAngleSearch(SearchMethod):
                 range(search_config.SA_MAX_DEPTH),
                 desc='Searching small angle filters', **config.system.TQDM_CONFIG
         ):
-            best_z, best_score = self._best_inside_perturbation(z, ctx)
+            best_z, best_score = self._best_inside_perturbation(z, ctx, pool)
 
             if best_z is None:
                 # No perturbation stays inside: lengthen the trajectory and retry.
@@ -212,20 +226,37 @@ class SmallAngleSearch(SearchMethod):
         raise NoInitialIdentification(shard_id, constant)
 
     def _best_inside_perturbation(
-        self, z: np.ndarray, ctx: dict
+        self, z: np.ndarray, ctx: dict, pool=None
     ) -> Tuple[Optional[np.ndarray], float]:
-        """Evaluate all in-shard ±1 perturbations; return the best (z, δ)."""
+        """Evaluate all in-shard ±1 perturbations; return the best (z, δ).
+
+        Every in-cone perturbation is evaluated and the global-best δ is kept
+        (no first-improvement break).  With a *pool* the whole in-cone batch is
+        walked across worker processes in one shot; otherwise each candidate is
+        evaluated serially via :meth:`_evaluate`.
+        """
         geom: FlatlandGeometry = ctx["geom"]
-        best_z: Optional[np.ndarray] = None
-        best_score = float("-inf")
-        for cand in geom.perturbations(z, reduce=False):  # TODO: reduce=True (default, SmallAngle style)
-            if not geom.is_inside(cand):
-                continue
-            delta, _ = self._evaluate(cand, **ctx)
-            if delta > best_score:
-                best_score = delta
-                best_z = cand
-        return best_z, best_score
+        cands = [
+            cand
+            for cand in geom.perturbations(z, reduce=False)  # TODO: reduce=True (default, SmallAngle style)
+            if geom.is_inside(cand)
+        ]
+        if not cands:
+            return None, float("-inf")
+
+        if pool is not None and len(cands) > 1:
+            eval_ctx = {**ctx, "shard": self.space}
+            scores = [d for d, _ in evaluate_batch(cands, eval_ctx=eval_ctx, pool=pool)]
+        else:
+            scores = [self._evaluate(cand, **ctx)[0] for cand in cands]
+
+        best_i = int(np.argmax(scores))
+        best_score = scores[best_i]
+        if best_score == float("-inf"):
+            # No candidate beat −∞ (all walks failed/non-identified): signal the
+            # caller to length-double, matching the original first-improvement logic.
+            return None, float("-inf")
+        return cands[best_i], best_score
 
     def _evaluate(
         self,

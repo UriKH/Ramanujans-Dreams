@@ -190,6 +190,10 @@ class SearchConfig(Configurable):
         default=10,
         metadata={"description": "Number of initial candidate trajectories sampled for small-angle seed selection."},
     )
+    SA_NUM_EVAL_WORKERS: int = field(
+        default=6,
+        metadata={"description": "Number of worker processes for evaluating each hill-climb step's in-cone perturbation batch. <= 1 disables the pool (serial)."},
+    )
 
     # ============================== Simulated Annealing settings ==============================
     ANNEAL_T0: float = field(
