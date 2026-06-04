@@ -171,10 +171,6 @@ class SimulatedAnnealingSearch(SearchMethod):
             sink=sink,
             seen_trajectories=seen_trajectories,
             handler_cache=handler_cache,
-            # No lock: neighbour batches are walked across *processes* (the main
-            # process is the sole owner of sink / seen_trajectories / handler_cache);
-            # single evaluations below run on the main thread.
-            lock=None,
         )
 
         cur_z = self._select_seed(geom, eval_ctx, shard_id, constant)

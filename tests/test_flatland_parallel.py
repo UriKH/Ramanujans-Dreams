@@ -64,7 +64,7 @@ def _make_ctx(shard, constant):
         geom=geom, shard=shard, start=start, constant=constant,
         cmf_id="c", shard_id="s", shard_encoding_str="",
         sink=lambda item: sink_items.append(item),
-        seen_trajectories={}, handler_cache={}, lock=None,
+        seen_trajectories={}, handler_cache={},
     )
     return ctx, sink_items
 

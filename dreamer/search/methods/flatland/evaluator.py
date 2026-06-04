@@ -8,9 +8,7 @@ to a ``sink`` callable, and return ``(delta, identified)`` for one constant.
 """
 
 import dataclasses
-import threading
-from contextlib import nullcontext
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Tuple
 
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
@@ -79,7 +77,6 @@ def evaluate_in_flatland(
     sink: Callable,
     seen_trajectories: dict,
     handler_cache: Dict[str, "TrajectoryAttributesHandler"],
-    lock: Optional[threading.Lock] = None,
 ) -> Tuple[float, bool]:
     """Compute δ/identified for *constant* at flatland direction *z*, emitting a DTO.
 
@@ -102,21 +99,11 @@ def evaluate_in_flatland(
     In all cases the handler (if available) is stored in *handler_cache* for
     future same-shard cross-constant reuse.
 
-    Thread-safety
-    -------------
-    The parallel-neighbour evaluators (Simulated Annealing, Genetic) call this
-    from a :class:`~concurrent.futures.ThreadPoolExecutor`, so the shared
-    ``seen_trajectories`` and ``handler_cache`` dicts are read/written
-    concurrently.  Pass a :class:`threading.Lock` via *lock* to make the
-    read-snapshot and the cache updates atomic — without it, concurrent callers
-    can lose updates to ``seen_trajectories``.  The expensive walk
-    (``from_cmf`` / ``compute_for_constant``) runs **outside** the lock so any
-    real parallelism is preserved.  Two threads racing on the *same* unseen
-    ``trajectory_id`` may both walk it (duplicate work + duplicate JSONL line);
-    that is harmless because :func:`load_seen_trajectories` merges records by id
-    on read.  Single-threaded callers pass ``lock=None`` (a no-op context).
+    This runs single-threaded in the main process — batch parallelism is
+    process-based (see :func:`flatland.parallel_eval.evaluate_batch`), with the
+    main process the sole owner of ``seen_trajectories`` / ``handler_cache`` /
+    the sink — so no locking is needed.
     """
-    guard = lock if lock is not None else nullcontext()
     # Always walk the GCD-reduced (primitive) ray: δ depends on the direction's
     # angle, not its length, so scaled/doubled copies of ``z`` map to the same
     # ray — same ``trajectory_id`` — and reuse the cached walk (Case A/B).
@@ -129,9 +116,8 @@ def evaluate_in_flatland(
     )
 
     desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
-    with guard:
-        seen_record = seen_trajectories.get(trajectory_id)
-        cached_handler = handler_cache.get(trajectory_id)
+    seen_record = seen_trajectories.get(trajectory_id)
+    cached_handler = handler_cache.get(trajectory_id)
 
     # --- Case A: delta already known for this constant (same config) ---
     if seen_record is not None and seen_record.get("config_fingerprint") == current_fp:
@@ -177,13 +163,12 @@ def evaluate_in_flatland(
             return float("-inf"), False
 
         sink((cached_handler.trajectory_matrix(), constant.value_sympy, merged_dto))
-        with guard:
-            seen_trajectories[trajectory_id] = {
-                "extended_metrics": dict.fromkeys(desired),
-                "delta_estimate": dict(merged_dto.delta_estimate),
-                "identified": dict(merged_dto.identified),
-                "config_fingerprint": current_fp,
-            }
+        seen_trajectories[trajectory_id] = {
+            "extended_metrics": dict.fromkeys(desired),
+            "delta_estimate": dict(merged_dto.delta_estimate),
+            "identified": dict(merged_dto.identified),
+            "config_fingerprint": current_fp,
+        }
         delta = float(merged_dto.delta_estimate.get(constant.name, float("-inf")))
         identified = bool(merged_dto.identified.get(constant.name, False))
         return delta, identified
@@ -212,14 +197,13 @@ def evaluate_in_flatland(
         return float("-inf"), False
 
     sink((handler.trajectory_matrix(), constant.value_sympy, dto))
-    with guard:
-        handler_cache[trajectory_id] = handler
-        seen_trajectories[trajectory_id] = {
-            "extended_metrics": dict.fromkeys(desired),
-            "delta_estimate": dict(dto.delta_estimate),
-            "identified": dict(dto.identified),
-            "config_fingerprint": current_fp,
-        }
+    handler_cache[trajectory_id] = handler
+    seen_trajectories[trajectory_id] = {
+        "extended_metrics": dict.fromkeys(desired),
+        "delta_estimate": dict(dto.delta_estimate),
+        "identified": dict(dto.identified),
+        "config_fingerprint": current_fp,
+    }
 
     delta = float(dto.delta_estimate.get(constant.name, float("-inf")))
     identified = bool(dto.identified.get(constant.name, False))

@@ -194,11 +194,6 @@ class GeneticSearch(SearchMethod):
             sink=sink,
             seen_trajectories=seen_trajectories,
             handler_cache=handler_cache,
-            # No lock needed: population evaluation is parallelised across
-            # *processes* (each owns the walk), with the main process the sole
-            # owner of the sink / seen_trajectories / handler_cache.  The serial
-            # path runs single-threaded.
-            lock=None,
         )
 
         # Resolve GA schedule (callable or int).

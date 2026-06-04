@@ -131,7 +131,7 @@ def evaluate_batch(
     :param eval_ctx: The evaluation context dict (the same kwargs
         :func:`evaluate_in_flatland` takes: ``geom, shard, start, constant,
         cmf_id, shard_id, shard_encoding_str, sink, seen_trajectories,
-        handler_cache`` and optional ``lock``).
+        handler_cache``).
     :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`.
         ``None`` (or a single-element batch) evaluates serially in-process.
     :param valid_fn: Optional ``z -> bool`` predicate; directions for which it
