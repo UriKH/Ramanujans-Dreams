@@ -324,6 +324,10 @@ class SearchConfig(Configurable):
         default=10,
         metadata={"description": "Number of initial candidate trajectories sampled for gradient-ascent seed selection."},
     )
+    GRAD_NUM_EVAL_WORKERS: int = field(
+        default=6,
+        metadata={"description": "Number of worker processes for evaluating the per-step forward-difference gradient probe batch. <= 1 disables the pool (serial)."},
+    )
 
     # ============================== Raycaster settings ==============================
     MAX_TRAJECTORY_LENGTH: int = field(

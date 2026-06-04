@@ -37,6 +37,7 @@ from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
+from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
 from dreamer.search.methods.gradient_ascent.lattice import rotate_toward, snap_to_trajectory
 from dreamer.search.methods.gradient_ascent.optimizers import optimizer_for
 from dreamer.utils.constants.constant import Constant
@@ -130,6 +131,9 @@ class GradientAscentSearch(SearchMethod):
         sink: Callable,
         seen_trajectories: dict,
         handler_cache: Optional[Dict[str, "TrajectoryAttributesHandler"]] = None,
+        geom: Optional[FlatlandGeometry] = None,
+        start=None,
+        pool=None,
     ) -> None:
         """Run gradient ascent for a single constant, emitting DTOs to *sink*.
 
@@ -141,6 +145,14 @@ class GradientAscentSearch(SearchMethod):
         :param seen_trajectories: On-disk/in-memory trajectory cache (walk reuse).
         :param handler_cache: Per-shard handler cache for cross-constant walk reuse.
         :raises NoInitialIdentification: If no reservoir seed identifies *constant*.
+        :param geom: Pre-built :class:`FlatlandGeometry` for the shard (built once
+            per shard by the module, shared across constants).  ``None`` builds it
+            here (standalone path).
+        :param start: Pre-fetched interior start :class:`Position`.  ``None``
+            fetches it here.
+        :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`;
+            the per-step forward-difference probe batch is walked across worker
+            processes.  ``None`` evaluates serially.
         :raises SearchStalled: If the recovery ladder cannot reach an identified
             trajectory after diffraction.
         """
@@ -148,8 +160,10 @@ class GradientAscentSearch(SearchMethod):
             handler_cache = {}
 
         shard: Shard = self.space
-        geom = FlatlandGeometry(shard)
-        start = shard.get_interior_point()
+        if geom is None:
+            geom = FlatlandGeometry(shard)
+        if start is None:
+            start = shard.get_interior_point()
 
         eval_ctx = dict(
             geom=geom,
@@ -182,7 +196,7 @@ class GradientAscentSearch(SearchMethod):
 
         for _ in SmartTQDM(range(cfg.GRAD_MAX_STEPS), desc='Ascending ... ', **config.system.TQDM_CONFIG):
             # --- 1. Estimate the gradient (forward differences in angle) ---
-            grad, usable = self._estimate_gradient(d, cur_delta, eval_ctx, geom)
+            grad, usable = self._estimate_gradient(d, cur_delta, eval_ctx, geom, pool)
 
             if usable == 0:
                 # Unproductive step (no probe identified) — escalate the ladder.
@@ -247,6 +261,7 @@ class GradientAscentSearch(SearchMethod):
         base_delta: float,
         eval_ctx: dict,
         geom: FlatlandGeometry,
+        pool=None,
     ) -> Tuple[np.ndarray, int]:
         """Estimate ∇δ by forward differences in angle space.
 
@@ -255,10 +270,15 @@ class GradientAscentSearch(SearchMethod):
         evaluated.  Probes that cannot be realized in-cone or whose trajectory is
         not identified are *skipped* (their gradient component is left at 0).
 
+        The per-axis probes are independent, so with a *pool* the whole probe
+        batch is walked across worker processes in one shot; otherwise each probe
+        is walked serially.
+
         :param d: Current real direction.
         :param base_delta: δ at the current (unrotated) direction.
         :param eval_ctx: Evaluation context for :func:`evaluate_in_flatland`.
         :param geom: Flatland geometry.
+        :param pool: Optional persistent per-shard process pool for the batch.
         :return: ``(gradient, usable)`` — the estimate and the number of axes that
             yielded a usable (identified, in-cone) probe.
         """
@@ -267,12 +287,25 @@ class GradientAscentSearch(SearchMethod):
         grad = np.zeros(geom.d_flat, dtype=np.float64)
         usable = 0
 
+        # Realize the in-cone probe for each axis (cheap, vectorised lattice ops).
+        probes: List[Tuple[int, np.ndarray]] = []
         for i in range(geom.d_flat):
             d_rot = rotate_toward(d, i, h)
             z_probe = snap_to_trajectory(d_rot, geom, max_norm, search_config.GRAD_TRAJ_NORM)
-            if z_probe is None:
-                continue
-            delta_i, identified_i = evaluate_in_flatland(z_probe, **eval_ctx)
+            if z_probe is not None:
+                probes.append((i, z_probe))
+
+        if not probes:
+            return grad, 0
+
+        if pool is not None and len(probes) > 1:
+            results = evaluate_batch(
+                [z for _, z in probes], eval_ctx=eval_ctx, pool=pool,
+            )
+        else:
+            results = [evaluate_in_flatland(z, **eval_ctx) for _, z in probes]
+
+        for (i, _), (delta_i, identified_i) in zip(probes, results):
             if not identified_i:
                 continue
             grad[i] = (delta_i - base_delta) / h

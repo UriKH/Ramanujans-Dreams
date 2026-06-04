@@ -456,7 +456,8 @@ class TestGradientAscentMod:
         run_calls = []
 
         def fake_run(self_, *, constant, cmf_id, shard_id, shard_encoding_str,
-                     sink, seen_trajectories, handler_cache=None):
+                     sink, seen_trajectories, handler_cache=None,
+                     geom=None, start=None, pool=None):
             run_calls.append(constant)
             if constant.name == "pi":
                 raise NoInitialIdentification(shard_id, constant)
@@ -471,6 +472,42 @@ class TestGradientAscentMod:
 
         names = sorted(c.name for c in run_calls)
         assert names == ["e", "pi"]
+
+    def test_geometry_built_once_per_shard(self, simple_shard, monkeypatch, tmp_path):
+        """FlatlandGeometry (LLL/BKZ) is constructed once per shard, reused
+        across the shard's identified constants."""
+        from dreamer.search.searchers.gradient_ascent_mod import GradientAscentMod
+        from dreamer.search.searchers import gradient_ascent_mod as mod_module
+        from dreamer.configs.system import sys_config
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path), raising=False)
+        monkeypatch.setattr(sys_config, "NUM_BACKGROUND_WORKERS", 0, raising=False)
+        monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", (), raising=False)
+        monkeypatch.setattr(config.search, "GRAD_NUM_EVAL_WORKERS", 0, raising=False)
+
+        construct_count = [0]
+        real_geom = mod_module.FlatlandGeometry
+
+        def counting_geom(shard):
+            construct_count[0] += 1
+            return real_geom(shard)
+
+        monkeypatch.setattr(mod_module, "FlatlandGeometry", counting_geom)
+
+        received = []
+
+        def fake_run(self_, *, constant, cmf_id, shard_id, shard_encoding_str,
+                     sink, seen_trajectories, handler_cache=None,
+                     geom=None, start=None, pool=None):
+            received.append(geom)
+
+        monkeypatch.setattr(mod_module.GradientAscentSearch, "run", fake_run)
+
+        priorities = {e: [simple_shard], pi: [simple_shard]}
+        GradientAscentMod(priorities, use_LIReC=False).execute()
+
+        assert construct_count[0] == 1
+        assert len(received) == 2 and received[0] is received[1] is not None
 
     def test_empty_searchables_is_noop(self, monkeypatch, tmp_path):
         from dreamer.search.searchers.gradient_ascent_mod import GradientAscentMod
