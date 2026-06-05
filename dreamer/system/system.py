@@ -204,6 +204,10 @@ class System:
                     with open(out_path, "w") as _fh:
                         _fh.write(_json.dumps(record))
 
+                    Logger(
+                        f'--- Found {len(shard_ids)} shards containing {const.name} in {cmf_name} ---', Logger.Levels.info
+                    ).log()
+
                 Logger(
                     f'Priorities for {const.name} exported to {const_path}', Logger.Levels.info
                 ).log()

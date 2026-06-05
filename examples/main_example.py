@@ -2,7 +2,7 @@ from dreamer import System, config
 from dreamer import analysis, search, extraction, post_process
 from dreamer.loading import pFq
 from dreamer import log, pi
-
+import sympy as sp
 
 # Because of pickling format we need to define these functions here
 def trajectory_compute_func(d):
@@ -64,7 +64,8 @@ if __name__ == '__main__':
             'GRAD_MAX_STEPS': 50,
             'TIER2_ATTRIBUTES': (),
             'GRAD_GRAD_TOL': 1e-3,
-            'SA_MAX_DEPTH': 50
+            'SA_MAX_DEPTH': 50,
+            'ANNEAL_TMIN': 2e-3
         },
         logging={
             'GENERATE_LOGS': True
@@ -77,7 +78,10 @@ if __name__ == '__main__':
     System(
         function_sources=[pFq(log(2), 2, 1, -1)],
         extractor=extraction.extractor.ShardExtractorMod,
-        # analyzers=[analysis.AnalyzerModV1],
-        searcher=search.GradientAscentMod,
+        analyzers=[analysis.AnalyzerModV1],
+        # searcher=search.SimulatedAnnealingMod, # tested
+        # searcher=search.GeneticSearchModV2, # tested
+        # searcher=search.GradientAscentMod, # tested
+        searcher=search.SearcherModV1,
         post_processor=post_process.Tier3PostProcessModV1,
     ).run(constants=[log(2)])
