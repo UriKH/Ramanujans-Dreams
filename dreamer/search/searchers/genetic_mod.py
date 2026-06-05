@@ -5,6 +5,7 @@ from dreamer.configs.system import sys_config
 from dreamer.search.methods.genetic import GeneticSearchMethod
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.extraction.shard import Shard
+from dreamer.configs import search_config
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.storage import Exporter, Formats
@@ -37,7 +38,7 @@ class GeneticSearchMod(SearcherModScheme):
     @CatchErrorInModule(with_trace=sys_config.MODULE_ERROR_SHOW_TRACE, fatal=True)
     def execute(self) -> None:
         """
-        Run GA search for each searchable and export results as pickled DataManager chunks.
+        Run GA search for each searchable and export results as serialized DataManager chunks.
         :return: None.
         """
         if not self.searchables:
@@ -49,7 +50,9 @@ class GeneticSearchMod(SearcherModScheme):
             exist_ok=True,
         )
 
-        with Exporter.export_stream(dir_path, exists_ok=True, clean_exists=True, fmt=Formats.PICKLE) as write_chunk:
+        fmt = Formats(sys_config.EXPORT_SEARCH_RESULTS_FORMAT)
+
+        with Exporter.export_stream(dir_path, exists_ok=True, clean_exists=True, fmt=fmt) as write_chunk:
             for space in SmartTQDM(
                 self.searchables,
                 desc="Optimizing trajectories via GA: ",
@@ -58,6 +61,9 @@ class GeneticSearchMod(SearcherModScheme):
                 searcher = GeneticSearchMethod(
                     space,
                     space.const,
+                    find_limit=search_config.COMPUTE_LIMIT,
+                    find_eigen_values=search_config.COMPUTE_EIGEN_VALUES,
+                    find_gcd_slope=search_config.COMPUTE_GCD_SLOPE,
                     use_LIReC=self.use_LIReC,
                 )
                 res = searcher.search()

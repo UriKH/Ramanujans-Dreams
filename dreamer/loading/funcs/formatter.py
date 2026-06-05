@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from dreamer.loading.config import DATA_ANNOTATE, TYPE_ANNOTATE
+from dreamer.utils.caching import cached_property
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.types import CMFData
 from dreamer.configs import config
@@ -15,26 +16,63 @@ class Formatter(ABC):
     """
     registry: Dict[str, Type['Formatter']] = dict()
 
-    def __init__(self, const: str | Constant, shifts: list,
+    def __init__(self, const: Union[str, Constant, List[Union[str, Constant]]], shifts: list,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
                  use_inv_t: bool = None,
-                 cmf_name: Optional[str] = None):
+                 cmf_name_segments: Optional[List[List[Union[str, sp.Expr, int]]]] = None):
         if use_inv_t is None:
             use_inv_t = config.search.DEFAULT_USES_INV_T
 
-        self.const = const.name if isinstance(const, Constant) else const
+        # Normalise to a list of name strings; accept single constant or list.
+        if isinstance(const, list):
+            self.consts: List[str] = [
+                c.name if isinstance(c, Constant) else c for c in const
+            ]
+        else:
+            self.consts = [const.name if isinstance(const, Constant) else const]
+
         self.shifts = shifts
         self.selected_start_points = selected_start_points
         self.only_selected = only_selected
         self.use_inv_t = use_inv_t
 
+        cmf_name_segments = cmf_name_segments if cmf_name_segments is not None else [[self.__class__.__name__]]
+        cmf_name_segments: List[List[Union[str, sp.Expr, int]]]
 
-        self.cmf_name = cmf_name if cmf_name else self.__class__.__name__
-        self.cmf_name += '_'
-        for s in shifts:
-            self.cmf_name += f'_{s}'
+        # The constant is intentionally *not* appended to the name: a CMF
+        # may later be searched for additional constants, and we want the
+        # cmf_id (= cmf_name) to remain stable across those re-runs.  The
+        # parent constant directory (EXPORT_CMFS/<const>/...) still
+        # disambiguates files by constant.
+        cmf_name_segments += [shifts]
 
+        name_segments_concat = []
+
+        for segment in cmf_name_segments:
+            segment_components = []
+
+            for component in segment:
+                match component:
+                    case str():
+                        segment_components.append(component)
+                    case sp.Expr():
+                        canonized_expr = sp.sympify(component)
+                        expr_str = str(canonized_expr).replace(" ", "")
+                        expr_str = expr_str.replace("**", "p")
+                        expr_str = expr_str.replace("*", "x")
+                        expr_str = expr_str.replace("/", ".")
+                        segment_components.append(expr_str)
+                    case int():
+                        segment_components.append(str(component))
+            segment_str = '_'.join(segment_components)
+            name_segments_concat.append(segment_str)
+        self.cmf_name = '__'.join(name_segments_concat)
+
+    @property
+    def const(self) -> str:
+        """Backward-compatible accessor — returns the first (primary) constant name."""
+        return self.consts[0]
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -51,7 +89,7 @@ class Formatter(ABC):
     @abstractmethod
     def __hash__(self):
         return hash((
-            self.const,
+            tuple(self.consts),
             tuple(self.shifts if self.shifts else []),
             frozenset(self.selected_start_points if self.selected_start_points else []),
             self.only_selected,
@@ -78,7 +116,7 @@ class Formatter(ABC):
             points = [[v if isinstance(v, int) else str(v) for v in p] for p in self.selected_start_points]
 
         return {
-            'const': self.const.name if isinstance(self.const, Constant) else self.const,
+            'consts': self.consts,
             'use_inv_t': self.use_inv_t,
             'shifts': shifts,
             'selected_start_points': points,

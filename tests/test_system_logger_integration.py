@@ -28,7 +28,7 @@ def test_system_run_calls_logger_start_run_once_per_run(monkeypatch, tmp_path):
         searcher=cast(type[SearcherModScheme], _DummySearcher),
     )
     monkeypatch.setattr(system, "_System__validate_constants", lambda _constants: [])
-    monkeypatch.setattr(system, "_System__loading_stage", lambda _constants: {})
+    monkeypatch.setattr(system, "_System__loading_stage", lambda _constants: ({}, {}))
     monkeypatch.setattr(system, "_System__analysis_stage", lambda _cmf_data: {})
 
     calls = []

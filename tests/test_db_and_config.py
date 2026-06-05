@@ -8,6 +8,7 @@ Covers:
 - select missing constant
 """
 import pytest
+from dataclasses import fields
 from dreamer.loading.databases.db_v1.db import DB
 from dreamer.loading.funcs.pFq_fmt import pFq
 
@@ -99,3 +100,27 @@ class TestConfigConsistency:
         for traj_len in [1, 10, 100, 1000]:
             depth = search_config.DEPTH_FROM_TRAJECTORY_LEN(traj_len, 3)
             assert 1 <= depth <= 1500, f"Depth {depth} out of range for len={traj_len}"
+
+    def test_all_config_fields_have_non_empty_description_metadata(self):
+        from dreamer.configs import config
+
+        for section_name, section_cfg in config.iter_sections():
+            for field_obj in fields(section_cfg):
+                desc = field_obj.metadata.get("description", "")
+                assert isinstance(desc, str) and desc.strip(), (
+                    f"{section_name}.{field_obj.name} is missing a non-empty description metadata entry"
+                )
+
+    def test_export_configurations_with_metadata_preserves_values(self):
+        from dreamer.configs import config
+
+        values_only = config.export_configurations()
+        with_metadata = config.export_configurations_with_metadata()
+
+        for section_name, section_payload in values_only.items():
+            assert section_name in with_metadata
+            for key, value in section_payload.items():
+                assert key in with_metadata[section_name]
+                assert with_metadata[section_name][key]["value"] == value
+                assert with_metadata[section_name][key]["description"].strip()
+

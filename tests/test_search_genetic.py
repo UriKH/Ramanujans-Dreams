@@ -94,6 +94,13 @@ class DummySpace:
         sd.delta = score
         return sd
 
+    def compute_trajectory_data_from_tup(self, tup, **kwargs):
+        """Mirror Searchable tuple API used by parallel pool evaluation.
+        :param tup: Pair of (trajectory, start) objects.
+        :return: SearchData payload from ``compute_trajectory_data``.
+        """
+        return self.compute_trajectory_data(*tup, **kwargs)
+
 
 class NoStartSpace(DummySpace):
     """Dummy space variant that cannot provide an interior start."""
@@ -244,9 +251,20 @@ def test_genetic_search_uses_parallel_pool_when_enabled(monkeypatch):
     )
     _configure_ga(monkeypatch, generations=1, pop_size=4, parallel_search=True)
 
+    class _DummyIterator:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def __iter__(self):
+            return iter(self._items)
+
+        def __len__(self):
+            return len(self._items)
+
     class _DummyPool:
-        def map(self, func, trajectories, starts, chunksize=1):
-            return [func(t, s) for t, s in zip(trajectories, starts)]
+        def imap_unordered(self, func, tasks, chunksize=1):
+            del chunksize
+            return _DummyIterator([func(task) for task in tasks])
 
     @contextmanager
     def _dummy_pool_context():

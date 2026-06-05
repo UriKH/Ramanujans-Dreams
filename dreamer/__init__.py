@@ -1,7 +1,9 @@
 from . import loading, analysis, search, system, extraction
 from .system import System
 from dreamer.utils.constants.constant import Constant
-from dreamer.utils.constants.ready_made_consts import e, pi, euler_gamma, catalan, gompertz, zeta, sqrt, power, log
+from dreamer.utils.constants.ready_made_consts import (
+    e, pi, euler_gamma, catalan, gompertz, zeta, sqrt, power, log, pi_squared, calegary
+)
 from .configs import (
     config,
     sys_config,

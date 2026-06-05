@@ -7,7 +7,7 @@ import mpmath as mp
 import ramanujantools as rt
 from ramanujantools import Limit, Position
 from ramanujantools.cmf import CMF
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Union
 
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
@@ -25,26 +25,31 @@ class Searchable(ABC):
     A template for a general searchable object (e.g., shards)
     """
 
-    def __init__(self, cmf: CMF, constant: Constant, shift: Position, use_inv_t: bool, cmf_name: str):
+    def __init__(self, cmf: CMF, constants: Union[Constant, List[Constant]], shift: Position, use_inv_t: bool, cmf_name: str):
         """
         :param cmf: The CMF to search in.
-        :param constant: A constant to search for.
+        :param constants: A constant or list of constants to search for.
         :param shift: The shift in the starting point of the CMF.
         :param use_inv_t: If true, use inverse of the walk matrix to compute the limit.
         :param cmf_name: The name of the CMF.
         """
         self.cache = FrequencyList(max_size=100)
         self.cmf = cmf
-        self.const = constant
+        self.consts: List[Constant] = constants if isinstance(constants, list) else [constants]
         self.shift = shift
         self.use_inv_t = use_inv_t
         self.symbols = list(self.shift.keys())
         self.cmf_name = cmf_name
 
+    @property
+    def const(self) -> Constant:
+        """Backward-compatible accessor — returns the first (primary) constant."""
+        return self.consts[0]
+
     @classmethod
     @abstractmethod
-    def from_cmf_data(cls, cmf_data: CMFData, constant: Constant, *args, **kwargs):
-        return cls(cmf_data.cmf, constant, cmf_data.shift, cmf_data.use_inv_t, cmf_data.cmf_name)
+    def from_cmf_data(cls, cmf_data: CMFData, constants: Union[Constant, List[Constant]], *args, **kwargs):
+        return cls(cmf_data.cmf, constants, cmf_data.shift, cmf_data.use_inv_t, cmf_data.cmf_name)
 
     def is_unconstrained(self) -> bool:
         """
@@ -137,8 +142,8 @@ class Searchable(ABC):
         p, q = None, None
         values = [item for item in walk_col]
         with Logger.simple_timer('constant heavy evalf'):
-            pi_30000 = constant.evalf(30000)
-            pi_300 = constant.evalf(300)
+            high_res_constant = constant.evalf(search_config.CONSTANT_NO_DIGITS_HIGH_RES)
+            low_res_constant = constant.evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES)
         cache_hit = False
         values_vec = sp.Matrix(values)
         estimated = None
@@ -152,7 +157,7 @@ class Searchable(ABC):
                 v2 = sp.Matrix(v2).T
                 numerator = v1.dot(values_vec)
                 denom = v2.dot(values_vec)
-                err = sp.Abs(sp.Abs(sp.Rational(numerator, denom)) - pi_300)
+                err = sp.Abs(sp.Abs(sp.Rational(numerator, denom)) - low_res_constant)
                 return sp.N(err, 25) < search_config.CACHE_ACCEPTANCE_THRESHOLD
 
             matched = self.cache.find(matcher)
@@ -171,7 +176,7 @@ class Searchable(ABC):
 
             try:
                 with Logger.simple_timer('LIReC identify'):
-                    res = db.identify([pi_300] + walk_col[1:])
+                    res = db.identify([low_res_constant] + walk_col[1:])
             except Exception as e:
                 Logger(f'LIReC failed with: "{e}"', Logger.Levels.exception).log()
                 return None, None, None
@@ -194,7 +199,7 @@ class Searchable(ABC):
 
                 # check convergence to constant
                 estimated = estimated_expr.subs({sym: v for sym, v in zip(ext_syms, list(values_vec))})
-                err = sp.Abs(estimated - pi_30000)
+                err = sp.Abs(estimated - high_res_constant)
                 if sp.N(err, 15) > search_config.IDENTIFY_CHECK_THRESHOLD:
                     return None, None, None
 
@@ -222,7 +227,7 @@ class Searchable(ABC):
                 numerator = p.dot(values_vec)
                 denom = q.dot(values_vec)
                 estimated = sp.Abs(sp.Rational(numerator, denom))
-                err = sp.Abs(estimated - pi_30000)
+                err = sp.Abs(estimated - high_res_constant)
 
             # check abnormal denominator and compute delta
             denom = sp.denom(estimated)
@@ -311,6 +316,17 @@ class Searchable(ABC):
             if sd.delta is not None:
                 sd.LIReC_identify = True
         return sd
+
+    def compute_trajectory_data_from_tup(self, tup: Tuple[Position, Position],
+                                *, find_limit: bool = False,
+                                find_eigen_values: bool = False,
+                                find_gcd_slope: bool = False,
+                                use_LIReC: bool = True) -> SearchData:
+        return self.compute_trajectory_data(
+            *tup,
+            find_limit=find_limit, find_eigen_values=find_eigen_values,
+            find_gcd_slope=find_gcd_slope, use_LIReC=use_LIReC
+        )
 
     def _does_converge(self, t_mat: rt.Matrix, traj_len: float, p, q, dim: int, walk_col_ind: int = 0)\
             -> Tuple[bool, Tuple[Limit, Limit, Limit]]:

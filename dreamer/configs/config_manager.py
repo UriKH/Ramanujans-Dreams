@@ -2,6 +2,7 @@ from .system import sys_config
 from .database import db_config
 from .analysis import analysis_config
 from .search import search_config
+from .post_process import post_process_config
 from .extraction import extraction_config
 from .logging import logging_config
 from typing import Dict, List, Any
@@ -16,7 +17,13 @@ class ConfigManager:
     extraction = extraction_config
     analysis = analysis_config
     search = search_config
+    post_process = post_process_config
     logging = logging_config
+
+    SECTION_ORDER = (
+        "system", "database", "extraction", "analysis",
+        "search", "post_process", "logging",
+    )
 
     def configure(self, **overrides):
         """
@@ -52,6 +59,7 @@ class ConfigManager:
             'extraction': self.extraction.get_configurations(),
             'analysis': self.analysis.get_configurations(),
             'search': self.search.get_configurations(),
+            'post_process': self.post_process.get_configurations(),
             'logging': self.logging.get_configurations(),
         }
 
@@ -62,5 +70,45 @@ class ConfigManager:
             'extraction': self.extraction.export_configurations(),
             'analysis': self.analysis.export_configurations(),
             'search': self.search.export_configurations(),
+            'post_process': self.post_process.export_configurations(),
             'logging': self.logging.export_configurations(),
         }
+
+    def export_configuration_descriptions(self) -> Dict[str, Dict[str, str]]:
+        """
+        Export built-in textual descriptions for each configuration field across all sections.
+        :return: Mapping from section name to field-description mapping.
+        """
+        return {
+            'system': self.system.get_configuration_descriptions(),
+            'database': self.database.get_configuration_descriptions(),
+            'extraction': self.extraction.get_configuration_descriptions(),
+            'analysis': self.analysis.get_configuration_descriptions(),
+            'search': self.search.get_configuration_descriptions(),
+            'post_process': self.post_process.get_configuration_descriptions(),
+            'logging': self.logging.get_configuration_descriptions(),
+        }
+
+    def export_configurations_with_metadata(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """
+        Export configuration values together with per-field descriptions across all sections.
+        :return: Mapping from section name to per-field metadata dictionaries.
+        """
+        return {
+            'system': self.system.export_configurations_with_metadata(),
+            'database': self.database.export_configurations_with_metadata(),
+            'extraction': self.extraction.export_configurations_with_metadata(),
+            'analysis': self.analysis.export_configurations_with_metadata(),
+            'search': self.search.export_configurations_with_metadata(),
+            'post_process': self.post_process.export_configurations_with_metadata(),
+            'logging': self.logging.export_configurations_with_metadata(),
+        }
+
+    def iter_sections(self):
+        """
+        Yield configuration sections in a stable order for reproducible presentation.
+        :return: Iterator of (section name, configuration object) tuples.
+        """
+        for section_name in self.SECTION_ORDER:
+            yield section_name, getattr(self, section_name)
+

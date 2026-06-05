@@ -7,6 +7,21 @@ import shutil
 from contextlib import contextmanager
 
 
+def _json_ready(data: Any) -> Any:
+    """Recursively convert supported objects to JSON-serializable payloads."""
+    if hasattr(data, "to_json"):
+        return data.to_json()
+    if hasattr(data, "to_json_obj"):
+        return data.to_json_obj()
+    if isinstance(data, dict):
+        return {str(k): _json_ready(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [_json_ready(v) for v in data]
+    if isinstance(data, tuple):
+        return [_json_ready(v) for v in data]
+    return data
+
+
 class Exporter:
     """
     A utility class for exporting data into files as pickle or JSON
@@ -49,7 +64,23 @@ class Exporter:
                         pkl.dump(data, f)
                 case Formats.JSON:
                     with open(path, "w") as f:
-                        json.dump(data, f)
+                        json.dump(_json_ready(data), f, indent=4)
+                case Formats.JSONL:
+                    # JSON-Lines: one record per line.  ``data`` must be iterable.
+                    # Each item is written via its ``to_json_line()`` method if
+                    # present (DTOs), otherwise via ``json.dumps(_json_ready(item))``.
+                    if not hasattr(data, "__iter__"):
+                        raise TypeError(
+                            f"JSONL export expects an iterable of records, got {type(data)}"
+                        )
+                    with open(path, "w") as f:
+                        for item in data:
+                            line = (
+                                item.to_json_line()
+                                if hasattr(item, "to_json_line")
+                                else json.dumps(_json_ready(item))
+                            )
+                            f.write(line + "\n")
         else:
             # cleanup if needed
             if os.path.isdir(root) and not exists_ok:

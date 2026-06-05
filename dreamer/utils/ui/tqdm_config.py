@@ -11,6 +11,9 @@ class SmartTQDM(tqdm):
         if 'leave' not in kwargs:
             kwargs.update({'leave': is_top_level})
 
+        # Preserve the user-facing description for debug progress logs.
+        self.progress_desc = kwargs.get('desc')
+
         # Determine the step size for 10% jumps if 'total' is known
         self.min_log_step = 0
         if 'total' in kwargs and kwargs['total']:
@@ -33,10 +36,11 @@ class SmartTQDM(tqdm):
         if self.min_log_step > 0:
             if (self.n - self._last_logged_n) >= self.min_log_step:
                 percent = int(100 * self.n / self.total)
-                Logger(
-                    f">>>     SYSTEM PROGRESS: {self.n} / {self.total} ({percent}%)     >>>",
-                    Logger.Levels.debug
-                ).log()
+                if self.progress_desc:
+                    message = f"{self.progress_desc} - progress: {self.n} / {self.total} ({percent}%)"
+                else:
+                    message = f"SYSTEM PROGRESS - progress: {self.n} / {self.total} ({percent}%)"
+                Logger(message, Logger.Levels.debug).log()
                 self._last_logged_n = self.n
         return displayed
 

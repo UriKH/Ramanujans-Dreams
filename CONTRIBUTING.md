@@ -1,3 +1,10 @@
+## Setup
+
+Developers who wish to use existing agent skills and tools relevant for this project can do via: `./setup/dev_setup.sh`
+
+
+## Getting Started
+
 ### How can I add a new Search Module?
 
 **What do I need to do?**

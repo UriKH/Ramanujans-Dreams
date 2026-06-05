@@ -1,7 +1,7 @@
 """
 Global config file for system flow regarding databases
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from .configurable import Configurable
 
@@ -14,7 +14,10 @@ class DBUsages(Enum):
 
 @dataclass
 class DBConfig(Configurable):
-    USAGE: DBUsages = DBUsages.STORE_THEN_RETRIEVE      # execute databases retrieve if retrieve is an option
+    USAGE: DBUsages = field(
+        default=DBUsages.STORE_THEN_RETRIEVE,
+        metadata={"description": "Database access mode controlling retrieve/store behavior across pipeline runs."},
+    )
 
 
 db_config: DBConfig = DBConfig()

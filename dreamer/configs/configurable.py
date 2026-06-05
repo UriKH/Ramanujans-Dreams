@@ -8,10 +8,37 @@ class Configurable:
             return [f.name for f in fields(self)]
         return []
 
+    def get_configuration_descriptions(self) -> Dict[str, str]:
+        """
+        Return description metadata for each dataclass-backed configuration field.
+        :return: Mapping from configuration field name to its built-in description text.
+        """
+        if not is_dataclass(self):
+            return {}
+        descriptions: Dict[str, str] = {}
+        for f in fields(self):
+            descriptions[f.name] = str(f.metadata.get("description", ""))
+        return descriptions
+
     def export_configurations(self) -> Dict[str, Any]:
         if is_dataclass(self):
             return asdict(self)
         return dict()
+
+    def export_configurations_with_metadata(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Export field values together with description metadata for each configuration entry.
+        :return: Mapping from field name to an object containing value and description keys.
+        """
+        if not is_dataclass(self):
+            return {}
+        return {
+            f.name: {
+                "value": getattr(self, f.name),
+                "description": str(f.metadata.get("description", "")),
+            }
+            for f in fields(self)
+        }
 
     def _format_value(self, value) -> str:
         """

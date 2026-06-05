@@ -3,7 +3,7 @@ from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.storage.storage_objects import DataManager
-from dreamer.configs import sys_config
+from dreamer.configs.system import sys_config
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.utils.logger import Logger
 from typing import List, Dict

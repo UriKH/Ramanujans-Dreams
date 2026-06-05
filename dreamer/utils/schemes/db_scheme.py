@@ -8,7 +8,7 @@ from dreamer.utils.schemes.module import Module, CatchErrorInModule
 from dreamer.utils.types import CMFData
 from dreamer.loading.funcs.formatter import Formatter
 from dreamer.loading.config import DATA_ANNOTATE, COMMAND_ANNOTATE
-from dreamer.configs import sys_config
+from dreamer.configs.system import sys_config
 from typing import Dict, List, Set, Union, Optional, Any
 import json
 

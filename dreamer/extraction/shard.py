@@ -1,62 +1,95 @@
 from __future__ import annotations
 
+import base64
+import pickle
 
 from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.utils.schemes.searchable import Searchable
+from dreamer.utils.schemes.jsonable import JSONable
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs import config
 from ramanujantools.cmf import CMF
 from ramanujantools import Position
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 import sympy as sp
 import numpy as np
 
 from dreamer.utils.types import CMFData
 
 
-class Shard(Searchable):
+class Shard(Searchable, JSONable):
     def __init__(self,
                  cmf: CMF,
-                 constant: Constant,
+                 constants: Union[Constant, List[Constant]],
                  hyperplanes: List[Hyperplane],
                  encoding: List[int],
                  shift: Position,
                  interior_point: Optional[Position] = None,
                  use_inv_t: Optional[bool] = None,
-                 cmf_name: str = 'UnknownCMF'
+                 cmf_name: str = 'UnknownCMF',
+                 hyperplanes_already_shifted: bool = False
                  ):
         """
         :param cmf: The CMF this shard is a part of
-        :param constant: The constant to search for in the shard
+        :param constants: A constant or list of constants to search for in the shard
         :param hyperplanes: The hyperplanes defining the shard
         :param encoding: The indicator vector that indicates whether the shard is below or above the hyperplanes
         :param shift: The shift in start points required
         :param interior_point: A point within the shard
         :param use_inv_t: Whether to use inverse transpose when preforming walk or not
         :param cmf_name: The name of the CMF
+        :param hyperplanes_already_shifted: When True, ``hyperplanes`` are
+            already in shifted coordinates, so the (expensive, sympy)
+            per-hyperplane ``apply_shift`` is skipped.  The shift is the
+            same for every shard of a CMF, so the caller can shift once
+            and reuse the result across all shards instead of re-shifting
+            in each ``Shard.__init__``.
         """
         use_inv_t_value: bool = bool(config.search.DEFAULT_USES_INV_T if use_inv_t is None else use_inv_t)
 
-        super().__init__(cmf, constant, shift, use_inv_t_value, cmf_name)
+        super().__init__(cmf, constants, shift, use_inv_t_value, cmf_name)
         self.symbols = list(cmf.matrices.keys())
         self.A, self.b = None, None
+        # Sign vector relative to the parent CMF's hyperplane list:
+        # +1 = shard is above hp_i, -1 = below.  Paired one-to-one with
+        # ``cmf.hyperplanes`` so the DTO can carry a compact combinatorial
+        # label for the shard (DB-friendly; readers don't need ``A, b``).
+        self.encoding: Tuple[int, ...] = tuple(int(v) for v in encoding) if encoding else ()
 
         if hyperplanes:
             # Work in shifted coordinates, then translate tested points back by `shift`.
-            shifted_hyperplanes = [hp.apply_shift(shift) for hp in hyperplanes]
+            if hyperplanes_already_shifted:
+                shifted_hyperplanes = hyperplanes
+            else:
+                shifted_hyperplanes = [hp.apply_shift(shift) for hp in hyperplanes]
             self.A, self.b, self.symbols = self.generate_matrices(shifted_hyperplanes, encoding)
         self.start_coord = interior_point
         self.is_whole_space = self.A is None or self.b is None
 
     @classmethod
-    def from_cmf_data(cls, cmf_data: CMFData, constant: Constant,
+    def from_cmf_data(cls, cmf_data: CMFData, constants: Union[Constant, List[Constant]],
                       hyperplanes: List[Hyperplane], encoding: List[int],
-                      interior_point: Optional[Position] = None, *args, **kwargs) -> Shard:
+                      interior_point: Optional[Position] = None, *args,
+                      hyperplanes_already_shifted: bool = False, **kwargs) -> 'Shard':
         return cls(
-            cmf_data.cmf, constant, hyperplanes, encoding, cmf_data.shift,
-            interior_point, cmf_data.use_inv_t, cmf_data.cmf_name
+            cmf_data.cmf, constants, hyperplanes, encoding, cmf_data.shift,
+            interior_point, cmf_data.use_inv_t, cmf_data.cmf_name,
+            hyperplanes_already_shifted=hyperplanes_already_shifted,
         )
 
+    @classmethod
+    def from_matrices(cls, cmf: CMF,
+                 constants: Union[Constant, List[Constant]],
+                 A: np.ndarray, b: np.ndarray,
+                 shift: Position,
+                 interior_point: Optional[Position] = None,
+                 use_inv_t: Optional[bool] = None,
+                 cmf_name: str = 'UnknownCMF'):
+        shard = cls(cmf, constants, [], [], shift, interior_point, use_inv_t, cmf_name)
+        shard.A = A
+        shard.b = b
+        shard.is_whole_space = False
+        return shard
 
     def in_space(self, point: Position) -> bool:
         """
@@ -130,3 +163,37 @@ class Shard(Searchable):
 
     def __str__(self):
         return f'A:\n{self.A}\nb: {self.b}'
+
+    def to_json(self) -> dict:
+        """
+        Serialize shard state into JSON using a base64-encoded pickle payload.
+        :return: JSON-compatible dictionary that can be restored with ``from_json_obj``.
+        """
+        payload = base64.b64encode(pickle.dumps(self)).decode("ascii")
+        return {
+            "__class__": "Shard",
+            "cmf_name": self.cmf_name,
+            "consts": [c.name for c in self.consts],
+            "payload_b64": payload,
+        }
+
+    def to_json_obj(self) -> dict:
+        """Backward-compatible alias used by existing exporter paths."""
+        return self.to_json()
+
+    @classmethod
+    def from_json_obj(cls, obj: dict) -> "Shard":
+        """
+        Restore a shard from ``to_json`` payload.
+        :param obj: JSON dictionary generated by ``to_json``.
+        :raises ValueError: If the payload is malformed or not a Shard instance.
+        :return: Restored shard instance.
+        """
+        payload = obj.get("payload_b64")
+        if not isinstance(payload, str):
+            raise ValueError("Shard JSON payload is missing 'payload_b64'")
+        restored = pickle.loads(base64.b64decode(payload.encode("ascii")))
+        if not isinstance(restored, cls):
+            raise ValueError(f"Expected payload to decode into {cls.__name__}, got {type(restored)}")
+        return restored
+

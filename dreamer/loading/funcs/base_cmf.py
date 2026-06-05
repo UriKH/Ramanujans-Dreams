@@ -12,7 +12,8 @@ import sympy as sp
 
 class BaseCMF(Formatter):
     def __init__(self,
-                 const: str | Constant, cmf_name: str, cmf: CMF, shifts: Optional[list] = None,
+                 const: Union[str, Constant, List[Union[str, Constant]]],
+                 cmf_name: str, cmf: CMF, shifts: Optional[list] = None,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
                  use_inv_t: bool = None
@@ -33,7 +34,7 @@ class BaseCMF(Formatter):
         if self.shifts is None:
             self.shifts = [0] * self.cmf.dim()
 
-        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t, cmf_name)
+        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t, [[cmf_name]])
 
         if not isinstance(self.shifts, list) and not isinstance(self.shifts, Position):
             raise ValueError("Shifts should be a list or Position")
@@ -45,6 +46,10 @@ class BaseCMF(Formatter):
         :param data: The JSON string representation of the pFq (only attributes).
         :return: A BaseCMF object.
         """
+        data = dict(data)
+        # Normalise: new 'consts' list → 'const' param; old 'const' str stays.
+        if 'consts' in data:
+            data['const'] = data.pop('consts')
         data['cmf'] = CMF(
             matrices={sp.sympify(k): Matrix(sp.sympify(v)) for k, v in data['cmf'].items()},
             validate=False
@@ -68,8 +73,8 @@ class BaseCMF(Formatter):
         Converts the CMF to a Shift CMF.
         :return: A Shift CMF object
         """
-        self.shifts = Position({k: v for k, v in zip(self.cmf.matrices.keys(), self.shifts)})
-        return CMFData(self.cmf, self.shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
+        shifts = Position({k: v for k, v in zip(self.cmf.matrices.keys(), self.shifts)})
+        return CMFData(self.cmf, shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
 
     def __repr__(self):
         return json.dumps(self._to_json_obj())

@@ -30,7 +30,10 @@ def test_filter_symmetrical_cones_deduplicates_points():
         (2,): np.array([1, 3, 4]),
         (3,): np.array([2, 5, 6]),
     }
-    filtered = initial_points.filter_symmetrical_cones(mapping, p=2, q=1, shift=[0, 0, 0])
+    # Separate [1,3,4] and [2,5,6] by signature so symmetry-dedup keeps exactly two cones.
+    A = np.array([[1, 1, 1]], dtype=np.int64)
+    b = np.array([-9], dtype=np.int64)
+    filtered = initial_points.filter_symmetrical_cones(mapping, p=2, q=1, shift=[0, 0, 0], A=A, b=b)
 
     assert len(filtered) == 2
 
@@ -38,7 +41,27 @@ def test_filter_symmetrical_cones_deduplicates_points():
 def test_filter_symmetrical_cones_validates_dimensions():
     """Assumption: p+q must equal shift dimension; failure mode: incorrect symmetry partitioning."""
     with pytest.raises(ValueError, match=r"p \+ q must be the dimension"):
-        initial_points.filter_symmetrical_cones({(1,): np.array([1, 2])}, p=1, q=2, shift=[0, 0])
+        initial_points.filter_symmetrical_cones(
+            {(1,): np.array([1, 2])},
+            p=1,
+            q=2,
+            shift=[0, 0],
+            A=np.zeros((1, 2), dtype=np.int64),
+            b=np.zeros(1, dtype=np.int64),
+        )
+
+
+class _DummyIterator:
+    """Simple iterator wrapper that also exposes length for tqdm total handling."""
+
+    def __init__(self, items):
+        self._items = list(items)
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self):
+        return len(self._items)
 
 
 class _DummyPool:
@@ -50,13 +73,18 @@ class _DummyPool:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def starmap(self, func, tasks):
-        return [func(*task) for task in tasks]
+    def imap_unordered(self, func, tasks, chunksize=1):
+        del chunksize
+        results = []
+        for task in tasks:
+            # compute_mapping uses an adaptor that expects one packed task argument.
+            results.append(func(task))
+        return _DummyIterator(results)
 
 
 def test_compute_mapping_selects_closest_point_per_signature(monkeypatch):
     """Assumption: all points share one signature; failure mode: first-seen point leaks through instead of nearest."""
-    monkeypatch.setattr(initial_points.mp, "Pool", lambda *_args, **_kwargs: _DummyPool())
+    monkeypatch.setattr(initial_points, "create_pool", lambda: _DummyPool())
     monkeypatch.setattr(initial_points.mp, "cpu_count", lambda: 1)
 
     D = 1
@@ -79,7 +107,7 @@ def test_compute_mapping_tie_breaks_lexicographically(monkeypatch):
         result = {(1,): point}
         return filter_func(result) if filter_func else result
 
-    monkeypatch.setattr(initial_points.mp, "Pool", lambda *_args, **_kwargs: _DummyPool())
+    monkeypatch.setattr(initial_points, "create_pool", lambda: _DummyPool())
     monkeypatch.setattr(initial_points.mp, "cpu_count", lambda: 1)
     monkeypatch.setattr(initial_points, "__worker_wrapper", fake_worker)
 

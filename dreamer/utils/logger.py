@@ -3,16 +3,13 @@ import time
 import inspect
 import logging
 import os
+import platform
 from enum import Enum, auto
 from contextlib import contextmanager
 from typing import Callable, Dict, Tuple, Optional
 from dreamer.configs.logging import logging_config
 
-# ==========================================
-# CONFIGURE PYTHON STANDARD LOGGING BACKEND
-# ==========================================
 
-# New definitions
 MESSAGE_LEVEL = 25
 INFORM_LEVEL = 26
 logging.addLevelName(MESSAGE_LEVEL, "MESSAGE")
@@ -50,10 +47,6 @@ class ColorConsoleFormatter(logging.Formatter):
         message = super().format(record)
         return f"{color}{prefix}{message}{self.WHITE}"
 
-
-# ==========================================
-# LOGGER INTERFACE
-# ==========================================
 
 class Logger:
     """
@@ -151,6 +144,39 @@ class Logger:
             os.replace(desired_filename, cls._rotated_log_filename(desired_filename, run_idx))
 
         cls._force_overwrite_next_file_open = True
+        cls._ensure_file_handler()
+        cls._log_system_status()
+
+    @classmethod
+    def _log_system_status(cls):
+        """
+        Emit a run-start diagnostics block to the debug log with host and configuration details.
+        :return: None.
+        """
+        if not logging_config.GENERATE_LOGS:
+            return
+
+        from dreamer.configs import config
+
+        os_name = platform.system() or "Unknown"
+        architecture = platform.machine() or platform.architecture()[0]
+        cpu_count = os.cpu_count()
+
+        sys_logger.debug("========== SYSTEM STATUS ==========")
+        sys_logger.debug(f"cores_available={cpu_count if cpu_count is not None else 'Unknown'}")
+        sys_logger.debug(f"os={os_name}")
+        sys_logger.debug(f"architecture={architecture}")
+        sys_logger.debug("configurations:")
+
+        for section_name, section_cfg in config.iter_sections():
+            sys_logger.debug(f"  [{section_name}]")
+            for entry_name, entry in section_cfg.export_configurations_with_metadata().items():
+                formatted_value = repr(entry["value"])
+                description = entry["description"]
+                if description:
+                    sys_logger.debug(f"    {entry_name} = {formatted_value}  # {description}")
+                else:
+                    sys_logger.debug(f"    {entry_name} = {formatted_value}")
 
     @classmethod
     def _ensure_file_handler(cls):
@@ -278,10 +304,6 @@ class Logger:
         for label, (n, s) in cls.timer_mapping.items():
             cls(f"{label}: {n} runs, avg time: {s / n:.6f} seconds", cls.Levels.debug).log()
 
-
-# ==========================================
-# 3. CONFIGURE PYTHON STANDARD LOGGING BACKEND
-# ==========================================
 
 class DynamicPrintHandler(logging.Handler):
     """

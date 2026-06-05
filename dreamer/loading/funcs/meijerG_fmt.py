@@ -11,7 +11,8 @@ import sympy as sp
 
 class MeijerG(Formatter):
     def __init__(self,
-                 const: str | Constant, m: int, n: int, p: int, q: int, z: sp.Expr | int, shifts: Optional[list] = None,
+                 const: Union[str, Constant, List[Union[str, Constant]]],
+                 m: int, n: int, p: int, q: int, z: sp.Expr | int, shifts: Optional[list] = None,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
                  use_inv_t: bool = config.search.DEFAULT_USES_INV_T
@@ -39,8 +40,8 @@ class MeijerG(Formatter):
         if self.shifts is None:
             self.shifts = [0] * (self.p + self.q)
 
-        cmf_name = self.__class__.__name__ + f"_{self.m}_{self.n}_{self.p}_{self.q}_{self.z}"
-        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t, cmf_name)
+        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t,
+                         [[self.__class__.__name__, self.m, self.n, self.p, self.q, self.z]])
 
         if not (p > 0 and 0 <= n <= p) or not (q > 0 and 0 <= m <= q):
             raise ValueError("Meijer G must satisfy p > 0, 0 <= n <= p and q > 0, 0 <= m <= q")
@@ -56,6 +57,10 @@ class MeijerG(Formatter):
         :param s_json: The JSON string representation of the MeijerG (only attributes).
         :return: A MeijerG object.
         """
+        data = dict(data)
+        # Normalise: new 'consts' list → 'const' param; old 'const' str stays.
+        if 'consts' in data:
+            data['const'] = data.pop('consts')
         data['z'] = sp.sympify(data['z']) if isinstance(data['z'], str) else data['z']
         data['shifts'] = [sp.sympify(shift) if isinstance(shift, str) else shift for shift in data['shifts']]
         return cls(**data)
@@ -81,8 +86,8 @@ class MeijerG(Formatter):
         :return: A tuple (CMF, shifts)
         """
         cmf = rt_mg(self.m, self.n, self.p, self.q, self.z)
-        self.shifts = Position({k: v for k, v in zip(cmf.matrices.keys(), self.shifts)})
-        return CMFData(cmf, self.shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
+        shifts = Position({k: v for k, v in zip(cmf.matrices.keys(), self.shifts)})
+        return CMFData(cmf, shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
 
     def __repr__(self):
         return json.dumps(self._to_json_obj())

@@ -10,7 +10,8 @@ from ramanujantools import Position
 
 class pFq(Formatter):
     def __init__(self,
-                 const: str | Constant, p: int, q: int, z: sp.Expr | int, shifts: Optional[list] = None,
+                 const: Union[str, Constant, List[Union[str, Constant]]],
+                 p: int, q: int, z: sp.Expr | int, shifts: Optional[list] = None,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
                  use_inv_t: bool = None
@@ -33,8 +34,8 @@ class pFq(Formatter):
         if self.shifts is None:
             self.shifts = [0] * (self.p + self.q)
 
-        cmf_name = self.__class__.__name__ + f"_{self.p}_{self.q}_{self.z}"
-        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t, cmf_name)
+        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t,
+                         [[self.__class__.__name__, self.p, self.q, self.z]])
 
         if self.p <= 0 or self.q <= 0:
             raise ValueError("p and q should be positive integers")
@@ -50,6 +51,13 @@ class pFq(Formatter):
         :param data: The JSON string representation of the pFq (only attributes).
         :return: A pFq object.
         """
+        data = dict(data)
+        # Normalise to a list under the 'const' key (pFq.__init__ param name).
+        # Old format: {'const': "log2", ...}  → const=["log2"]
+        # New format: {'consts': ["log2", "pi"], ...} → const=["log2", "pi"]
+        if 'consts' in data:
+            data['const'] = data.pop('consts')
+        # 'const' stays as-is (may be str or list).
         data['z'] = sp.sympify(data['z']) if isinstance(data['z'], str) else data['z']
         data['shifts'] = cls._shift_from_json(data['shifts'])
         data['selected_start_points'] = cls._selected_start_points_from_json(data['selected_start_points'])
@@ -73,8 +81,8 @@ class pFq(Formatter):
         :return: A tuple (CMF, shifts)
         """
         cmf = rt_pFq(self.p, self.q, self.z)
-        self.shifts = Position({k: v for k, v in zip(cmf.matrices.keys(), self.shifts)})
-        return CMFData(cmf, self.shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
+        shifts = Position({k: v for k, v in zip(cmf.matrices.keys(), self.shifts)})
+        return CMFData(cmf, shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
 
     def __repr__(self):
         return json.dumps(self._to_json_obj())
@@ -83,4 +91,4 @@ class pFq(Formatter):
         return f'<{self.__class__.__name__}: {self.__repr__()}>'
 
     def __hash__(self):
-        return hash((self.p, self.q, self.z, super().__hash__()))
+        return hash((self.p, self.q, str(self.z), super().__hash__()))
