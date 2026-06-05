@@ -37,6 +37,8 @@ from dreamer.utils.storage.trajectory_attributes import (
     build_trajectory_dto,
     derive_cmf_and_shard_ids,
     derive_trajectory_id,
+    tier1_config_fingerprint,
+    walk_depth_for,
 )
 from dreamer.utils.storage.attribute_registry import (
     ATTRIBUTE_REGISTRY,
@@ -517,11 +519,13 @@ class TestBuildTrajectoryDto:
         assert dto_a.trajectory_id != dto_b.trajectory_id
 
     def test_base_tier1_fields_populated(self, minimal_handler, symbols):
-        """build_trajectory_dto must fill every Tier-1 field.
+        """build_trajectory_dto fills the cheap Tier-1 fields.
 
-        ``recurrence_relation``, ``recurrence_order``, ``limit_value`` and
-        ``delta_estimate`` (now a dict) are Tier-1.  ``extended_metrics``
-        stays empty until Tier-2 workers (if any) write to it.
+        ``limit_value`` and ``delta_estimate`` (a dict) are Tier-1.  The
+        recurrence (``recurrence_relation`` / ``recurrence_order``) is **Tier-2**
+        and stays ``None`` unless ``compute_recurrence=True`` (it builds the
+        expensive symbolic ``LinearRecurrence``).  ``extended_metrics`` stays
+        empty until Tier-2 workers (if any) write to it.
         """
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
@@ -530,15 +534,29 @@ class TestBuildTrajectoryDto:
             cmf_id="c", shard_id="s", cmf_name="c",
             shard_encoding_str="enc", start=start, direction=direction,
         )
-        assert dto.recurrence_order >= 1
-        assert isinstance(dto.recurrence_relation, str)
-        assert dto.recurrence_relation != ""
+        # Recurrence is NOT computed on the default (hot) path.
+        assert dto.recurrence_relation is None
+        assert dto.recurrence_order is None
         # ``delta_estimate`` is a dict; each value is finite or the -inf sentinel.
         assert isinstance(dto.delta_estimate, dict)
         for delta_val in dto.delta_estimate.values():
             assert abs(delta_val) < 1e9 or delta_val == float("-inf")
         assert abs(float(dto.limit_value)) < 1e15
         assert dto.extended_metrics == {}   # workers haven't run yet
+
+    def test_compute_recurrence_opt_in_populates_recurrence(self, minimal_handler, symbols):
+        """``compute_recurrence=True`` populates the Tier-2 recurrence fields."""
+        start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        dto = build_trajectory_dto(
+            minimal_handler,
+            cmf_id="c", shard_id="s", cmf_name="c",
+            shard_encoding_str="enc", start=start, direction=direction,
+            compute_recurrence=True,
+        )
+        assert isinstance(dto.recurrence_relation, str)
+        assert dto.recurrence_relation != ""
+        assert dto.recurrence_order >= 1
 
     def test_p_and_q_vectors_are_dicts_or_none(self, minimal_handler, symbols):
         """``build_trajectory_dto`` stores p/q as dicts (const→tuple) or ``None``."""
@@ -1473,9 +1491,11 @@ class TestMergeOnRead:
             start_t = tuple(int(v) for v in start_p.values())
             dir_t = tuple(int(v) for v in traj_p.values())
             tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
+            fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
             seen_trajectories[tid] = {
                 "trajectory_id": tid,
                 "extended_metrics": {"eigenvalues": "dummy"},
+                "config_fingerprint": fp,
             }
 
         sink, items = self._collecting_sink()
@@ -1519,7 +1539,10 @@ class TestMergeOnRead:
             start_t = tuple(int(v) for v in start_p.values())
             dir_t = tuple(int(v) for v in traj_p.values())
             tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
-            seen_trajectories[tid] = {"trajectory_id": tid, "extended_metrics": {}}
+            fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
+            seen_trajectories[tid] = {
+                "trajectory_id": tid, "extended_metrics": {}, "config_fingerprint": fp,
+            }
 
         # Count handler constructions.
         calls = [0]
@@ -1713,9 +1736,11 @@ class TestMergeOnRead:
             start_t = tuple(int(v) for v in start_p.values())
             dir_t = tuple(int(v) for v in traj_p.values())
             tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
+            fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
             seen_trajectories[tid] = {
                 "trajectory_id": tid,
                 "extended_metrics": {present_attr: "pre-computed"},
+                "config_fingerprint": fp,
             }
 
         sink, items = self._collecting_sink()
@@ -1897,10 +1922,12 @@ class TestAnalyzerDedup:
                 start_t = tuple(int(v) for v in start_p.values())
                 dir_t = tuple(int(v) for v in traj_p.values())
                 tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
+                fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
                 fout.write(json.dumps({
                     "trajectory_id": tid,
                     "delta_estimate": {e.name: 2.5},
                     "identified": {e.name: True},
+                    "config_fingerprint": fp,
                 }) + "\n")
 
         calls = [0]
@@ -2011,11 +2038,13 @@ class TestAnalyzerDedup:
 
         # JSONL now lives flat under EXPORT_SEARCH_RESULTS.
         jsonl_path = tmp_path / f"{shard_id}.jsonl"
+        fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
         with open(jsonl_path, "w") as fout:
             fout.write(json.dumps({
                 "trajectory_id": tid,
                 "delta_estimate": {e.name: 1.0},
                 "identified": {e.name: True},
+                "config_fingerprint": fp,
             }) + "\n")
 
         calls = [0]

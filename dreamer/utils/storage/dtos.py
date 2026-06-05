@@ -34,10 +34,12 @@ class CmfFamilyDTO:
     dimensions: int
 
     def to_json_line(self) -> str:
+        """Serialize this record to a single JSON line for JSONL storage."""
         return json.dumps(dataclasses.asdict(self))
 
     @classmethod
     def from_dict(cls, d: dict) -> "CmfFamilyDTO":
+        """Reconstruct a ``CmfFamilyDTO`` from a JSON-parsed dict."""
         return cls(
             family_id=d["family_id"],
             global_family_id=d["global_family_id"],
@@ -60,10 +62,12 @@ class CmfDTO:
     found_constants: List[str]
 
     def to_json_line(self) -> str:
+        """Serialize this record to a single JSON line for JSONL storage."""
         return json.dumps(dataclasses.asdict(self))
 
     @classmethod
     def from_dict(cls, d: dict) -> "CmfDTO":
+        """Reconstruct a ``CmfDTO`` from a JSON-parsed dict."""
         return cls(
             cmf_id=d["cmf_id"],
             family_id=d["family_id"],
@@ -91,10 +95,12 @@ class ShardDTO:
     orthogonality_defect: Optional[float] = None  # LLL-based; None when fpylll unavailable
 
     def to_json_line(self) -> str:
+        """Serialize this record to a single JSON line for JSONL storage."""
         return json.dumps(dataclasses.asdict(self))
 
     @classmethod
     def from_dict(cls, d: dict) -> "ShardDTO":
+        """Reconstruct a ``ShardDTO`` from a JSON-parsed dict."""
         return cls(
             shard_id=d["shard_id"],
             cmf_id=d["cmf_id"],
@@ -129,9 +135,7 @@ class TrajectoryDTO:
     start_point: Tuple[int | str, ...]
     direction: Tuple[int | str, ...]
 
-    # Tier-1 base attributes — always present in any DTO record.
-    recurrence_relation: str
-    recurrence_order: int
+    # Tier-1 base attribute — cheap (uses the walk, not the symbolic recurrence).
     limit_value: float
 
     # Per-constant attributes — dicts keyed by constant name so that one
@@ -149,10 +153,30 @@ class TrajectoryDTO:
     # matrix (the dual recurrence); 2 → walked directly.
     walk_type: int = 1
 
+    # Walk depth used for this trajectory's Tier-1 values, and a fingerprint of
+    # all config knobs that influenced them (see
+    # ``trajectory_attributes.tier1_config_fingerprint``).  Stored so a later
+    # run with a different configuration (e.g. a deeper walk) can detect that a
+    # cached record is stale and recompute it instead of silently reusing the
+    # old δ / identification.  ``None`` on legacy records (treated as stale →
+    # recomputed on next encounter).
+    walk_depth: Optional[int] = None
+    config_fingerprint: Optional[str] = None
+
+    # Recurrence attributes — **Tier-2 / optional**.  Building the symbolic
+    # ``LinearRecurrence`` (companion matrix + relation string) dominates the
+    # per-trajectory cost (~80% in profiling), so it is **not** computed on the
+    # hot path.  They stay ``None`` unless ``build_trajectory_dto`` is called
+    # with ``compute_recurrence=True``, or the ``"formula"`` / ``"order"``
+    # attributes are requested through the Tier-2 worker pipeline.
+    recurrence_relation: Optional[str] = None
+    recurrence_order: Optional[int] = None
+
     # Open extension field for Tier-2+ attributes added by background workers
     extended_metrics: Dict[str, Any] = field(default_factory=dict, hash=False)
 
     def to_json_line(self) -> str:
+        """Serialize this record to a single JSON line for JSONL storage."""
         return json.dumps(dataclasses.asdict(self))
 
     @classmethod
@@ -172,13 +196,15 @@ class TrajectoryDTO:
             shard_id=d["shard_id"],
             start_point=tuple(d["start_point"]),
             direction=tuple(d["direction"]),
-            recurrence_relation=d["recurrence_relation"],
-            recurrence_order=d["recurrence_order"],
             limit_value=d["limit_value"],
             delta_estimate=d.get("delta_estimate") or {},
             p_vector=_restore_pq(d.get("p_vector")),
             q_vector=_restore_pq(d.get("q_vector")),
             identified=d.get("identified") or {},
             walk_type=int(d.get("walk_type", 1)),
+            walk_depth=d.get("walk_depth"),
+            config_fingerprint=d.get("config_fingerprint"),
+            recurrence_relation=d.get("recurrence_relation"),
+            recurrence_order=d.get("recurrence_order"),
             extended_metrics=d.get("extended_metrics", {}),
         )

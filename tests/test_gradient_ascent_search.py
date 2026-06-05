@@ -189,6 +189,40 @@ class TestRotateToward:
         np.testing.assert_allclose(rotate_toward(np.zeros(2), 0, 0.4), [0.0, 0.0])
 
 
+class TestPrimitiveRayAndBatchCone:
+    """Geometry helpers added for the perf pass: primitive ray + batched cone test."""
+
+    def test_to_real_primitive_collapses_scaled_directions(self, simple_shard):
+        """z and 2z must map to the SAME primitive real ray (one cached walk)."""
+        geom = FlatlandGeometry(simple_shard)
+        z = np.zeros(geom.d_flat, dtype=np.int64)
+        z[0] = 1
+        p1 = geom.to_real_primitive(z)
+        p2 = geom.to_real_primitive(2 * z)
+        assert [int(p1[s]) for s in simple_shard.symbols] == [int(p2[s]) for s in simple_shard.symbols]
+
+    def test_to_real_primitive_is_gcd_one(self, whole_space_shard):
+        """The returned real ray is primitive (GCD of components == 1)."""
+        import math
+        geom = FlatlandGeometry(whole_space_shard)
+        z = np.zeros(geom.d_flat, dtype=np.int64)
+        z[0] = 4  # 4*e0 -> primitive e0
+        p = geom.to_real_primitive(z)
+        comps = [abs(int(p[s])) for s in whole_space_shard.symbols if int(p[s]) != 0]
+        g = comps[0]
+        for c in comps[1:]:
+            g = math.gcd(g, c)
+        assert g == 1
+
+    def test_is_inside_many_matches_is_inside(self, simple_shard):
+        """Batched cone test agrees with the scalar one row-by-row."""
+        geom = FlatlandGeometry(simple_shard)
+        Z = np.array([[1, 0], [0, 1], [-1, 0], [1, 1]], dtype=np.int64)[:, : geom.d_flat]
+        batch = geom.is_inside_many(Z)
+        scalar = np.array([geom.is_inside(z) for z in Z])
+        np.testing.assert_array_equal(batch, scalar)
+
+
 class TestSnapToTrajectory:
     def test_returns_in_cone_capped_integer(self, simple_shard):
         geom = FlatlandGeometry(simple_shard)
@@ -422,7 +456,8 @@ class TestGradientAscentMod:
         run_calls = []
 
         def fake_run(self_, *, constant, cmf_id, shard_id, shard_encoding_str,
-                     sink, seen_trajectories, handler_cache=None):
+                     sink, seen_trajectories, handler_cache=None,
+                     geom=None, start=None, pool=None):
             run_calls.append(constant)
             if constant.name == "pi":
                 raise NoInitialIdentification(shard_id, constant)
@@ -437,6 +472,42 @@ class TestGradientAscentMod:
 
         names = sorted(c.name for c in run_calls)
         assert names == ["e", "pi"]
+
+    def test_geometry_built_once_per_shard(self, simple_shard, monkeypatch, tmp_path):
+        """FlatlandGeometry (LLL/BKZ) is constructed once per shard, reused
+        across the shard's identified constants."""
+        from dreamer.search.searchers.gradient_ascent_mod import GradientAscentMod
+        from dreamer.search.searchers import gradient_ascent_mod as mod_module
+        from dreamer.configs.system import sys_config
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path), raising=False)
+        monkeypatch.setattr(sys_config, "NUM_BACKGROUND_WORKERS", 0, raising=False)
+        monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", (), raising=False)
+        monkeypatch.setattr(config.search, "GRAD_NUM_EVAL_WORKERS", 0, raising=False)
+
+        construct_count = [0]
+        real_geom = mod_module.FlatlandGeometry
+
+        def counting_geom(shard):
+            construct_count[0] += 1
+            return real_geom(shard)
+
+        monkeypatch.setattr(mod_module, "FlatlandGeometry", counting_geom)
+
+        received = []
+
+        def fake_run(self_, *, constant, cmf_id, shard_id, shard_encoding_str,
+                     sink, seen_trajectories, handler_cache=None,
+                     geom=None, start=None, pool=None):
+            received.append(geom)
+
+        monkeypatch.setattr(mod_module.GradientAscentSearch, "run", fake_run)
+
+        priorities = {e: [simple_shard], pi: [simple_shard]}
+        GradientAscentMod(priorities, use_LIReC=False).execute()
+
+        assert construct_count[0] == 1
+        assert len(received) == 2 and received[0] is received[1] is not None
 
     def test_empty_searchables_is_noop(self, monkeypatch, tmp_path):
         from dreamer.search.searchers.gradient_ascent_mod import GradientAscentMod

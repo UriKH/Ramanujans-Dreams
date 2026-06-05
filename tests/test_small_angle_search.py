@@ -264,7 +264,12 @@ class TestWalkReuse:
         dir_t = _position_to_tuple(geom.to_real(z))
         tid = derive_trajectory_id("sid", whole_space_shard.cmf_name, "", start_t, dir_t)
 
-        seen = {tid: {"extended_metrics": {}, "delta_estimate": {e.name: 2.5}, "identified": {e.name: True}}}
+        from dreamer.utils.storage.trajectory_attributes import (
+            tier1_config_fingerprint, walk_depth_for,
+        )
+        fp = tier1_config_fingerprint(walk_depth_for(whole_space_shard.cmf, geom.to_real_primitive(z)))
+        seen = {tid: {"extended_metrics": {}, "delta_estimate": {e.name: 2.5},
+                      "identified": {e.name: True}, "config_fingerprint": fp}}
         built = []
 
         from dreamer.search.methods.small_angle import small_angle_scan as sas
@@ -306,7 +311,12 @@ class TestWalkReuse:
         cached_handler.trajectory_matrix.return_value = MagicMock()
         cached_handler.compute_for_constant.return_value = (1.5, None, None, True)
 
-        seen = {tid: {"extended_metrics": {}, "delta_estimate": {pi.name: 0.9}, "identified": {pi.name: True}}}
+        from dreamer.utils.storage.trajectory_attributes import (
+            tier1_config_fingerprint, walk_depth_for,
+        )
+        fp = tier1_config_fingerprint(walk_depth_for(whole_space_shard.cmf, geom.to_real_primitive(z)))
+        seen = {tid: {"extended_metrics": {}, "delta_estimate": {pi.name: 0.9},
+                      "identified": {pi.name: True}, "config_fingerprint": fp}}
         emitted = []
 
         from dreamer.search.methods.small_angle import small_angle_scan as sas
@@ -409,3 +419,87 @@ class TestSmallAngleSearchMod:
         from dreamer.search.searchers import small_angle_mod as mod
         searcher = mod.SmallAngleSearchMod({}, use_LIReC=False)
         assert searcher.execute() is None
+
+    def test_geometry_built_once_per_shard(self, simple_shard, monkeypatch, tmp_path):
+        """FlatlandGeometry (LLL/BKZ) is constructed once per shard, reused
+        across the shard's identified constants."""
+        from dreamer.search.searchers import small_angle_mod as mod
+        from dreamer.configs.system import sys_config
+        from dreamer import pi
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        monkeypatch.setattr(search_config, "TIER2_ATTRIBUTES", ())
+        monkeypatch.setattr(search_config, "SA_NUM_EVAL_WORKERS", 0)  # serial, no subprocesses
+
+        construct_count = [0]
+        real_geom = mod.FlatlandGeometry
+
+        def counting_geom(shard):
+            construct_count[0] += 1
+            return real_geom(shard)
+
+        monkeypatch.setattr(mod, "FlatlandGeometry", counting_geom)
+
+        received = []
+
+        def fake_run(self, *, constant, geom=None, **kw):
+            received.append(geom)
+
+        monkeypatch.setattr(mod.SmallAngleSearch, "run", fake_run)
+
+        priorities = {e: [simple_shard], pi: [simple_shard]}
+        mod.SmallAngleSearchMod(priorities, use_LIReC=False).execute()
+
+        assert construct_count[0] == 1
+        assert len(received) == 2 and received[0] is received[1] is not None
+
+
+class TestParallelPerturbation:
+    """_best_inside_perturbation parallel branch (dummy pool + stubbed walk)."""
+
+    class _DummyPool:
+        def map(self, fn, args):
+            return [fn(a) for a in args]
+
+    def _ctx(self, shard):
+        geom = FlatlandGeometry(shard)
+        return dict(
+            geom=geom, start=shard.get_interior_point(), constant=e,
+            cmf_id="c", shard_id="s", shard_encoding_str="",
+            sink=lambda item: None, seen_trajectories={}, handler_cache={},
+        )
+
+    def test_parallel_picks_global_best(self, whole_space_shard, monkeypatch):
+        from dreamer.search.methods.flatland import parallel_eval as pe
+        from types import SimpleNamespace
+
+        def fake_pool_walk(args):
+            direction, constant, *_ = args
+            val = float(sum(int(v) for v in direction.values()))
+            dto = SimpleNamespace(delta_estimate={constant.name: val},
+                                  identified={constant.name: True})
+            return ("M", constant.value_sympy, dto)
+
+        monkeypatch.setattr(pe, "_pool_walk", fake_pool_walk)
+        method = SmallAngleSearch(whole_space_shard, e, use_LIReC=False)
+        ctx = self._ctx(whole_space_shard)
+        d = ctx["geom"].d_flat
+        z = np.array([5, 5], dtype=np.int64)[:d]
+        best_z, best_score = method._best_inside_perturbation(z, ctx, self._DummyPool())
+        # The best in-cone perturbation maximises the coord sum.
+        assert best_z is not None
+        assert best_score == max(
+            float(sum(int(v) for v in ctx["geom"].to_real_primitive(c).values()))
+            for c in ctx["geom"].perturbations(z, reduce=False)
+            if ctx["geom"].is_inside(c)
+        )
+
+    def test_parallel_all_failed_returns_none(self, whole_space_shard, monkeypatch):
+        from dreamer.search.methods.flatland import parallel_eval as pe
+        monkeypatch.setattr(pe, "_pool_walk", lambda args: pe.WalkError("boom"))
+        method = SmallAngleSearch(whole_space_shard, e, use_LIReC=False)
+        ctx = self._ctx(whole_space_shard)
+        d = ctx["geom"].d_flat
+        z = np.array([3, 0], dtype=np.int64)[:d]
+        best_z, best_score = method._best_inside_perturbation(z, ctx, self._DummyPool())
+        assert best_z is None and best_score == float("-inf")

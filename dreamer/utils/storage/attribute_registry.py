@@ -112,21 +112,24 @@ def _pq_jsonsafe_list(pq) -> list | None:
 AttributeComputer = Callable[["TrajectoryAttributesHandler"], Any]
 
 ATTRIBUTE_REGISTRY: Dict[str, AttributeComputer] = {
-    # ----- Tier-1 — core scalars, computed on the main thread. -----
+    # ----- Tier-1 — core scalars (cheap: walk-based), computed on the main thread. -----
     "delta":                       lambda h: float(h.delta()),
     "limit":                       lambda h: float(h.limit()),
-    "order":                       lambda h: int(h.order()),
-    "formula":                     lambda h: h.formula_str(),
     "identified":                  lambda h: bool(h.identified()),
     "p_vector":                    lambda h: _pq_jsonsafe_list(h.p_vector()),
     "q_vector":                    lambda h: _pq_jsonsafe_list(h.q_vector()),
     "traj_size":                   lambda h: int(h.traj_size()),
     "limit_rational":              lambda h: str(h.limit_rational()),
+
+    # ----- Tier-2 — heavier numerical / spectral / recurrence attributes. -----
+    # ``order`` / ``formula`` / ``relation`` / ``coeff_degrees`` / ``recurrence_coeffs``
+    # all build the symbolic ``LinearRecurrence`` (the dominant per-trajectory cost),
+    # so they are Tier-2: computed only when requested, not on the hot path.
+    "order":                       lambda h: int(h.order()),
+    "formula":                     lambda h: h.formula_str(),
     "coeff_degrees":               lambda h: _list_of_int(h.coeff_degrees()),
     "relation":                    lambda h: _list_of_str(h.relation()),
     "recurrence_coeffs":           lambda h: _list_of_str(h.recurrence_coeffs()),
-
-    # ----- Tier-2 — heavier numerical / spectral attributes. -----
     "eigenvalues":                 lambda h: _list_of_str(h.sorted_eigenvalues()),
     "eigenvalue_errors":           lambda h: _list_of_str(h.eigenvalue_errors()),
     "spectral_gap":                lambda h: _opt_float(h.spectral_gap()),

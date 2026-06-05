@@ -179,6 +179,29 @@ class TestPopulationInit:
 # 4. Repair
 # ---------------------------------------------------------------------------
 
+class TestBatchValidity:
+    def test_batch_mask_agrees_with_scalar(self, simple_shard):
+        """The vectorised validity mask must select exactly the genomes the
+        scalar _valid_genome would accept."""
+        method = GeneticSearch(simple_shard, e, use_LIReC=False)
+        geom = FlatlandGeometry(simple_shard)
+        rng = np.random.default_rng(0)
+        Z = rng.integers(-40, 40, size=(50, geom.d_flat)).astype(np.int64)
+        # Include the all-zero genome explicitly (must be rejected).
+        Z = np.vstack([Z, np.zeros((1, geom.d_flat), dtype=np.int64)])
+        batch = method._valid_genomes_mask(Z, geom)
+        scalar = np.array([method._valid_genome(z, geom) for z in Z])
+        assert np.array_equal(batch, scalar)
+
+    def test_init_population_all_valid(self, simple_shard):
+        """Population produced via the batched path is still all-valid."""
+        method = GeneticSearch(simple_shard, e, use_LIReC=False)
+        geom = FlatlandGeometry(simple_shard)
+        pop = method._init_population(geom, pop_size=6, shard_id="t", constant=e)
+        assert len(pop) == 6
+        assert all(method._valid_genome(z, geom) for z in pop)
+
+
 class TestRepair:
     def test_valid_genome_unchanged(self, simple_shard):
         method = GeneticSearch(simple_shard, e, use_LIReC=False)
@@ -322,7 +345,8 @@ class TestGeneticSearchModV2:
         run_calls = []
 
         def fake_run(self_, *, constant, cmf_id, shard_id, shard_encoding_str,
-                     sink, seen_trajectories, handler_cache=None):
+                     sink, seen_trajectories, handler_cache=None,
+                     geom=None, start=None, pool=None):
             run_calls.append(constant)
             if constant.name == "pi":
                 raise NoInitialPopulation(shard_id, constant)
@@ -336,6 +360,51 @@ class TestGeneticSearchModV2:
 
         names = sorted(c.name for c in run_calls)
         assert names == ["e", "pi"]  # both attempted; pi's error swallowed
+
+    def test_geometry_built_once_per_shard(self, simple_shard, monkeypatch, tmp_path):
+        """The flatland geometry (LLL/BKZ reduction) must be constructed once
+        per shard and reused across all of the shard's identified constants —
+        not rebuilt per constant."""
+        from dreamer.search.searchers.genetic_search_mod import GeneticSearchModV2
+        from dreamer.search.searchers import genetic_search_mod as mod_module
+        from dreamer.configs.system import sys_config
+        from dreamer import pi
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path), raising=False)
+        monkeypatch.setattr(sys_config, "NUM_BACKGROUND_WORKERS", 0, raising=False)
+        monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", (), raising=False)
+
+        construct_count = [0]
+        real_geom = mod_module.FlatlandGeometry
+
+        def counting_geom(shard):
+            construct_count[0] += 1
+            return real_geom(shard)
+
+        monkeypatch.setattr(mod_module, "FlatlandGeometry", counting_geom)
+
+        received_geoms = []
+
+        def fake_run(self_, *, constant, cmf_id, shard_id, shard_encoding_str,
+                     sink, seen_trajectories, handler_cache=None,
+                     geom=None, start=None, pool=None):
+            received_geoms.append(geom)
+
+        monkeypatch.setattr(mod_module.GeneticSearch, "run", fake_run)
+
+        # One shard identified for two constants.
+        priorities = {e: [simple_shard], pi: [simple_shard]}
+        searcher = GeneticSearchModV2(priorities, use_LIReC=False)
+        searcher.execute()
+
+        assert construct_count[0] == 1, (
+            f"FlatlandGeometry built {construct_count[0]} times for a 2-constant "
+            f"shard; expected exactly 1 (LLL/BKZ once per shard)"
+        )
+        # Both constants received the *same* geometry object, and it is non-None.
+        assert len(received_geoms) == 2
+        assert all(g is not None for g in received_geoms)
+        assert received_geoms[0] is received_geoms[1]
 
     def test_empty_searchables_is_noop(self, monkeypatch, tmp_path):
         from dreamer.search.searchers.genetic_search_mod import GeneticSearchModV2

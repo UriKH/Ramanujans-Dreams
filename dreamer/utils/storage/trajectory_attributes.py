@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import warnings
+from functools import lru_cache
 from typing import List, Optional, TYPE_CHECKING, Tuple
 
 import sympy as sp
@@ -104,6 +105,98 @@ def derive_cmf_and_shard_ids(shard) -> tuple[str, str, str]:
     return cmf_id, shard_id, shard_encoding_str
 
 
+def walk_depth_for(cmf, direction) -> int:
+    """Walk depth a trajectory in *direction* through *cmf* will use.
+
+    Mirrors the default depth resolution inside
+    :meth:`TrajectoryAttributesHandler.from_cmf` —
+    ``search.DEPTH_FROM_TRAJECTORY_LEN(||direction||, cmf.dim())`` — so callers
+    can predict the depth of a (not-yet-built) trajectory cheaply (no walk).
+    Used by :func:`tier1_config_fingerprint` to detect when a re-run requests a
+    different (e.g. deeper) walk than a cached record was computed with.
+    """
+    return int(search_config.DEPTH_FROM_TRAJECTORY_LEN(_trajectory_norm(direction), cmf.dim()))
+
+
+def tier1_config_fingerprint(walk_depth: int) -> str:
+    """Stable fingerprint of the config knobs that influence Tier-1 values.
+
+    Two trajectory computations with the same ``trajectory_id`` are
+    interchangeable **only** when every configuration input that feeds the
+    Tier-1 attributes (``delta``, ``identified``, ``limit``, ``p``/``q``) is
+    unchanged.  When any of them differs, a cached record is stale and must be
+    recomputed — this is what lets a later run with, e.g., a deeper walk
+    (``DEPTH_FROM_TRAJECTORY_LEN``) or a different walk style
+    (``DEFAULT_USES_INV_T``) override previously stored values instead of
+    silently reusing them.
+
+    The inputs, and the attributes they affect:
+
+    * ``walk_depth`` — the per-trajectory walk depth (passed in; derived from
+      ``DEPTH_FROM_TRAJECTORY_LEN`` and the trajectory length).  Affects every
+      walk-derived value: ``limit``, ``delta``, ``p``/``q``.
+    * ``DEFAULT_USES_INV_T`` (walk type 1 vs 2) — changes the walked matrix, so
+      affects all of the above.
+    * ``DEPTH_CONVERGENCE_THRESHOLD``, ``LIMIT_DIFF_ERROR_BOUND`` — the
+      convergence sanity check inside ``delta``.
+    * ``MIN_ESTIMATE_DENOMINATOR`` — the denominator floor in ``delta_sequence``.
+    * ``CACHE_ACCEPTANCE_THRESHOLD``, ``IDENTIFY_CHECK_THRESHOLD`` — the LIReC
+      identification / cache-acceptance tolerances (``identified``, ``p``/``q``).
+    * ``CONSTANT_NO_DIGITS_HIGH_RES`` / ``CONSTANT_NO_DIGITS_LOW_RES`` — the
+      precision the target constant is evaluated at for identification and δ.
+
+    :param walk_depth: The walk depth used (or to be used) for this trajectory.
+    :return: A 16-hex-char stable fingerprint string.
+    """
+    walk_type = 1 if search_config.DEFAULT_USES_INV_T else 2
+    # The result depends only on these config values + walk_depth, so memoise
+    # the JSON-serialise + hash step keyed on them.  Reading the config fresh on
+    # every call (cheap attribute lookups) and keying on the values means the
+    # cache stays correct under *any* config change — both ``config.configure``
+    # and a direct ``setattr`` (e.g. test monkeypatching) — with no manual
+    # invalidation, while still skipping the repeated dumps/hash on cache hits.
+    key = (
+        int(walk_depth),
+        walk_type,
+        tuple(float(x) for x in search_config.DEPTH_CONVERGENCE_THRESHOLD),
+        float(search_config.LIMIT_DIFF_ERROR_BOUND),
+        int(search_config.MIN_ESTIMATE_DENOMINATOR),
+        float(search_config.CACHE_ACCEPTANCE_THRESHOLD),
+        float(search_config.IDENTIFY_CHECK_THRESHOLD),
+        int(search_config.CONSTANT_NO_DIGITS_HIGH_RES),
+        int(search_config.CONSTANT_NO_DIGITS_LOW_RES),
+    )
+    return _tier1_fingerprint_for_key(key)
+
+
+@lru_cache(maxsize=8192)
+def _tier1_fingerprint_for_key(key: tuple) -> str:
+    """Memoised core of :func:`tier1_config_fingerprint`.
+
+    Reconstructs the exact same payload dict and serialisation the function
+    used before caching was added, so previously-stored fingerprints still
+    match (a cache that changed the bytes would force a spurious full recompute
+    of every cached trajectory).
+
+    :param key: Tuple of the Tier-1 config values, in a fixed order.
+    :return: A 16-hex-char stable fingerprint string.
+    """
+    (walk_depth, walk_type, depth_conv, limit_diff, min_denom,
+     cache_acc, identify_thr, digits_hi, digits_lo) = key
+    payload = {
+        "walk_depth": walk_depth,
+        "walk_type": walk_type,
+        "depth_convergence_threshold": list(depth_conv),
+        "limit_diff_error_bound": limit_diff,
+        "min_estimate_denominator": min_denom,
+        "cache_acceptance_threshold": cache_acc,
+        "identify_check_threshold": identify_thr,
+        "constant_digits_high_res": digits_hi,
+        "constant_digits_low_res": digits_lo,
+    }
+    return _stable_id(json.dumps(payload, sort_keys=True))
+
+
 def derive_trajectory_id(
     shard_id: str,
     cmf_name: str,
@@ -139,6 +232,7 @@ def build_trajectory_dto(
     start,
     direction,
     constants=None,
+    compute_recurrence: bool = False,
 ) -> "TrajectoryDTO":
     """Build a ``TrajectoryDTO`` carrying Tier-1 attributes from a handler.
 
@@ -164,6 +258,13 @@ def build_trajectory_dto(
         Iterable of ``sympy.Expr`` objects to evaluate.  When ``None``,
         falls back to ``handler.constant()`` (backward-compatible path for
         single-constant callers).
+    compute_recurrence:
+        When ``True``, populate ``recurrence_relation`` (``formula_str``) and
+        ``recurrence_order`` (``order``).  Default ``False`` because building
+        the symbolic ``LinearRecurrence`` dominates the per-trajectory cost
+        (~80% in profiling) and is rarely needed on the hot search/analysis
+        path.  Request it through the Tier-2 ``"formula"`` / ``"order"``
+        attributes instead when only some trajectories need it.
     """
     from dreamer.utils.storage.dtos import TrajectoryDTO  # lazy import avoids circular dep
 
@@ -207,20 +308,27 @@ def build_trajectory_dto(
         q_dict[c_name] = tuple(_pq_to_jsonsafe(x) for x in q) if q else None
         identified_dict[c_name] = bool(ided)
 
+    # Recurrence (formula + order) builds the symbolic LinearRecurrence — the
+    # dominant per-trajectory cost — so compute it only when explicitly asked.
+    recurrence_relation = handler.formula_str() if compute_recurrence else None
+    recurrence_order = handler.order() if compute_recurrence else None
+
     return TrajectoryDTO(
         trajectory_id=trajectory_id,
         cmf_id=cmf_id,
         shard_id=shard_id,
         start_point=start_t,
         direction=dir_t,
-        recurrence_relation=handler.formula_str(),
-        recurrence_order=handler.order(),
+        recurrence_relation=recurrence_relation,
+        recurrence_order=recurrence_order,
         limit_value=float(handler.limit()),
         delta_estimate=delta_dict,
         p_vector=p_dict if p_dict else None,
         q_vector=q_dict if q_dict else None,
         identified=identified_dict,
         walk_type=int(handler.walk_type()),
+        walk_depth=int(handler.walk_depth()),
+        config_fingerprint=tier1_config_fingerprint(handler.walk_depth()),
     )
 
 
@@ -295,10 +403,10 @@ class TrajectoryAttributesHandler:
         See ``__init__`` for ``constant``, ``walk_type``, ``searchable``.
         """
         tmat = cmf.trajectory_matrix(trajectory, start_point)
-        if hasattr(tmat, 'applyfunc'):
-            tmat = tmat.applyfunc(sp.cancel)
-        elif hasattr(tmat, 'matrix'):  # If tmat wraps a sympy matrix
-            tmat.matrix = tmat.matrix.applyfunc(sp.cancel)
+        # sp.cancel() intentionally NOT called here: the walk (numerical mpmath) and
+        # LIReC identification (numerical p/q) work correctly on the unsimplified form.
+        # Simplification is done lazily inside linear_recurrence() — only when symbolic
+        # Tier-2 attributes (eigenvalues, kamidelta, …) are actually requested.
         if walk_depth is None:
             walk_depth = search_config.DEPTH_FROM_TRAJECTORY_LEN(
                 _trajectory_norm(trajectory), cmf.dim(),
@@ -320,12 +428,15 @@ class TrajectoryAttributesHandler:
         return self._utility_cache[key]
 
     def clear_cache(self):
+        """Drop all cached core (Tier-1/2) attribute results."""
         self._cache.clear()
 
     def clear_utility_cache(self):
+        """Drop all cached utility results (walks, p/q vectors)."""
         self._utility_cache.clear()
 
     def computed_attributes(self) -> list:
+        """:return: Names of the core attributes computed and cached so far."""
         return list(self._cache.keys())
 
     # ==================================================================
@@ -386,7 +497,17 @@ class TrajectoryAttributesHandler:
         All downstream attributes (recurrence_matrix, kamidelta, asymptotics)
         are methods on this object.
         """
-        return self._get("linear_recurrence", lambda: LinearRecurrence(self.trajectory_matrix()))
+        def _build():
+            tmat = self.trajectory_matrix()
+            # Simplify the symbolic form here (lazily) so that the companion matrix
+            # and recurrence coefficients are extracted from a fully-reduced expression.
+            # This is the only place sp.cancel() is needed; from_cmf skips it for speed.
+            if hasattr(tmat, 'applyfunc'):
+                tmat = tmat.applyfunc(sp.cancel)
+            elif hasattr(tmat, 'matrix'):
+                tmat.matrix = tmat.matrix.applyfunc(sp.cancel)
+            return LinearRecurrence(tmat)
+        return self._get("linear_recurrence", _build)
 
     # ==================================================================
     #  COMPANION MATRIX
@@ -522,6 +643,10 @@ class TrajectoryAttributesHandler:
     def walk_type(self) -> int:
         """Return the walk type (1 or 2) for this handler."""
         return self._walk_type
+
+    def walk_depth(self) -> int:
+        """Return the walk depth this handler walks the trajectory matrix to."""
+        return self._depth
 
     def _effective_walk_values(self, depth: Optional[int] = None, walk_matrix: Optional[sp.Matrix] = None) -> Optional[list]:
         """Return the column of the (walked-and-transformed) matrix used for p/q projection.

@@ -26,10 +26,12 @@ from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
+from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
+from dreamer.utils.ui.tqdm_config import SmartTQDM
 
 search_config = config.search
 
@@ -38,6 +40,10 @@ class NoInitialPopulation(Exception):
     """Raised when no in-cone seed genome can be found for the shard."""
 
     def __init__(self, shard_id: str, constant: Constant):
+        """
+        :param shard_id: Identifier of the shard with no in-cone seed.
+        :param constant: Constant whose population could not be seeded.
+        """
         self.shard_id = shard_id
         self.constant = constant
         super().__init__(
@@ -145,17 +151,37 @@ class GeneticSearch(SearchMethod):
         sink: Callable,
         seen_trajectories: dict,
         handler_cache: Optional[Dict[str, "TrajectoryAttributesHandler"]] = None,
+        geom: Optional[FlatlandGeometry] = None,
+        start=None,
+        pool=None,
     ) -> None:
         """Run the GA for a single constant, emitting DTOs to *sink*.
 
+        :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`
+            (see :func:`parallel_eval.make_eval_pool`).  When provided, each
+            generation's batch of genuinely-new trajectory walks is dispatched
+            to worker processes; the main process retains ownership of the
+            ``sink`` and the ``seen_trajectories`` / ``handler_cache`` dicts.
+            ``None`` evaluates serially (or via the legacy thread path).
+
+        :param geom: Pre-built :class:`FlatlandGeometry` for the shard.  The
+            flatland conditioning (integer nullspace + LLL/BKZ reduction) is
+            shard-dependent but **constant-independent**, so when a shard is
+            searched for several constants the caller builds the geometry once
+            and passes it in to avoid repeating the reduction per constant.
+            ``None`` builds it here (standalone / single-constant path).
+        :param start: Pre-fetched interior start :class:`Position` for the
+            shard (also constant-independent).  ``None`` fetches it here.
         :raises NoInitialPopulation: if no in-cone seed genome can be built.
         """
         if handler_cache is None:
             handler_cache = {}
 
         shard: Shard = self.space
-        geom = FlatlandGeometry(shard)
-        start = shard.get_interior_point()
+        if geom is None:
+            geom = FlatlandGeometry(shard)
+        if start is None:
+            start = shard.get_interior_point()
 
         eval_ctx = dict(
             geom=geom,
@@ -186,14 +212,14 @@ class GeneticSearch(SearchMethod):
 
         population = self._init_population(geom, pop_size, shard_id, constant)
 
-        # Evaluate initial population; delta=None entries are filled below.
-        deltas = [self._eval_genome(z, eval_ctx) for z in population]
+        # Evaluate initial population in parallel (Fix C).
+        deltas = self._eval_population(population, eval_ctx, pool)
 
         last_best = None
         unchanged_count = 0
         max_unchanged = max(int(0.1 * generations), 5)
 
-        for _ in range(generations):
+        for _ in SmartTQDM(range(generations), desc='Evolving ...', **config.system.TQDM_CONFIG):
             # Sort by fitness descending.
             ranked = sorted(zip(deltas, population), key=lambda p: p[0], reverse=True)
             deltas, population = zip(*ranked) if ranked else ([], [])
@@ -259,20 +285,59 @@ class GeneticSearch(SearchMethod):
                     next_deltas.append(None)
 
             population = next_pop
-            # Evaluate new children (elites already have cached deltas).
-            for i in range(len(population)):
-                if next_deltas[i] is None:
-                    next_deltas[i] = self._eval_genome(population[i], eval_ctx)
+            # Evaluate new children in parallel (elites already have cached deltas).
+            children = [population[i] for i in range(len(population)) if next_deltas[i] is None]
+            child_indices = [i for i in range(len(population)) if next_deltas[i] is None]
+            child_deltas = self._eval_population(children, eval_ctx, pool)
+            for idx, delta in zip(child_indices, child_deltas):
+                next_deltas[idx] = delta
             deltas = next_deltas
 
         # Final evaluation pass.
-        for i, z in enumerate(population):
-            if deltas[i] is None:
-                deltas[i] = self._eval_genome(z, eval_ctx)
+        unevaluated = [(i, z) for i, z in enumerate(population) if deltas[i] is None]
+        if unevaluated:
+            idxs, zs = zip(*unevaluated)
+            for idx, delta in zip(idxs, self._eval_population(list(zs), eval_ctx, pool)):
+                deltas[idx] = delta
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _valid_genomes_mask(self, Z: np.ndarray, geom: FlatlandGeometry) -> np.ndarray:
+        """
+        Vectorised validity test for a stack of candidate genomes.
+
+        A genome is valid iff it is non-zero, in-cone, and within the
+        trajectory-length cap — identical to :meth:`_valid_genome`, but
+        evaluated for every row of *Z* in one batched NumPy pass (the cone
+        membership and the shard-space norm are single matmuls over the whole
+        stack via ``geom.is_inside_many`` / ``geom.traj_norm_many``).
+
+        :param Z: Integer array of shape ``(k, d_flat)`` — one genome per row.
+        :param geom: Flatland geometry for the current shard.
+        :return: Boolean array of length ``k``; ``True`` where the row is valid.
+        """
+        Z = np.atleast_2d(np.asarray(Z, dtype=np.int64))
+        if Z.size == 0:
+            return np.zeros(Z.shape[0], dtype=bool)
+        nonzero = np.any(Z != 0, axis=1)
+        inside = geom.is_inside_many(Z)
+        within = geom.traj_norm_many(Z, search_config.GA_TRAJ_NORM) <= search_config.GA_MAX_TRAJ_LEN
+        return nonzero & inside & within
+
+    def _valid_genome(self, z: np.ndarray, geom: FlatlandGeometry) -> bool:
+        """
+        Return True iff *z* is a valid (in-cone, within traj-length cap) genome.
+
+        Thin scalar wrapper over :meth:`_valid_genomes_mask` so the single- and
+        batch-genome paths can never diverge.
+
+        :param z: Flatland integer vector candidate.
+        :param geom: Flatland geometry for the current shard.
+        :return: True if the genome is acceptable for evaluation.
+        """
+        return bool(self._valid_genomes_mask(np.asarray(z)[None, :], geom)[0])
 
     def _init_population(
         self,
@@ -281,21 +346,33 @@ class GeneticSearch(SearchMethod):
         shard_id: str,
         constant: Constant,
     ) -> List[np.ndarray]:
-        """Build an initial population of in-cone flatland genomes."""
+        """
+        Build an initial population of valid flatland genomes.
+
+        :param geom: Flatland geometry for the current shard.
+        :param pop_size: Target population size.
+        :param shard_id: Shard identifier (used in exception message).
+        :param constant: Constant being optimised (used in exception message).
+        :raises NoInitialPopulation: if no valid in-cone genome can be found.
+        :return: List of ``pop_size`` valid flatland genomes.
+        """
         orchestrator = ShardSamplingOrchestrator(self.space)
-        # Oversample: request more than pop_size to account for out-of-cone.
         n_sample = max(pop_size * 3, 10)
         trajectories = orchestrator.sample_trajectories(n_sample)
 
         population: List[np.ndarray] = []
-        for t in trajectories:
-            z = geom.to_flatland(t)
-            if not np.any(z):
-                continue
-            if geom.is_inside(z):
-                population.append(z)
-            if len(population) >= pop_size:
-                break
+        traj_list = list(trajectories)
+        if traj_list:
+            # Convert all sampled trajectories to flatland and validate them in
+            # a single batched NumPy pass (one matmul for cone membership, one
+            # for the shard-space norm) instead of a per-genome scalar check.
+            Z = np.stack([geom.to_flatland(t) for t in traj_list])
+            mask = self._valid_genomes_mask(Z, geom)
+            for z, ok in zip(Z, mask):
+                if ok:
+                    population.append(np.array(z))
+                    if len(population) >= pop_size:
+                        break
 
         # Top up with small random perturbations of found seeds when short.
         attempts = 0
@@ -311,7 +388,7 @@ class GeneticSearch(SearchMethod):
                 refine_prob=0.0,
                 refine_coord_prob=0.0,
             )
-            if np.any(cand) and geom.is_inside(cand):
+            if self._valid_genome(cand, geom):
                 population.append(cand)
 
         if not population:
@@ -324,20 +401,66 @@ class GeneticSearch(SearchMethod):
         return population[:pop_size]
 
     def _repair(self, z: np.ndarray, geom: FlatlandGeometry) -> np.ndarray:
-        """Return *z* if in-cone, else resample a valid genome from the shard."""
-        if geom.is_inside(z):
+        """
+        Return *z* if valid (in-cone and within traj-length cap), else resample.
+
+        :param z: Candidate genome to validate.
+        :param geom: Flatland geometry for the current shard.
+        :return: A valid genome (original or resampled replacement).
+        """
+        if self._valid_genome(z, geom):
             return z
         orchestrator = ShardSamplingOrchestrator(self.space)
         for _ in range(search_config.GA_MAX_RETRIES * 3):
-            trajectories = orchestrator.sample_trajectories(5)
-            for t in trajectories:
-                cand = geom.to_flatland(t)
-                if np.any(cand) and geom.is_inside(cand):
-                    return cand
-        # Fall back to the zero-ish original; downstream eval will handle.
-        return z
+            trajectories = list(orchestrator.sample_trajectories(5))
+            if not trajectories:
+                continue
+            Z = np.stack([geom.to_flatland(t) for t in trajectories])
+            mask = self._valid_genomes_mask(Z, geom)
+            valid_idx = np.nonzero(mask)[0]
+            if valid_idx.size:
+                return np.array(Z[valid_idx[0]])
+        return z  # Fall back; _eval_genome returns −∞ for invalid genomes
 
     def _eval_genome(self, z: np.ndarray, eval_ctx: dict) -> float:
-        """Evaluate a genome, returning δ (−∞ if invalid)."""
+        """
+        Evaluate a single genome, returning δ (−∞ for invalid genomes).
+
+        :param z: Flatland genome vector.
+        :param eval_ctx: Evaluation context dict (forwarded to evaluate_in_flatland).
+        :return: δ value.
+        """
+        geom: FlatlandGeometry = eval_ctx["geom"]
+        if not self._valid_genome(z, geom):
+            return float("-inf")
         delta, _ = evaluate_in_flatland(z, **eval_ctx)
         return delta
+
+    def _eval_population(
+        self, population: List[np.ndarray], eval_ctx: dict, pool=None
+    ) -> List[float]:
+        """
+        Evaluate a batch of genomes, optionally in parallel via a process pool.
+
+        :param population: List of flatland genome vectors to evaluate.
+        :param eval_ctx: Evaluation context dict (forwarded to evaluate_in_flatland).
+        :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`.
+            When provided and the batch has more than one genome, genuinely-new
+            walks are dispatched to worker processes (see
+            :func:`flatland.parallel_eval.evaluate_batch`); otherwise the batch
+            is evaluated serially in this process.
+        :return: List of δ values in the same order as *population*.
+        """
+        if not population:
+            return []
+        if pool is not None and len(population) > 1:
+            # Parallel path: the shared evaluator dispatches genuinely-new walks
+            # to the per-shard process pool; the main process keeps ownership of
+            # the sink / seen_trajectories / handler_cache.  GA only needs δ.
+            geom = eval_ctx["geom"]
+            results = evaluate_batch(
+                population, eval_ctx=eval_ctx, pool=pool,
+                valid_fn=lambda z: self._valid_genome(z, geom),
+            )
+            return [delta for delta, _ in results]
+        return [self._eval_genome(z, eval_ctx) for z in population]

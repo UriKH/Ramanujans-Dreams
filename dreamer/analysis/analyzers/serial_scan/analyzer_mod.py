@@ -41,6 +41,8 @@ from dreamer.utils.storage.trajectory_attributes import (
     build_trajectory_dto,
     derive_cmf_and_shard_ids,
     derive_trajectory_id,
+    tier1_config_fingerprint,
+    walk_depth_for,
 )
 from dreamer.utils.multi_processing import load_seen_trajectories
 from dreamer.search.methods.hedgehog_scan import SerialSearcher
@@ -110,7 +112,7 @@ class AnalyzerModV1(AnalyzerModScheme):
                 Logger.Levels.message,
             ).log()
 
-            for shard in shards:
+            for i, shard in enumerate(shards):
                 cmf_id, shard_id, encoding_str = derive_cmf_and_shard_ids(shard)
 
                 if shard_id in seen_shard_ids:
@@ -140,12 +142,12 @@ class AnalyzerModV1(AnalyzerModScheme):
                             bd = per_const_best[c]
                             bd_str = f'{bd:.4f}' if bd is not None else 'N/A'
                             Logger(
-                                f"Shard {shard_id[:8]}…  {c.name}  best_delta={bd_str}",
+                                f"Shard {i+1} in {cmf_id} - searching {c.name}: best_delta={bd_str}",
                                 Logger.Levels.info,
                             ).log()
                         else:
                             Logger(
-                                f"Shard {shard_id[:8]}…  {c.name}  not identified",
+                                f"Shard {i+1} in {cmf_id} - searching {c.name}: not identified",
                                 Logger.Levels.info,
                             ).log()
 
@@ -226,9 +228,15 @@ class AnalyzerModV1(AnalyzerModScheme):
                     shard_id, shard.cmf_name, encoding_str, start_t, dir_t,
                 )
 
+                # Reuse a cached record only when it was computed under the same
+                # configuration — a changed walk depth / walk type / identification
+                # tolerance makes the stored δ stale and forces recomputation.
+                current_fp = tier1_config_fingerprint(walk_depth_for(shard.cmf, traj))
+
                 cached = seen_trajectories.get(tid)
                 if (
                     cached is not None
+                    and cached.get("config_fingerprint") == current_fp
                     and "delta_estimate" in cached
                     and isinstance(cached["delta_estimate"], dict)
                     and "identified" in cached

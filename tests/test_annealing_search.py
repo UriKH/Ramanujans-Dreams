@@ -199,6 +199,7 @@ class TestMetropolis:
         monkeypatch.setattr(config.search, "ANNEAL_MAX_ITERS", 3, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_TMIN", 0.0, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_MAX_DOUBLINGS", 5, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_TOTAL_STEPS", 10_000, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_TABU_SIZE", 100, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_RESERVOIR_SIZE", 1, raising=False)
 
@@ -325,6 +326,7 @@ class TestSAStoppingConditions:
         monkeypatch.setattr(config.search, "ANNEAL_MAX_ITERS", 3, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_TMIN", 0.0, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_MAX_DOUBLINGS", 10, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_TOTAL_STEPS", 10_000, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_TABU_SIZE", 100, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_RESERVOIR_SIZE", 1, raising=False)
 
@@ -347,6 +349,7 @@ class TestSAStoppingConditions:
         monkeypatch.setattr(config.search, "ANNEAL_SCHEDULE", "linear", raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_MAX_ITERS", 1000, raising=False)  # no iter limit
         monkeypatch.setattr(config.search, "ANNEAL_MAX_DOUBLINGS", 10, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_TOTAL_STEPS", 10_000, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_TABU_SIZE", 100, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_RESERVOIR_SIZE", 1, raising=False)
 
@@ -363,7 +366,131 @@ class TestSAStoppingConditions:
 
 
 # ---------------------------------------------------------------------------
-# 5. Module: orchestration + NoInitialIdentification caught
+# 7. Total-steps ceiling and tabu-clear-on-reseed
+# ---------------------------------------------------------------------------
+
+class TestSAStallFixes:
+    def test_total_steps_ceiling_fires(self, whole_space_shard, monkeypatch):
+        """ANNEAL_MAX_TOTAL_STEPS must break the loop before it runs forever.
+
+        Scenario: all neighbours always have lower delta AND random.random()=1
+        so Metropolis never accepts → iter_left stays at max_iters. Without
+        the ceiling the loop would run indefinitely; with it, it must stop.
+        """
+        import dreamer.search.methods.annealing.annealing_scan as ann
+        from dreamer.extraction.samplers import ShardSamplingOrchestrator
+
+        method = SimulatedAnnealingSearch(whole_space_shard, e, use_LIReC=False)
+        call_count = [0]
+
+        def fake_eval(z, **kw):
+            call_count[0] += 1
+            z = np.asarray(z)
+            if list(z[:2]) == [1, 0]: return 0.9, True
+            return 0.0, True  # neighbours always worse → rejections
+
+        monkeypatch.setattr(ann, "evaluate_in_flatland", fake_eval)
+        monkeypatch.setattr(
+            ShardSamplingOrchestrator, "sample_trajectories",
+            lambda self, n: {Position({s: sp.Integer(1) if i == 0 else sp.Integer(0)
+                                       for i, s in enumerate(whole_space_shard.symbols)})},
+        )
+        import random as _random
+        monkeypatch.setattr(_random, "random", lambda: 1.0)  # never accept probabilistically
+        monkeypatch.setattr(config.search, "ANNEAL_T0", 1.0, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_TMIN", 0.0, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_ITERS", 1_000, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_TOTAL_STEPS", 50, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_DOUBLINGS", 100, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_TABU_SIZE", 100, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_RESERVOIR_SIZE", 1, raising=False)
+
+        method.run(constant=e, cmf_id="", shard_id="t", shard_encoding_str="",
+                   sink=lambda x: None, seen_trajectories={})
+        # The ceiling is 50 total steps. iter_left never decrements (no accepts).
+        # The loop must have exited via the ceiling, not hung forever.
+        # Each step evaluates ~4 neighbours; total evals ≤ 50*4+2 = 202.
+        assert call_count[0] <= 250, (
+            f"Loop ran {call_count[0]} evals; ceiling should have stopped it sooner."
+        )
+
+    def test_tabu_cleared_on_reseed(self, whole_space_shard, monkeypatch):
+        """After reseeding, the tabu list must contain only the new seed position.
+
+        If the old tabu entries were kept, the reseeded position's neighbours
+        would be blocked and the search would immediately stall again.
+        """
+        import dreamer.search.methods.annealing.annealing_scan as ann
+        from dreamer.extraction.samplers import ShardSamplingOrchestrator
+
+        # Track tabu list size at the first evaluation AFTER a reseed.
+        tabu_sizes_at_eval = []
+        reseed_count = [0]
+
+        # We need to intercept from inside the method. We'll monkeypatch _try_reseed
+        # so we can observe that the tabu is cleared after it returns.
+        # Instead: observe via call_count — if tabu is NOT cleared, the reseeded
+        # position's neighbours are all blocked → no evaluations after reseed.
+        # If tabu IS cleared, we'll see evaluations of the seed's neighbours.
+
+        neighbour_evals_after_reseed = [0]
+        seed_returned = [False]
+
+        def fake_eval(z, **kw):
+            z = np.asarray(z)
+            if list(z[:2]) == [1, 0]:
+                if seed_returned[0]:
+                    # This is a re-evaluation after reseed (initial eval of fresh cur_z).
+                    seed_returned[0] = False
+                return 0.5, True
+            # Any neighbour evaluated after reseed means tabu was cleared.
+            if reseed_count[0] > 0:
+                neighbour_evals_after_reseed[0] += 1
+            return 0.0, True  # neighbours worse → rejections
+
+        monkeypatch.setattr(ann, "evaluate_in_flatland", fake_eval)
+        monkeypatch.setattr(
+            ShardSamplingOrchestrator, "sample_trajectories",
+            lambda self, n: {Position({s: sp.Integer(1) if i == 0 else sp.Integer(0)
+                                       for i, s in enumerate(whole_space_shard.symbols)})},
+        )
+
+        original_try_reseed = SimulatedAnnealingSearch._try_reseed
+
+        def counting_reseed(self_, geom, eval_ctx, shard_id, constant):
+            result = original_try_reseed(self_, geom, eval_ctx, shard_id, constant)
+            if result is not None:
+                reseed_count[0] += 1
+                seed_returned[0] = True
+            return result
+
+        monkeypatch.setattr(SimulatedAnnealingSearch, "_try_reseed", counting_reseed)
+
+        import random as _random
+        monkeypatch.setattr(_random, "random", lambda: 1.0)  # never accept probabilistically
+        monkeypatch.setattr(config.search, "ANNEAL_T0", 1.0, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_TMIN", 0.0, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_ITERS", 500, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_TOTAL_STEPS", 200, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_DOUBLINGS", 2, raising=False)  # reseed quickly
+        monkeypatch.setattr(config.search, "ANNEAL_TABU_SIZE", 200, raising=False)  # large → would deadlock without clear
+        monkeypatch.setattr(config.search, "ANNEAL_RESERVOIR_SIZE", 1, raising=False)
+
+        method = SimulatedAnnealingSearch(whole_space_shard, e, use_LIReC=False)
+        method.run(constant=e, cmf_id="", shard_id="t", shard_encoding_str="",
+                   sink=lambda x: None, seen_trajectories={})
+
+        # If at least one reseed happened and neighbour evaluations followed it,
+        # the tabu clear is working (unblocked the neighbours of the reseeded position).
+        if reseed_count[0] > 0:
+            assert neighbour_evals_after_reseed[0] > 0, (
+                f"Reseed happened {reseed_count[0]} time(s) but no neighbour was "
+                f"evaluated afterward — tabu was NOT cleared on reseed."
+            )
+
+
+# ---------------------------------------------------------------------------
+# 8. Module: orchestration + NoInitialIdentification caught
 # ---------------------------------------------------------------------------
 
 class TestSimulatedAnnealingMod:
@@ -382,7 +509,8 @@ class TestSimulatedAnnealingMod:
         run_calls = []
 
         def fake_run(self_, *, constant, cmf_id, shard_id, shard_encoding_str,
-                     sink, seen_trajectories, handler_cache=None):
+                     sink, seen_trajectories, handler_cache=None,
+                     geom=None, start=None, pool=None):
             run_calls.append(constant)
             if constant.name == "pi":
                 raise NoInitialIdentification(shard_id, constant)
@@ -396,6 +524,44 @@ class TestSimulatedAnnealingMod:
 
         names = sorted(c.name for c in run_calls)
         assert names == ["e", "pi"]  # both attempted; pi's error swallowed
+
+    def test_geometry_built_once_per_shard(self, simple_shard, monkeypatch, tmp_path):
+        """FlatlandGeometry (LLL/BKZ) is constructed once per shard and reused
+        across the shard's identified constants."""
+        from dreamer.search.searchers.annealing_mod import SimulatedAnnealingMod
+        from dreamer.search.searchers import annealing_mod as mod_module
+        from dreamer.configs.system import sys_config
+        from dreamer import pi
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path), raising=False)
+        monkeypatch.setattr(sys_config, "NUM_BACKGROUND_WORKERS", 0, raising=False)
+        monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", (), raising=False)
+        # Serial (no pool) so the test spawns no subprocesses.
+        monkeypatch.setattr(config.search, "ANNEAL_NUM_EVAL_WORKERS", 0, raising=False)
+
+        construct_count = [0]
+        real_geom = mod_module.FlatlandGeometry
+
+        def counting_geom(shard):
+            construct_count[0] += 1
+            return real_geom(shard)
+
+        monkeypatch.setattr(mod_module, "FlatlandGeometry", counting_geom)
+
+        received = []
+
+        def fake_run(self_, *, constant, cmf_id, shard_id, shard_encoding_str,
+                     sink, seen_trajectories, handler_cache=None,
+                     geom=None, start=None, pool=None):
+            received.append(geom)
+
+        monkeypatch.setattr(mod_module.SimulatedAnnealingSearch, "run", fake_run)
+
+        priorities = {e: [simple_shard], pi: [simple_shard]}
+        SimulatedAnnealingMod(priorities, use_LIReC=False).execute()
+
+        assert construct_count[0] == 1
+        assert len(received) == 2 and received[0] is received[1] is not None
 
     def test_empty_searchables_is_noop(self, monkeypatch, tmp_path):
         from dreamer.search.searchers.annealing_mod import SimulatedAnnealingMod

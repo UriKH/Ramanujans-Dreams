@@ -38,11 +38,22 @@ class FlatlandGeometry:
         if shard.is_whole_space or shard.A is None:
             self.Z_reduced = np.eye(d_orig, dtype=np.int64)
             self.B_reduced = np.empty((0, d_orig))
+            # No constraints → every direction is inside the cone.
+            self._M = None
         else:
             conditioner = HyperSpaceConditioner(np.asarray(shard.A, dtype=np.float64))
             self.Z_reduced, self.B_reduced, _ = conditioner.process()
+            # Cone-membership matrix in flatland: a flatland direction ``z`` is
+            # inside iff ``A @ (Z_reduced @ z) <= 0`` ⇔ ``M @ z <= 0`` where
+            # ``M = A @ Z_reduced``.  Precomputed once so membership is a pure
+            # NumPy matmul (no per-call sympy ``Position``).
+            A = np.asarray(shard.A, dtype=np.float64)
+            self._M = A @ self.Z_reduced.astype(np.float64)
 
         self.d_flat = self.Z_reduced.shape[1]
+
+    #: Tolerance for the ``M @ z <= 0`` cone test (matches ``is_valid_trajectory``).
+    _CONE_TOL = 1e-9
 
     # ------------------------------------------------------------------
     # Conversions
@@ -55,6 +66,23 @@ class FlatlandGeometry:
         :return: Position over the shard's symbols (sympy Integers).
         """
         v = self.Z_reduced @ np.asarray(z, dtype=np.int64)
+        return Position({sym: sp.Integer(int(val)) for sym, val in zip(self.symbols, v)})
+
+    def to_real_primitive(self, z: np.ndarray) -> Position:
+        """
+        Map a flatland direction ``z`` to its **GCD-reduced (primitive) ray** in
+        real space.
+
+        δ is a property of the trajectory's *ray angle*, so attribute computation
+        should always walk the primitive direction: scaled / doubled copies of a
+        direction (e.g. ``z`` and ``2z``) collapse to the same real ray and hence
+        the same cached walk.
+
+        :param z: Integer flatland coordinate vector (length ``d_flat``).
+        :return: Position over the shard's symbols for the primitive real ray.
+        """
+        v = self.Z_reduced @ np.asarray(z, dtype=np.int64)
+        v = reduce_to_primitive(v)
         return Position({sym: sp.Integer(int(val)) for sym, val in zip(self.symbols, v)})
 
     def to_flatland(self, v: Position) -> np.ndarray:
@@ -77,12 +105,78 @@ class FlatlandGeometry:
     # Membership + perturbation
     # ------------------------------------------------------------------
 
+    def traj_norm(self, z: np.ndarray, norm: str = "linf") -> float:
+        """
+        Compute the trajectory length of flatland vector ``z`` in real shard space.
+
+        The real-space direction is always GCD-reduced (primitive) first so that scaled
+        copies ``z`` and ``2z`` return the same norm.
+
+        :param z: Integer flatland coordinate vector.
+        :param norm: Which norm to use:
+            ``'linf'`` — max absolute coordinate (default; tightest bound on
+                ``trajectory_matrix()`` cost, which scales with Σ|coords|);
+            ``'l1'``  — sum of absolute coordinates (equals the exact symbolic-
+                multiplication count inside ``trajectory_matrix()``);
+            ``'l2'``  — Euclidean norm (used by ``depth_from_len``).
+        :return: Non-negative float.
+        """
+        v = self.Z_reduced @ np.asarray(z, dtype=np.int64)
+        v = reduce_to_primitive(v).astype(np.float64)
+        if norm == "linf":
+            return float(np.max(np.abs(v)))
+        if norm == "l1":
+            return float(np.sum(np.abs(v)))
+        # default / "l2"
+        return float(np.linalg.norm(v))
+
+    def traj_norm_many(self, Z: np.ndarray, norm: str = "l2") -> np.ndarray:
+        """
+        Batch version of :meth:`traj_norm` — real shard-space length of many
+        flatland directions at once.
+
+        Each row of ``Z`` is mapped to real space (``Z_reduced @ z``) and
+        GCD-reduced to its primitive ray (so scaled copies share a length, and
+        the length matches the trajectory actually walked, which is the
+        primitive ray), then measured with the requested ``norm``.
+
+        :param Z: Integer array of shape ``(k, d_flat)`` — one direction per row.
+        :param norm: ``'linf'`` | ``'l1'`` | ``'l2'`` (see :meth:`traj_norm`).
+        :return: Float array of length ``k`` with the shard-space lengths.
+        """
+        Z = np.asarray(Z, dtype=np.int64)
+        V = (self.Z_reduced.astype(np.int64) @ Z.T).T  # (k, d_orig)
+        g = np.gcd.reduce(np.abs(V), axis=1)
+        g[g == 0] = 1
+        V = (V // g[:, None]).astype(np.float64)
+        if norm == "linf":
+            return np.max(np.abs(V), axis=1)
+        if norm == "l1":
+            return np.sum(np.abs(V), axis=1)
+        return np.linalg.norm(V, axis=1)
+
     def is_inside(self, z: np.ndarray) -> bool:
         """
         :param z: Integer flatland direction.
         :return: True iff the real direction stays inside the shard cone.
         """
-        return self.shard.is_valid_trajectory(self.to_real(z))
+        if self._M is None:
+            return True
+        z = np.asarray(z, dtype=np.float64)
+        return bool(np.all(self._M @ z <= self._CONE_TOL))
+
+    def is_inside_many(self, Z: np.ndarray) -> np.ndarray:
+        """
+        Batch cone-membership test for many flatland directions at once.
+
+        :param Z: Integer array of shape ``(k, d_flat)`` — one direction per row.
+        :return: Boolean array of length ``k``; ``True`` where the row is inside
+            the shard cone.
+        """
+        Z = np.asarray(Z, dtype=np.float64)
+        if self._M is None:
+            return np.ones(Z.shape[0], dtype=bool)
+        return np.all((self._M @ Z.T) <= self._CONE_TOL, axis=0)
 
     def perturbations(self, z: np.ndarray, *, reduce: bool = True) -> Iterator[np.ndarray]:
         """

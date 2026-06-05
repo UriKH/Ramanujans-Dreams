@@ -15,7 +15,9 @@ from typing import Dict, List, Set
 from dreamer.configs import config
 from dreamer.configs.system import sys_config
 from dreamer.extraction.shard import Shard
+from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.search.methods.genetic_search import GeneticSearch, NoInitialPopulation
+from dreamer.search.methods.genetic_search.parallel_eval import make_eval_pool
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.module import CatchErrorInModule
@@ -90,26 +92,47 @@ class GeneticSearchModV2(SearcherModScheme):
 
         handler_cache: dict = {}
 
-        with worker_pool(
-            num_workers=num_workers,
-            worker_fn=compute_tier2_for_item,
-            writer_fn=write_jsonl_line,
-            output_path=output_path,
-            config_overrides=config_overrides,
-            parallel=bool(search_config.TIER2_ATTRIBUTES),
-        ) as push:
-            for const in identified_consts:
-                method = GeneticSearch(shard, const, use_LIReC=self.use_LIReC)
-                try:
-                    method.run(
-                        constant=const,
-                        cmf_id=cmf_id,
-                        shard_id=shard_id,
-                        shard_encoding_str=shard_encoding_str,
-                        sink=push,
-                        seen_trajectories=seen_trajectories,
-                        handler_cache=handler_cache,
-                    )
-                except NoInitialPopulation as e:
-                    Logger(str(e), Logger.Levels.warning).log()
-                    continue
+        # Build the flatland geometry (integer nullspace + LLL/BKZ reduction)
+        # and interior start point ONCE per shard: both are constant-
+        # independent, so re-deriving them per identified constant would repeat
+        # the expensive lattice reduction needlessly.
+        geom = FlatlandGeometry(shard)
+        start = shard.get_interior_point()
+
+        # Persistent per-shard process pool for the symbolic δ-walks.  Created
+        # once (workers receive the shard + start a single time) and reused
+        # across every identified constant and every generation, amortising the
+        # ~0.06 s pool-spawn cost.  ``None`` (workers <= 1) means serial.
+        eval_pool = make_eval_pool(shard, start, search_config.GA_NUM_EVAL_WORKERS)
+
+        try:
+            with worker_pool(
+                num_workers=num_workers,
+                worker_fn=compute_tier2_for_item,
+                writer_fn=write_jsonl_line,
+                output_path=output_path,
+                config_overrides=config_overrides,
+                parallel=bool(search_config.TIER2_ATTRIBUTES),
+            ) as push:
+                for const in identified_consts:
+                    method = GeneticSearch(shard, const, use_LIReC=self.use_LIReC)
+                    try:
+                        method.run(
+                            constant=const,
+                            cmf_id=cmf_id,
+                            shard_id=shard_id,
+                            shard_encoding_str=shard_encoding_str,
+                            sink=push,
+                            seen_trajectories=seen_trajectories,
+                            handler_cache=handler_cache,
+                            geom=geom,
+                            start=start,
+                            pool=eval_pool,
+                        )
+                    except NoInitialPopulation as e:
+                        Logger(str(e), Logger.Levels.warning).log()
+                        continue
+        finally:
+            if eval_pool is not None:
+                eval_pool.close()
+                eval_pool.join()

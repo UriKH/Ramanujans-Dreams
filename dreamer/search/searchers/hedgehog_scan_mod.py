@@ -49,6 +49,8 @@ from dreamer.utils.storage.trajectory_attributes import (
     build_trajectory_dto,
     derive_cmf_and_shard_ids,
     derive_trajectory_id,
+    tier1_config_fingerprint,
+    walk_depth_for,
 )
 from dreamer.utils.multi_processing import (
     compute_tier2_for_item,
@@ -204,7 +206,14 @@ class SearcherModV1(SearcherModScheme):
                 shard_id, shard.cmf_name, shard_encoding_str, start_t, dir_t,
             )
 
+            # A cached record is only honoured when its Tier-1 values were
+            # computed under the current config; otherwise (e.g. a deeper walk
+            # was requested) it is stale and we fall through to Case 3 to
+            # recompute the full Tier-1 DTO.
+            current_fp = tier1_config_fingerprint(walk_depth_for(shard.cmf, traj))
             seen_record = seen_trajectories.get(trajectory_id)
+            if seen_record is not None and seen_record.get("config_fingerprint") != current_fp:
+                seen_record = None
             if seen_record is not None:
                 existing_keys = set((seen_record.get("extended_metrics") or {}).keys())
                 missing = desired - existing_keys
@@ -233,6 +242,7 @@ class SearcherModV1(SearcherModScheme):
                 sink((handler.trajectory_matrix(), primary_sympy, patch))
                 seen_trajectories[trajectory_id] = {
                     "extended_metrics": dict.fromkeys(existing_keys | missing),
+                    "config_fingerprint": current_fp,
                 }
                 continue
 
@@ -262,5 +272,6 @@ class SearcherModV1(SearcherModScheme):
 
             seen_trajectories[trajectory_id] = {
                 "extended_metrics": dict.fromkeys(desired),
+                "config_fingerprint": current_fp,
             }
             sink((handler.trajectory_matrix(), primary_sympy, dto))

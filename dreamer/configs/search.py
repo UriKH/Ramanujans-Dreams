@@ -6,21 +6,51 @@ import math
 
 
 def traj_from_dim(dim: int) -> int:
+    """Default number of trajectories to sample for a CMF of dimension ``dim``.
+
+    :param dim: CMF dimensionality.
+    :return: Trajectory count (``10 ** dim``).
+    """
     return 10 ** dim
 
 
 def depth_from_len(traj_len, dim) -> int:
+    """Default walk depth as a function of trajectory length and dimension.
+
+    :param traj_len: Trajectory length in real shard space.
+    :param dim: CMF dimensionality.
+    :return: Walk depth, capped at 1500.
+    """
     return min(round(1500 / max(traj_len / math.sqrt(dim), 1)), 1500)
 
+# def ga_generations(dim: int) -> int:
+#     return 15 + 4 * dim
+#
+# def ga_population(dim: int) -> int:
+#     return 20 + 2 * dim ** 2
+
 def ga_generations(dim: int) -> int:
-    return 15 + 4 * dim
+    """Default genetic-algorithm generation count for dimension ``dim``.
+
+    :param dim: Flatland dimensionality.
+    :return: Number of generations (``15 + 3 * dim``).
+    """
+    return 15 + 3 * dim
 
 def ga_population(dim: int) -> int:
-    return 20 + 2 * dim ** 2
+    """Default genetic-algorithm population size for dimension ``dim``.
+
+    :param dim: Flatland dimensionality.
+    :return: Population size (``20 + 2 * dim``).
+    """
+    return 20 + 2 * dim
 
 
 @dataclass
 class SearchConfig(Configurable):
+    """Configuration knobs for all search methods (GA, SA, Gradient Ascent,
+    Small Angle) and the shared δ-evaluation / trajectory-sampling pipeline."""
+
     PARALLEL_SEARCH: bool = field(default=True, metadata={"description": "Enable parallel trajectory evaluation where available."})
     SEARCH_VECTOR_CHUNK: int = field(
         default=1,
@@ -160,6 +190,10 @@ class SearchConfig(Configurable):
         default=10,
         metadata={"description": "Number of initial candidate trajectories sampled for small-angle seed selection."},
     )
+    SA_NUM_EVAL_WORKERS: int = field(
+        default=6,
+        metadata={"description": "Number of worker processes for evaluating each hill-climb step's in-cone perturbation batch. <= 1 disables the pool (serial)."},
+    )
 
     # ============================== Simulated Annealing settings ==============================
     ANNEAL_T0: float = field(
@@ -167,20 +201,24 @@ class SearchConfig(Configurable):
         metadata={"description": "Initial temperature for simulated annealing cooling schedule."},
     )
     ANNEAL_TMIN: float = field(
-        default=1e-3,
-        metadata={"description": "Minimum temperature threshold; annealing stops when T drops below this."},
+        default=1e-4,
+        metadata={"description": "Minimum temperature threshold; annealing stops when T drops below this. Lower than T0/(MAX_ITERS+1) means Tmin acts as a safety net rather than the primary stop condition."},
     )
     ANNEAL_SCHEDULE: str = field(
         default="linear",
         metadata={"description": "Cooling schedule type: 'linear' (T0/(k+1)) or 'log' (T0/log(k+1))."},
     )
     ANNEAL_MAX_ITERS: int = field(
-        default=200,
-        metadata={"description": "Maximum number of accepted moves (iterations) for simulated annealing."},
+        default=500,
+        metadata={"description": "Maximum number of accepted moves (primary stop condition). Primary termination criterion; Tmin is a secondary safety net."},
     )
     ANNEAL_MAX_DOUBLINGS: int = field(
         default=10,
         metadata={"description": "Cap on consecutive trajectory length-doublings on rejection before reseeding."},
+    )
+    ANNEAL_MAX_TOTAL_STEPS: int = field(
+        default=50_000,
+        metadata={"description": "Hard ceiling on total while-loop iterations (accepted + rejected) to prevent infinite stalls. Should be large enough never to trigger in normal operation; exists as a safety net for tabu-deadlock edge cases."},
     )
     ANNEAL_TABU_SIZE: int = field(
         default=70,
@@ -190,6 +228,33 @@ class SearchConfig(Configurable):
         default=10,
         metadata={"description": "Number of initial candidate trajectories sampled for the SA seed selection."},
     )
+    ANNEAL_MAX_TRAJ_LEN: int = field(
+        default=35,
+        metadata={"description": "Maximum allowed trajectory length in real shard space. Neighbours exceeding this bound are skipped, preventing expensive trajectory_matrix() calls for large-coordinate directions. Interpretation controlled by ANNEAL_TRAJ_NORM."},
+    )
+    ANNEAL_TRAJ_NORM: str = field(
+        default="linf",
+        metadata={"description": "Norm used to measure trajectory length for the ANNEAL_MAX_TRAJ_LEN cap. 'linf' = max absolute coordinate (default; directly bounds trajectory_matrix cost), 'l1' = sum of absolute coords (= exact trajectory_matrix symbolic mult count), 'l2' = Euclidean norm."},
+    )
+    ANNEAL_NUM_EVAL_WORKERS: int = field(
+        default=6,
+        metadata={"description": "Number of parallel threads for evaluating the neighbour batch in each SA step (Fix C). Uses ThreadPoolExecutor; 0 disables parallelism."},
+    )
+
+    # ============================== Genetic search — trajectory cap + parallelism ==============================
+    GA_MAX_TRAJ_LEN: int = field(
+        default=35,
+        metadata={"description": "Maximum allowed trajectory length for GA genomes in real shard space. Genomes and neighbours exceeding this bound are rejected/resampled. Interpretation controlled by GA_TRAJ_NORM."},
+    )
+    GA_TRAJ_NORM: str = field(
+        default="linf",
+        metadata={"description": "Norm used to measure trajectory length for the GA_MAX_TRAJ_LEN cap. Same options as ANNEAL_TRAJ_NORM: 'linf', 'l1', 'l2'."},
+    )
+    GA_NUM_EVAL_WORKERS: int = field(
+        default=6,
+        metadata={"description": "Number of parallel threads for evaluating GA population batches (initial population and per-generation children). 0 disables parallelism."},
+    )
+
     # ============================== Gradient Ascent settings ==============================
     # Gradient *Ascent* over the continuous trajectory-direction angle (larger delta is
     # better).  delta is continuous and generally smooth in the angle, so the optimizer
@@ -224,7 +289,7 @@ class SearchConfig(Configurable):
         metadata={"description": "Maximum number of gradient-ascent steps per constant (the manual step budget)."},
     )
     GRAD_PATIENCE: int = field(
-        default=5,
+        default=3,
         metadata={"description": "Consecutive non-improving steps tolerated before early-stopping the ascent."},
     )
     GRAD_IMPROVE_THRESHOLD: float = field(
@@ -232,12 +297,16 @@ class SearchConfig(Configurable):
         metadata={"description": "Minimum delta gain counted as an improvement during the ascent."},
     )
     GRAD_GRAD_TOL: float = field(
-        default=1e-6,
+        default=1e-4,
         metadata={"description": "Convergence stop: terminate when the estimated gradient L2 norm falls below this (no better step to take)."},
     )
     GRAD_MAX_NORM: float = field(
-        default=100.0,
-        metadata={"description": "Maximum L2 norm of a realized integer trajectory direction when snapping a real direction onto the lattice."},
+        default=60.0,
+        metadata={"description": "Maximum trajectory length (in real shard space) of a realized integer trajectory direction when snapping a real direction onto the lattice. Interpretation controlled by GRAD_TRAJ_NORM."},
+    )
+    GRAD_TRAJ_NORM: str = field(
+        default="l2",
+        metadata={"description": "Norm used to measure trajectory length for the GRAD_MAX_NORM cap, in real shard space. Same options as ANNEAL_TRAJ_NORM: 'linf', 'l1', 'l2' (default 'l2' — gradient ascent reasons about Euclidean direction length)."},
     )
     GRAD_FD_ANGLE: float = field(
         default=0.1,
@@ -248,21 +317,25 @@ class SearchConfig(Configurable):
         metadata={"description": "Consecutive unproductive (non-identified) steps tolerated by 'skip' before the length-doubling fallback fires."},
     )
     GRAD_MAX_DOUBLINGS: int = field(
-        default=10,
+        default=2,
         metadata={"description": "Cap on consecutive length-doublings before falling back to diffraction off the unidentified wall."},
     )
     GRAD_DIFFRACT_TRIES: int = field(
-        default=10,
+        default=5,
         metadata={"description": "Number of random in-cone 'diffraction' directions tried from the last identified trajectory before the shard search is abandoned (SearchStalled)."},
     )
     GRAD_RESERVOIR_SIZE: int = field(
         default=10,
         metadata={"description": "Number of initial candidate trajectories sampled for gradient-ascent seed selection."},
     )
+    GRAD_NUM_EVAL_WORKERS: int = field(
+        default=6,
+        metadata={"description": "Number of worker processes for evaluating the per-step forward-difference gradient probe batch. <= 1 disables the pool (serial)."},
+    )
 
     # ============================== Raycaster settings ==============================
     MAX_TRAJECTORY_LENGTH: int = field(
-        default=100,
+        default=70,
         metadata={"description": "Upper bound for absolute trajectory coordinate values during search."},
     )
 
