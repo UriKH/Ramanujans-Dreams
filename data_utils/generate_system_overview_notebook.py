@@ -637,7 +637,7 @@ All tests are self-contained. Run **Restart & Run All** to execute the full suit
 # Assemble and write the notebook
 # ──────────────────────────────────────────────────────────────────────
 notebook = {**NB_VERSION, "cells": cells}
-OUTPUT_PATH = "system_overview.ipynb"
+OUTPUT_PATH = "../system_overview.ipynb"
 
 with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
     json.dump(notebook, f, indent=1, ensure_ascii=False)

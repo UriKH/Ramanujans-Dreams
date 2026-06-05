@@ -51,7 +51,7 @@ from typing import Dict, Iterator, List, Optional, Set, Tuple
 # Path discovery
 # ---------------------------------------------------------------------------
 
-DEFAULT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "search results")
+DEFAULT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../examples/search results")
 
 
 def _iter_shard_files(root: str) -> Iterator[str]:
