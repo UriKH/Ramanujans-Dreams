@@ -1,17 +1,19 @@
 """Diagnostic harness for the DiscreteMCMCSampler.
 
 Companion to ``tests/testing_tool.py`` (the raycast harness).  It reuses the same
-synthetic shard archetypes (fat baseline / needle / pancake) but renders the four
-diagnostics the sampling plan specifies for the discrete walk:
+synthetic shard archetypes (fat baseline / needle / pancake), adds a real-CMF
+degenerate matrix, and renders an **8-pane (4x2)** diagnostic dashboard for the
+discrete walk:
 
-1. PCA variance plot (UNIT vectors) -> directions span the cone's angular dimension.
-2. Boundary-slack histogram         -> points sit safely inside every facet.
-3. L2 norm vs. quota timeline       -> the funnel/PID keep norms in the useful band.
-4. Nearest-neighbour angle          -> repulsion enforced angular uniformity.
+Row 1 (mechanics): unit-direction PCA, nearest-neighbour angle histogram,
+boundary-slack histogram, L2-norm-vs-quota timeline.
+Row 2 (uniformity): radial-volume CDF, angular-uniformity CDF, trajectory-length
+histogram, ranked-L2-norm line.
 
-PCA is computed on **unit directions** ``v/||v||`` (not raw coordinates): raw-coordinate
-PCA is dominated by radial norm spread and misreports a multi-dimensional angular cloud
-as a 1D corridor.  See ``context/sampling_trajectories/SAMPLING_MATH.md`` Section 9.
+The CDFs and the ranked-L2 line expose skew that medians/histograms hide.  PCA is
+computed on **unit directions** ``v/||v||`` (not raw coordinates): raw-coordinate PCA
+is dominated by radial norm spread and misreports a multi-dimensional angular cloud as
+a 1D corridor.  See ``context/sampling_trajectories/SAMPLING_MATH.md`` Section 12.12.
 """
 
 import csv
@@ -21,6 +23,7 @@ import matplotlib.pyplot as plt
 
 from dreamer.utils.rand import np
 from dreamer.extraction.samplers.discrete_raycaster import DiscreteMCMCSampler
+from dreamer.extraction.samplers.parallel_tempering_raycaster import ParallelTemperingSampler
 from tests.testing_tool import TestHarness
 
 
@@ -44,8 +47,8 @@ def _unit_pca_spectrum(rays):
 class DiscreteTestHarness(TestHarness):
     """Evaluation framework for the discrete lattice sampler.
 
-    Inherits the synthetic ``A_prime`` generators from :class:`TestHarness` and adds a
-    dashboard tailored to the four discrete-walk diagnostics.
+    Inherits the synthetic ``A_prime`` generators from :class:`TestHarness`, adds a
+    real-CMF degenerate matrix, and renders the 8-pane discrete-walk dashboard.
     """
 
     #: A real CMF-style arrangement with duplicate / overlapping hyperplanes (D=7).
@@ -68,9 +71,15 @@ class DiscreteTestHarness(TestHarness):
         [0, 0, 1, 0, 0, -1, 0],
     ])
 
-    def __init__(self):
-        """Bind the harness to :class:`DiscreteMCMCSampler`."""
-        super().__init__(engine_class=DiscreteMCMCSampler)
+    def __init__(self, engine_class=DiscreteMCMCSampler):
+        """Bind the harness to a discrete-lattice sampler engine.
+
+        :param engine_class: the sampler class to evaluate; defaults to
+            :class:`DiscreteMCMCSampler`.  Pass :class:`ParallelTemperingSampler`
+            (or any ``Sampler`` exposing ``d_flat`` / ``A_prime`` / ``last_accept_rate``)
+            to run that engine through the same 8-pane dashboard for comparison.
+        """
+        super().__init__(engine_class=engine_class)
 
     def _generate_matrix(self, scenario_type, seeding=False):
         """Return the constraint matrix for a scenario, adding the real-world case.
@@ -239,11 +248,14 @@ class DiscreteTestHarness(TestHarness):
             "unit_pca_effdim90": eff_dim,
             "gram_logdet": round(gram_val, 3) if np.isfinite(gram_val) else "-inf",
             "norm_min": round(float(lengths.min()), 2),
+            "norm_mean": round(float(np.mean(lengths)), 2),
             "norm_median": round(float(np.median(lengths)), 2),
             "norm_max": round(float(lengths.max()), 2),
             "slack_min": round(float(slacks.min()), 4),
+            "slack_mean": round(float(np.mean(slacks)), 4),
             "slack_median": round(float(np.median(slacks)), 4),
             "nn_angle_min_deg": round(float(nn.min()), 2),
+            "nn_angle_mean_deg": round(float(np.mean(nn)), 2),
             "nn_angle_median_deg": round(float(np.median(nn)), 2),
         })
         return row
@@ -259,9 +271,9 @@ class DiscreteTestHarness(TestHarness):
         fields = [
             "scenario", "d_orig", "d_flat", "yield", "time_s", "accept_rate",
             "unit_pca_pc1", "unit_pca_effdim90", "gram_logdet",
-            "norm_min", "norm_median", "norm_max",
-            "slack_min", "slack_median",
-            "nn_angle_min_deg", "nn_angle_median_deg",
+            "norm_min", "norm_mean", "norm_median", "norm_max",
+            "slack_min", "slack_mean", "slack_median",
+            "nn_angle_min_deg", "nn_angle_mean_deg", "nn_angle_median_deg",
         ]
         with open(path, "w", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=fields)
@@ -271,28 +283,49 @@ class DiscreteTestHarness(TestHarness):
         print(f"Wrote diagnostic summary CSV: {path}")
 
 
-def run_diagnostic_dashboard(target_quota=10_000, scenario_name="15D_Pancake"):
-    """Run one scenario through the discrete sampler and render its dashboard.
+#: Engines selectable by short name from ``run_*`` helpers and the CLI.
+ENGINES = {
+    "discrete": DiscreteMCMCSampler,
+    "pt": ParallelTemperingSampler,
+}
+
+
+def _resolve_engine(engine):
+    """Resolve an engine short-name or class to a sampler class.
+
+    :param engine: an :data:`ENGINES` key (e.g. ``"pt"``) or a sampler class.
+    :return: the sampler class to instantiate.
+    """
+    return ENGINES[engine] if isinstance(engine, str) else engine
+
+
+def run_diagnostic_dashboard(target_quota=10_000, scenario_name="15D_Pancake", engine="discrete"):
+    """Run one scenario through a chosen sampler and render its 8-pane dashboard.
 
     :param target_quota: number of primitive vectors to request.
     :param scenario_name: archetype key (e.g. ``"10D_Fat_Baseline"``).
+    :param engine: ``"discrete"`` / ``"pt"`` (or a sampler class) to evaluate.
     """
+    cls = _resolve_engine(engine)
     print("=" * 60)
-    print(" DISCRETE MCMC SAMPLER — DIAGNOSTIC HARNESS")
+    print(f" DIAGNOSTIC HARNESS — {cls.__name__}")
     print("=" * 60)
-    harness = DiscreteTestHarness()
+    harness = DiscreteTestHarness(engine_class=cls)
     data = harness.run_one(scenario_name, target_quota)
     if "error" not in data and len(data["rays"]) > 0:
         harness.render_dashboard(scenario_name)
 
 
-def run_gauntlet_csv(out_path="discrete_sampler_diagnostics.csv", target_quota=2_000):
+def run_gauntlet_csv(out_path="discrete_sampler_diagnostics.csv", target_quota=2_000,
+                     engine="discrete"):
     """Run all archetypes, render dashboards, and write a shareable summary CSV.
 
     :param out_path: path for the summary CSV.
     :param target_quota: quota requested per scenario.
+    :param engine: ``"discrete"`` / ``"pt"`` (or a sampler class) to evaluate.
     """
-    harness = DiscreteTestHarness()
+    cls = _resolve_engine(engine)
+    harness = DiscreteTestHarness(engine_class=cls)
     scenarios = ["10D_Fat_Baseline", "15D_Needle", "15D_Pancake", "7D_Real_World_Degenerate"]
     for name in scenarios:
         data = harness.run_one(name, target_quota)
@@ -301,5 +334,25 @@ def run_gauntlet_csv(out_path="discrete_sampler_diagnostics.csv", target_quota=2
     harness.export_csv(out_path, scenarios)
 
 
+def compare_engines(target_quota=2_000, scenario="15D_Needle"):
+    """Run both engines on one scenario and print a side-by-side comparison.
+
+    :param target_quota: quota requested per engine.
+    :param scenario: archetype key to compare on (the hard 15D needle by default).
+    """
+    for label, cls in (("single-chain", DiscreteMCMCSampler),
+                       ("parallel-tempering", ParallelTemperingSampler)):
+        harness = DiscreteTestHarness(engine_class=cls)
+        data = harness.run_one(scenario, target_quota)
+        eng = data["engine"]
+        print(f"  [{label}] yield={data['yield']} accept={eng.last_accept_rate * 100:.2f}%")
+
+
 if __name__ == "__main__":
-    run_gauntlet_csv()
+    import sys
+
+    # Usage: python -m tests.discrete_testing_tool [discrete|pt]
+    # engine_name = sys.argv[1] if len(sys.argv) > 1 else "discrete"
+    engine_name = 'pt'
+    out = f"{engine_name}_sampler_diagnostics.csv"
+    run_gauntlet_csv(out_path=out, engine=engine_name)

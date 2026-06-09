@@ -9,12 +9,15 @@ Key architecture (see ``context/sampling_trajectories/SAMPLING_MATH.md``):
 
 * **Gravity funnel** — the Chebyshev seed can be far out (cones widen outward; a
   badly-conditioned basis can put it at ``10^8``).  We do **not** cage the walker
-  there.  A *flatland* box bounds lateral wandering; gravity (normalised by the
-  seed norm) pulls the walker downhill toward the origin; and a point is only
-  *harvested* once its original-space norm enters the useful band ``<= MAX``.
-* **Log-ratio PID** — gravity ``lambda`` is retuned every window by the log-ratio
-  of observed useful-yield to target, so it actually acts at tiny yield scales.
-* **Mixture proposal** — axis / diagonal / discrete scale-jump / box, all symmetric.
+  there.  A *flatland* box bounds lateral wandering; raw (un-normalised) gravity
+  ``lambda * ||Z z||`` pulls the walker downhill toward the origin via a per-step
+  drift; and a point is only *harvested* once its original-space norm enters the
+  useful band ``<= max_useful_norm``.
+* **Two-phase log-ratio PID** — above the useful band gravity is locked at
+  ``initial_lambda`` (funnel); inside it, ``lambda`` is retuned every window by the
+  log-ratio of observed useful-yield to target, so it acts at tiny yield scales.
+* **Mixture proposal** — axis / diagonal / discrete scale-jump / box, all symmetric;
+  the scale-jump stride adapts online to the local acceptance rate.
 
 It is intentionally a *copy* of the raycaster pipeline surface (its own file, its own
 class) so the existing production sampler is untouched and cannot regress.
