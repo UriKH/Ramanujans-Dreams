@@ -344,6 +344,22 @@ class SearchConfig(Configurable):
         metadata={"description": "Upper bound for search radius used to sample trajectories."},
     )
 
+    SAMPLING_METHOD: str = field(
+        default="raycast",
+        metadata={
+            "description": (
+                "Trajectory-sampling engine used by ShardSamplingOrchestrator: "
+                "'raycast' (default; continuous guide-ray + raycast pipeline, "
+                "RaycastPipelineSampler), 'discrete' (DiscreteMCMCSampler: a "
+                "repulsive / PID-annealed discrete lattice walk), or 'pt' "
+                "(ParallelTemperingSampler: replica-exchange lattice walk that "
+                "beats the single chain in tightly constrained cones).  The "
+                "'discrete' / 'pt' engines harvest primitive integer directions "
+                "with original-space norm <= MAX_TRAJECTORY_LENGTH."
+            )
+        },
+    )
+
     CONSTANT_NO_DIGITS_HIGH_RES: int = field(
         default=50_000,
         metadata={"description": "Number of digits to use for high-resolution constant values."},

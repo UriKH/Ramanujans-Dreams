@@ -65,7 +65,8 @@ if __name__ == '__main__':
             'TIER2_ATTRIBUTES': (),
             'GRAD_GRAD_TOL': 1e-3,
             'SA_MAX_DEPTH': 50,
-            'ANNEAL_TMIN': 2e-3
+            'ANNEAL_TMIN': 2e-3,
+            'SAMPLING_METHOD': 'pt'
         },
         logging={
             'GENERATE_LOGS': True
