@@ -87,20 +87,19 @@ def _gcd_abs(vec):
 
 
 @njit(cache=True)
-def _dynamic_scale_jump(norm_curr):
-    """Sample a symmetric scale-jump stride proportional to the current real norm.
+def _scale_jump(current_max_stride):
+    """Sample a symmetric scale-jump stride in ``[2, current_max_stride]``.
 
-    Cones widen ~linearly with distance, so the usable lateral stride grows with
-    ``norm_curr``.  A static large stride would be rejected almost always in a
-    constrained space (it overshoots the cone), wrecking the acceptance rate; scaling
-    the stride to the current depth keeps the jump useful at every radius.  The stride
-    set is symmetric (``+k`` / ``-k`` equally likely) so the proposal stays reversible.
+    The cap ``current_max_stride`` is **adapted online** by the walk from its recent
+    accept/reject history (see ``_mcmc_walk``): it grows when scale jumps land inside
+    the cone and shrinks when they hit a wall, so the walker "feels" the geometry — long
+    strides in open space, short strides in a tight needle — keeping a healthy
+    acceptance rate.  The stride is signed symmetrically so the proposal stays reversible.
 
-    :param norm_curr: current state's original-space L2 norm.
-    :return: a signed integer stride (floor 3, capped 50 in magnitude).
+    :param current_max_stride: current adaptive upper bound on the stride magnitude.
+    :return: a signed integer stride with magnitude in ``[2, current_max_stride]``.
     """
-    max_stride = max(3, min(50, int(norm_curr * 0.05)))
-    k_val = np.random.randint(2, max_stride + 1)
+    k_val = np.random.randint(2, current_max_stride + 1)
     return k_val if np.random.rand() > 0.5 else -k_val
 
 
@@ -171,6 +170,7 @@ def _mcmc_walk(
 
     lam = initial_lambda
     window_yield = 0
+    current_max_stride = 10            # adaptive scale-jump cap (in [2, 50])
     z_prop = np.zeros(d_flat, dtype=np.int64)
     v_prop = np.zeros(d_orig, dtype=np.float64)
 
@@ -179,6 +179,7 @@ def _mcmc_walk(
         # ---- Mixture proposal (all families symmetric -> no Hastings term) ----
         for k in range(d_flat):
             z_prop[k] = z[k]
+        is_scale_jump = False
         r = np.random.rand()
         if r < 0.60:                       # axis-aligned +-e_i
             i = np.random.randint(d_flat)
@@ -188,9 +189,10 @@ def _mcmc_walk(
             j = np.random.randint(d_flat)
             z_prop[i] += 1 if np.random.rand() < 0.5 else -1
             z_prop[j] += 1 if np.random.rand() < 0.5 else -1
-        elif r < 0.95:                     # discrete scale jump (depth-proportional stride)
+        elif r < 0.95:                     # discrete scale jump (adaptive stride)
             dim = np.random.randint(d_flat)
-            z_prop[dim] += _dynamic_scale_jump(norm_v)
+            z_prop[dim] += _scale_jump(current_max_stride)
+            is_scale_jump = True
         else:                              # local box jump U{-2..2}^d
             for k in range(d_flat):
                 z_prop[k] += np.random.randint(-2, 3)
@@ -204,6 +206,8 @@ def _mcmc_walk(
             if a > maxabs:
                 maxabs = a
         if maxabs > flatland_box:
+            if is_scale_jump and current_max_stride > 2:   # hit a wall -> shrink stride
+                current_max_stride -= 1
             continue
 
         # ---- Hard boundary: strict interior (B z' < -tol on every facet) ----
@@ -216,6 +220,8 @@ def _mcmc_walk(
                 inside = False
                 break
         if not inside:
+            if is_scale_jump and current_max_stride > 2:   # hit a wall -> shrink stride
+                current_max_stride -= 1
             continue
 
         # original-space image + its norm
@@ -230,6 +236,8 @@ def _mcmc_walk(
         norm_prop = np.sqrt(norm_prop)
 
         if norm_prop < 1e-12:              # skip the origin
+            if is_scale_jump and current_max_stride > 2:
+                current_max_stride -= 1
             continue
 
         # ---- Repulsion: max cosine vs a random subset of the harvest ----
@@ -263,6 +271,14 @@ def _mcmc_walk(
         if not accept:
             if np.random.rand() < np.exp(diff):
                 accept = True
+
+        # ---- Adapt the scale-jump stride: grow on accept, shrink on reject ----
+        if is_scale_jump:
+            if accept:
+                if current_max_stride < 50:
+                    current_max_stride += 1
+            elif current_max_stride > 2:
+                current_max_stride -= 1
 
         if accept:
             total_accepted += 1
@@ -372,7 +388,7 @@ class DiscreteMCMCSampler(Sampler):
         self.d_orig = int(self.A_prime.shape[1])
 
         Logger("Initializing DiscreteMCMCSampler: Conditioning...", Logger.Levels.debug).log()
-        conditioner = HyperSpaceConditioner(self.A_prime, max_beta=10, defect_tolerance=5.0)
+        conditioner = HyperSpaceConditioner(self.A_prime, max_beta=25, defect_tolerance=5.0)
         Z_reduced, B_reduced, _ = conditioner.process()
 
         self.Z = np.asarray(Z_reduced, dtype=np.int64)

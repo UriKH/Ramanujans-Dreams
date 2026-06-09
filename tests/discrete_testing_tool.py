@@ -83,10 +83,16 @@ class DiscreteTestHarness(TestHarness):
             return self.REAL_WORLD_DEGENERATE.copy()
         return super()._generate_matrix(scenario_type, seeding)
 
-    def render_dashboard(self, scenario_name):
-        """Render the 4-pane discrete-sampler diagnostic dashboard for one scenario.
+    def render_dashboard(self, scenario_name, save_path=None):
+        """Render the 8-pane (4x2) discrete-sampler diagnostic dashboard for one scenario.
+
+        Row 1 (mechanics): unit-direction PCA, NN-angle histogram, boundary-slack
+        histogram, L2-norm-vs-quota timeline.  Row 2 (uniformity): radial-volume CDF,
+        angular-uniformity CDF, trajectory-length histogram, ranked-L2-norm line.  The
+        CDFs and the ranked plot expose skew that medians/histograms can hide.
 
         :param scenario_name: key of a stored run in ``self.results``.
+        :param save_path: if given, save the figure to this path instead of showing it.
         """
         data = self.results.get(scenario_name)
         if not data or "error" in data or len(data["rays"]) == 0:
@@ -95,50 +101,84 @@ class DiscreteTestHarness(TestHarness):
 
         rays = np.asarray(data["rays"], dtype=np.float64)
         lengths = np.linalg.norm(rays, axis=1)
-
-        fig, axs = plt.subplots(2, 2, figsize=(16, 12))
-
-        # 1. PCA variance — on UNIT directions (angular spread, not radial stretch).
-        var_ratio, eff_dim = _unit_pca_spectrum(rays)
-        axs[0, 0].bar(np.arange(1, len(var_ratio) + 1), var_ratio, color="#00FFFF", edgecolor="black")
-        axs[0, 0].set_title(
-            f"1. Unit-direction PCA — {scenario_name}\n(eff dim @90% = {eff_dim}/{rays.shape[1]})"
-        )
-        axs[0, 0].set_xlabel("principal component")
-        axs[0, 0].set_ylabel("variance ratio")
-
-        # 2. Boundary slack — distance to each facet (-B z must be > 0 inside).
-        engine = data.get("engine")
-        if engine is not None and engine.B.shape[0] > 0:
-            # Map harvested originals back to flatland is non-trivial; instead measure
-            # slack directly on the harvested integer vectors against A_prime rows.
-            slacks = -(engine.A_prime @ rays.T).T.flatten()
-            axs[0, 1].hist(slacks, bins=50, color="#00FF00", edgecolor="black")
-            axs[0, 1].axvline(0.0, color="red", linestyle="--", label="boundary")
-            axs[0, 1].legend()
-        axs[0, 1].set_title(f"2. Boundary-slack histogram — {scenario_name}")
-        axs[0, 1].set_xlabel("slack ( >0 = inside )")
-
-        # 3. L2 norm vs. quota timeline — harvest order is the discovery order.
-        axs[1, 0].plot(np.arange(1, len(lengths) + 1), lengths, color="#FFAA00", linewidth=1.5)
-        axs[1, 0].set_title(f"3. L2 norm vs. harvest index — {scenario_name}")
-        axs[1, 0].set_xlabel("harvest index (quota fill)")
-        axs[1, 0].set_ylabel("L2 norm")
-
-        # 4. Nearest-neighbour angle histogram — angular uniformity.
         u_rays = rays / lengths[:, np.newaxis]
         cos_sim = np.clip(u_rays @ u_rays.T, -1.0, 1.0)
         np.fill_diagonal(cos_sim, -1.0)
         min_angles = np.degrees(np.arccos(np.max(cos_sim, axis=1)))
-        axs[1, 1].hist(min_angles, bins=50, color="#FF00FF", edgecolor="black")
-        axs[1, 1].set_title(f"4. Nearest-neighbour angle — {scenario_name}")
-        axs[1, 1].set_xlabel("min angle to neighbour (deg)")
+        engine = data.get("engine")
+        accept = getattr(engine, "last_accept_rate", 0.0)
+
+        fig, axs = plt.subplots(2, 4, figsize=(26, 12))
+        fig.suptitle(
+            f"{scenario_name}  —  yield={len(rays)}, accept={accept * 100:.2f}%", fontsize=14
+        )
+
+        # --- Row 1: mechanics ---
+        # 1. Unit-direction PCA spectrum.
+        var_ratio, eff_dim = _unit_pca_spectrum(rays)
+        axs[0, 0].bar(np.arange(1, len(var_ratio) + 1), var_ratio, color="#00FFFF", edgecolor="black")
+        axs[0, 0].set_title(f"1. Unit-direction PCA (eff dim@90% = {eff_dim}/{rays.shape[1]})")
+        axs[0, 0].set_xlabel("principal component")
+        axs[0, 0].set_ylabel("variance ratio")
+
+        # 2. Nearest-neighbour angle histogram.
+        axs[0, 1].hist(min_angles, bins=50, color="#FF00FF", edgecolor="black")
+        axs[0, 1].set_title("2. Nearest-neighbour angle")
+        axs[0, 1].set_xlabel("min angle to neighbour (deg)")
+
+        # 3. Boundary-slack histogram.
+        if engine is not None and engine.A_prime.shape[0] > 0:
+            slacks = -(engine.A_prime @ rays.T).T.flatten()
+            axs[0, 2].hist(slacks, bins=50, color="#00FF00", edgecolor="black")
+            axs[0, 2].axvline(0.0, color="red", linestyle="--", label="boundary")
+            axs[0, 2].legend()
+        axs[0, 2].set_title("3. Boundary slack ( >0 = inside )")
+        axs[0, 2].set_xlabel("slack")
+
+        # 4. L2 norm vs. quota timeline (harvest order).
+        axs[0, 3].plot(np.arange(1, len(lengths) + 1), lengths, color="#FFAA00", linewidth=1.2)
+        axs[0, 3].set_title("4. L2 norm vs. harvest index")
+        axs[0, 3].set_xlabel("harvest index (quota fill)")
+        axs[0, 3].set_ylabel("L2 norm")
+
+        # --- Row 2: uniformity ---
+        # 5. Radial volume CDF (empirical CDF of L2 norms).
+        sorted_norms = np.sort(lengths)
+        cdf = np.arange(1, len(sorted_norms) + 1) / len(sorted_norms)
+        axs[1, 0].plot(sorted_norms, cdf, color="#5DADE2", linewidth=2)
+        axs[1, 0].set_title("5. Radial volume CDF")
+        axs[1, 0].set_xlabel("L2 norm")
+        axs[1, 0].set_ylabel("cumulative fraction")
+
+        # 6. Angular uniformity CDF (CDF of NN angles; convex+smooth = uniform).
+        sorted_ang = np.sort(min_angles)
+        acdf = np.arange(1, len(sorted_ang) + 1) / len(sorted_ang)
+        axs[1, 1].plot(sorted_ang, acdf, color="#AF7AC5", linewidth=2)
+        axs[1, 1].set_title("6. Angular uniformity CDF")
+        axs[1, 1].set_xlabel("NN angle (deg)")
+        axs[1, 1].set_ylabel("cumulative fraction")
+
+        # 7. Trajectory-length histogram.
+        axs[1, 2].hist(lengths, bins=50, color="#48C9B0", edgecolor="black")
+        axs[1, 2].set_title("7. Trajectory-length histogram")
+        axs[1, 2].set_xlabel("L2 norm")
+
+        # 8. Ranked trajectories (sorted L2 norm; smooth = good, staircase = shell-trapped).
+        axs[1, 3].plot(sorted_norms, color="#00FF00", linewidth=2)
+        axs[1, 3].set_title("8. Ranked trajectories (sorted L2)")
+        axs[1, 3].set_xlabel("rank")
+        axs[1, 3].set_ylabel("L2 norm")
 
         for ax in axs.flat:
             ax.grid(color="grey", linestyle="--", alpha=0.3)
 
-        plt.tight_layout()
-        plt.show()
+        plt.tight_layout(rect=(0, 0, 1, 0.97))
+        if save_path is not None:
+            fig.savefig(save_path, dpi=110)
+            plt.close(fig)
+            print(f"Saved dashboard: {save_path}")
+        else:
+            plt.show()
 
     def run_one(self, scenario_name, target_quota=10000, seeding=True):
         """Run a single scenario and stash the engine alongside the harvested rays.
