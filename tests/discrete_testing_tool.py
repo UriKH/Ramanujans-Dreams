@@ -167,10 +167,19 @@ class DiscreteTestHarness(TestHarness):
         axs[1, 1].set_xlabel("NN angle (deg)")
         axs[1, 1].set_ylabel("cumulative fraction")
 
-        # 7. Trajectory-length histogram.
-        axs[1, 2].hist(lengths, bins=50, color="#48C9B0", edgecolor="black")
-        axs[1, 2].set_title("7. Trajectory-length histogram")
-        axs[1, 2].set_xlabel("L2 norm")
+        # 7. Shell-density bar chart — absolute count of harvested vectors per norm band.
+        #    Shows directly how densely the inner shells (<50, <200) are mined.
+        shell_edges = [0, 50, 100, 200, 500, np.inf]
+        shell_labels = ["0-50", "50-100", "100-200", "200-500", "500+"]
+        shell_counts = [
+            int(np.sum((lengths >= shell_edges[k]) & (lengths < shell_edges[k + 1])))
+            for k in range(len(shell_labels))
+        ]
+        bars = axs[1, 2].bar(shell_labels, shell_counts, color="#48C9B0", edgecolor="black")
+        axs[1, 2].bar_label(bars, labels=[str(c) for c in shell_counts], padding=2)
+        axs[1, 2].set_title("7. Shell density (count per L2-norm band)")
+        axs[1, 2].set_xlabel("L2-norm band")
+        axs[1, 2].set_ylabel("count")
 
         # 8. Ranked trajectories (sorted L2 norm; smooth = good, staircase = shell-trapped).
         axs[1, 3].plot(sorted_norms, color="#00FF00", linewidth=2)
@@ -355,6 +364,6 @@ if __name__ == "__main__":
 
     # Usage: python -m tests.discrete_testing_tool [discrete|pt]
     # engine_name = sys.argv[1] if len(sys.argv) > 1 else "discrete"
-    engine_name = 'pt'
+    engine_name = 'discrete'
     out = f"{engine_name}_sampler_diagnostics.csv"
     run_gauntlet_csv(out_path=out, engine=engine_name)

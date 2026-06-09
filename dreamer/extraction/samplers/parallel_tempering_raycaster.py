@@ -18,8 +18,11 @@ Why tempering helps (see ``context/sampling_trajectories/SAMPLING_MATH.md`` §12
 * Every ``swap_interval`` steps, adjacent replicas attempt a Metropolis **swap**, so a
   low-norm state discovered by a hot explorer can "trickle down" and teleport the cold
   harvester past a barrier.
-* **Global harvesting:** a useful primitive found by *any* replica is banked (explorers
-  are useful too); the PID controller tracks that global yield.
+* **Cold-chain harvesting:** ONLY the cold harvester (replica 0, ``beta=1``) banks
+  points, so hot explorers cannot pollute the quota with high-norm vectors before the
+  inner shell is mined.  The explorers are strict auxiliaries — they still propose,
+  evaluate, and swap (a low-norm state they find trickles down to replica 0 via a swap,
+  and is harvested only once replica 0 holds it).  The PID tracks this cold-chain yield.
 
 The helper njit kernels (``_gcd_abs``, ``_scale_jump``) and the standardized error types
 are imported from :mod:`discrete_raycaster` — that module is intentionally left
@@ -53,14 +56,15 @@ def _pt_mcmc_walk(
     max_useful_norm, flatland_box,
     tol, rng_seed,
 ):
-    """Run a parallel-tempering replica-exchange walk; return the global harvest.
+    """Run a parallel-tempering replica-exchange walk; return the cold-chain harvest.
 
     Maintains ``n_rep = len(beta_ladder)`` independent states.  Each step proposes one
     move per replica (mixture proposal + per-replica adaptive scale-jump) and accepts it
-    under the **tempered** energy ``beta_i * (lam * ||Z z|| + gamma * maxcos)``; a useful
-    primitive found by *any* replica is harvested globally.  Every ``swap_interval`` steps
-    adjacent replicas attempt a Metropolis state swap.  ``lam`` is the *base* gravity,
-    retuned by a two-phase log-ratio PID on the global yield (using the cold harvester's
+    under the **tempered** energy ``beta_i * (lam * ||Z z|| + gamma * maxcos)``; only the
+    cold harvester (replica 0) banks useful primitives, so hot explorers act purely as
+    auxiliaries.  Every ``swap_interval`` steps adjacent replicas attempt a Metropolis
+    state swap.  ``lam`` is the *base* gravity, retuned by a two-phase log-ratio PID on
+    the cold-chain yield (using the cold harvester's
     norm for the phase decision), then scaled per replica by ``beta_ladder``.
 
     :param Z: ``(d_orig, d_flat)`` integer basis of the equality solution lattice.
@@ -68,18 +72,18 @@ def _pt_mcmc_walk(
     :param z0: ``(d_flat,)`` strict-interior integer seed (shared start for all replicas).
     :param v0: ``Z @ z0`` original-space seed.
     :param beta_ladder: ``(n_rep,)`` temperature coefficients, descending from 1.0 to 0.0.
-    :param quota: target number of useful primitive harvested vectors (global).
+    :param quota: target number of useful primitive vectors harvested by the cold chain.
     :param max_steps: hard cap on outer chain steps (each does ``n_rep`` proposals).
     :param swap_interval: attempt adjacent replica swaps every this many steps.
     :param initial_lambda: starting/ceiling base gravity weight.
     :param gamma: repulsion weight.
-    :param target_yield_ratio: desired global useful-yield-per-step the PID targets.
+    :param target_yield_ratio: desired cold-chain useful-yield-per-step the PID targets.
     :param learning_rate: PID aggressiveness in ``lam *= exp(lr * log_error)``.
     :param min_gravity_floor: floor on ``lam``.
     :param monitor_window: steps per PID update window.
     :param repulsion_subset: max past harvests sampled for the cosine penalty.
-    :param max_useful_norm: only states with ``||Z z|| <= this`` are harvested; also the
-        Phase-1/Phase-2 boundary (evaluated on the cold harvester, replica 0).
+    :param max_useful_norm: only cold-harvester (replica 0) states with ``||Z z|| <= this``
+        are harvested; also the Phase-1/Phase-2 boundary (evaluated on replica 0).
     :param flatland_box: hard ``max|z_i|`` bound on lateral flatland wandering.
     :param tol: feasibility tolerance; a move is rejected unless ``B z' < -tol``.
     :param rng_seed: if ``>= 0``, seeds numba's RNG for reproducibility.
@@ -196,7 +200,7 @@ def _pt_mcmc_walk(
                     stride[i] -= 1
                 continue
 
-            # ---- Repulsion vs a random subset of the global harvest ----
+            # ---- Repulsion vs a random subset of the (cold-chain) harvest ----
             s_prop = 0.0
             s_cur = 0.0
             if harvest_count > 0:
@@ -246,8 +250,11 @@ def _pt_mcmc_walk(
                     v_curr[i, ii] = v_prop[ii]
                 norm_curr[i] = norm_prop
 
-                # ---- Global harvest filter: any replica in the useful band ----
-                if norm_prop <= max_useful_norm:
+                # ---- Cold-chain harvest filter: ONLY the cold harvester (replica 0,
+                # beta=1.0) banks points, so hot explorers cannot pollute the quota
+                # with high-norm vectors.  Hot replicas (i > 0) still propose, evaluate,
+                # and swap with replica 0 — they are strictly auxiliaries. ----
+                if i == 0 and norm_prop <= max_useful_norm:
                     v_int = np.zeros(d_orig, dtype=np.int64)
                     for ii in range(d_orig):
                         v_int[ii] = np.int64(np.round(v_prop[ii]))
@@ -299,13 +306,13 @@ def _pt_mcmc_walk(
                     norm_curr[i] = norm_curr[j]
                     norm_curr[j] = tmp
 
-        # ---------------- Two-phase log-ratio PID (global yield) ----------------
+        # ---------------- Two-phase log-ratio PID (cold-chain yield) ----------------
         if (step + 1) % monitor_window == 0:
             if norm_curr[0] > max_useful_norm:
                 # PHASE 1 (funnel): cold harvester still descending -> lock max gravity.
                 lam = initial_lambda
             else:
-                # PHASE 2 (harvest): log-ratio PID on the global yield.
+                # PHASE 2 (harvest): log-ratio PID on the cold-chain yield.
                 actual_yield_ratio = window_yield / monitor_window
                 epsilon = 1e-5
                 yield_ratio = (actual_yield_ratio + epsilon) / target_yield_ratio
@@ -358,7 +365,7 @@ class ParallelTemperingSampler(Sampler):
         :param swap_interval: attempt adjacent replica swaps every this many steps.
         :param initial_lambda: starting/ceiling base gravity weight.
         :param gamma: repulsion weight.
-        :param target_yield_ratio: desired global useful-primitives-per-step the PID targets.
+        :param target_yield_ratio: desired cold-chain useful-primitives-per-step the PID targets.
         :param learning_rate: PID aggressiveness in ``lam *= exp(lr * log_error)``.
         :param min_gravity_floor: hard floor on base gravity.
         :param monitor_window: steps per PID update window.
