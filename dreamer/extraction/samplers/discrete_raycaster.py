@@ -87,23 +87,21 @@ def _gcd_abs(vec):
 
 
 @njit(cache=True)
-def _scale_jump_multiplier():
-    """Sample a symmetric discrete scale-jump multiplier from ``{-10,-5,5,10}``.
+def _dynamic_scale_jump(norm_curr):
+    """Sample a symmetric scale-jump stride proportional to the current real norm.
 
-    Implemented with ``randint`` + branch (not ``np.random.choice`` on an array,
-    which is unreliable under ``@njit``).  The set is symmetric so the proposal
-    stays reversible (no Hastings correction needed).
+    Cones widen ~linearly with distance, so the usable lateral stride grows with
+    ``norm_curr``.  A static large stride would be rejected almost always in a
+    constrained space (it overshoots the cone), wrecking the acceptance rate; scaling
+    the stride to the current depth keeps the jump useful at every radius.  The stride
+    set is symmetric (``+k`` / ``-k`` equally likely) so the proposal stays reversible.
 
-    :return: one of ``-10, -5, 5, 10`` uniformly.
+    :param norm_curr: current state's original-space L2 norm.
+    :return: a signed integer stride (floor 3, capped 50 in magnitude).
     """
-    r = np.random.randint(4)
-    if r == 0:
-        return -10
-    if r == 1:
-        return -5
-    if r == 2:
-        return 5
-    return 10
+    max_stride = max(3, min(50, int(norm_curr * 0.05)))
+    k_val = np.random.randint(2, max_stride + 1)
+    return k_val if np.random.rand() > 0.5 else -k_val
 
 
 @njit(cache=True)
@@ -148,7 +146,8 @@ def _mcmc_walk(
     :param flatland_box: hard ``max|z_i|`` bound (caps lateral flatland wandering).
     :param tol: feasibility tolerance; a move is rejected unless ``B z' < -tol``.
     :param rng_seed: if ``>= 0``, seeds numba's RNG for reproducibility.
-    :return: ``(harvest_buffer, harvest_count)`` — buffer is ``(quota, d_orig)`` int64.
+    :return: ``(harvest_buffer, harvest_count, accept_rate)`` — buffer is
+        ``(quota, d_orig)`` int64; ``accept_rate`` is accepted/proposed over the run.
     """
     if rng_seed >= 0:
         np.random.seed(rng_seed)
@@ -160,6 +159,8 @@ def _mcmc_walk(
     harvest = np.zeros((quota, d_orig), dtype=np.int64)
     harvest_unit = np.zeros((quota, d_orig), dtype=np.float64)
     harvest_count = 0
+    total_proposed = 0
+    total_accepted = 0
 
     z = z0.copy()
     v = v0.astype(np.float64)
@@ -174,6 +175,7 @@ def _mcmc_walk(
     v_prop = np.zeros(d_orig, dtype=np.float64)
 
     for step in range(max_steps):
+        total_proposed += 1
         # ---- Mixture proposal (all families symmetric -> no Hastings term) ----
         for k in range(d_flat):
             z_prop[k] = z[k]
@@ -186,9 +188,9 @@ def _mcmc_walk(
             j = np.random.randint(d_flat)
             z_prop[i] += 1 if np.random.rand() < 0.5 else -1
             z_prop[j] += 1 if np.random.rand() < 0.5 else -1
-        elif r < 0.95:                     # discrete scale jump (escape-then-spread)
+        elif r < 0.95:                     # discrete scale jump (depth-proportional stride)
             dim = np.random.randint(d_flat)
-            z_prop[dim] += _scale_jump_multiplier()
+            z_prop[dim] += _dynamic_scale_jump(norm_v)
         else:                              # local box jump U{-2..2}^d
             for k in range(d_flat):
                 z_prop[k] += np.random.randint(-2, 3)
@@ -263,6 +265,7 @@ def _mcmc_walk(
                 accept = True
 
         if accept:
+            total_accepted += 1
             for k in range(d_flat):
                 z[k] = z_prop[k]
             for i in range(d_orig):
@@ -316,7 +319,8 @@ def _mcmc_walk(
                 lam = initial_lambda
             window_yield = 0
 
-    return harvest, harvest_count
+    accept_rate = total_accepted / total_proposed if total_proposed > 0 else 0.0
+    return harvest, harvest_count, accept_rate
 
 
 class DiscreteMCMCSampler(Sampler):
@@ -389,6 +393,7 @@ class DiscreteMCMCSampler(Sampler):
         self.max_steps_per_quota = max_steps_per_quota
         self.tol = tol
         self.rng_seed = rng_seed
+        self.last_accept_rate = 0.0
 
         super().__init__(self.d_flat)
 
@@ -469,7 +474,7 @@ class DiscreteMCMCSampler(Sampler):
 
         max_steps = max(self.monitor_window, quota * self.max_steps_per_quota)
 
-        harvest, count = _mcmc_walk(
+        harvest, count, accept_rate = _mcmc_walk(
             self.Z, self.B, z0.astype(np.int64), v0.astype(np.int64),
             quota, max_steps,
             self.initial_lambda, self.gamma,
@@ -478,6 +483,12 @@ class DiscreteMCMCSampler(Sampler):
             self.max_useful_norm, self.flatland_box,
             self.tol, self.rng_seed,
         )
+        # expose the mechanical acceptance rate for diagnostics
+        self.last_accept_rate = float(accept_rate)
+        Logger(
+            f"Walk acceptance rate: {accept_rate * 100:.2f}% ({count} useful harvested).",
+            Logger.Levels.debug,
+        ).log()
 
         # Empty harvest: raise the standardized error, catch it, surface the reason.
         if count == 0:

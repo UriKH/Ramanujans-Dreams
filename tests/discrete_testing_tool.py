@@ -48,9 +48,40 @@ class DiscreteTestHarness(TestHarness):
     dashboard tailored to the four discrete-walk diagnostics.
     """
 
+    #: A real CMF-style arrangement with duplicate / overlapping hyperplanes (D=7).
+    #: Exercises the engine on degenerate, non-simple geometry rather than the
+    #: synthetic fat/needle/pancake archetypes.
+    REAL_WORLD_DEGENERATE = np.array([
+        [0, -1, 0, 0, 0, 0, 1],
+        [-1, 0, 0, 0, 0, 0, 0],
+        [0, 0, 1, 0, 0, -1, 0],
+        [0, -1, 0, 0, 0, 0, 1],
+        [-1, 0, 0, 0, 0, 0, 1],
+        [0, -1, 0, 0, 0, 0, 0],
+        [0, 0, 0, 1, 0, 0, -1],
+        [0, 0, 1, 0, -1, 0, 0],
+        [0, 0, 0, 0, 0, 0, -1],
+        [0, 0, 1, 0, -1, 0, 0],
+        [0, 0, 0, 1, 0, 0, 0],
+        [-1, 0, 0, 0, 0, 0, 1],
+        [0, 0, 0, 1, 0, 0, -1],
+        [0, 0, 1, 0, 0, -1, 0],
+    ])
+
     def __init__(self):
         """Bind the harness to :class:`DiscreteMCMCSampler`."""
         super().__init__(engine_class=DiscreteMCMCSampler)
+
+    def _generate_matrix(self, scenario_type, seeding=False):
+        """Return the constraint matrix for a scenario, adding the real-world case.
+
+        :param scenario_type: archetype key, or ``"7D_Real_World_Degenerate"``.
+        :param seeding: forwarded to the base synthetic generator.
+        :return: ``(rows, d_orig)`` constraint matrix.
+        """
+        if scenario_type == "7D_Real_World_Degenerate":
+            return self.REAL_WORLD_DEGENERATE.copy()
+        return super()._generate_matrix(scenario_type, seeding)
 
     def render_dashboard(self, scenario_name):
         """Render the 4-pane discrete-sampler diagnostic dashboard for one scenario.
@@ -146,6 +177,7 @@ class DiscreteTestHarness(TestHarness):
             "d_flat": data.get("d_flat", ""),
             "yield": data.get("yield", 0),
             "time_s": round(data.get("time", 0.0), 3),
+            "accept_rate": round(float(getattr(engine, "last_accept_rate", 0.0)), 5),
         }
         if rays.shape[0] < 3:
             return row
@@ -157,10 +189,15 @@ class DiscreteTestHarness(TestHarness):
         np.fill_diagonal(cos_sim, -1.0)
         nn = np.degrees(np.arccos(cos_sim.max(axis=1)))
         slacks = -(engine.A_prime @ rays.T) if engine is not None else np.array([[0.0]])
+        # Gram log-volume: slogdet(V^T V) — large/finite => vectors span their space;
+        # -inf (sign 0) => rank-deficient (clustered on a lower-dim plane).
+        gram_sign, gram_logdet = np.linalg.slogdet(rays.T @ rays)
+        gram_val = float(gram_logdet) if gram_sign > 0 else float("-inf")
 
         row.update({
             "unit_pca_pc1": round(float(var_ratio[0]), 4),
             "unit_pca_effdim90": eff_dim,
+            "gram_logdet": round(gram_val, 3) if np.isfinite(gram_val) else "-inf",
             "norm_min": round(float(lengths.min()), 2),
             "norm_median": round(float(np.median(lengths)), 2),
             "norm_max": round(float(lengths.max()), 2),
@@ -180,8 +217,8 @@ class DiscreteTestHarness(TestHarness):
         names = scenario_names if scenario_names is not None else list(self.results.keys())
         rows = [self.summary_row(n) for n in names]
         fields = [
-            "scenario", "d_orig", "d_flat", "yield", "time_s",
-            "unit_pca_pc1", "unit_pca_effdim90",
+            "scenario", "d_orig", "d_flat", "yield", "time_s", "accept_rate",
+            "unit_pca_pc1", "unit_pca_effdim90", "gram_logdet",
             "norm_min", "norm_median", "norm_max",
             "slack_min", "slack_median",
             "nn_angle_min_deg", "nn_angle_median_deg",
@@ -216,7 +253,7 @@ def run_gauntlet_csv(out_path="discrete_sampler_diagnostics.csv", target_quota=2
     :param target_quota: quota requested per scenario.
     """
     harness = DiscreteTestHarness()
-    scenarios = ["10D_Fat_Baseline", "15D_Needle", "15D_Pancake"]
+    scenarios = ["10D_Fat_Baseline", "15D_Needle", "15D_Pancake", "7D_Real_World_Degenerate"]
     for name in scenarios:
         data = harness.run_one(name, target_quota)
         if "error" not in data and len(data["rays"]) > 0:
