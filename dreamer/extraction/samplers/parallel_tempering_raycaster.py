@@ -200,6 +200,9 @@ def _pt_mcmc_walk(
                 continue
 
             # ---- Strict interior (B z' < -tol) ----
+            # B is the conditioner's flatland-projected constraint matrix (B_reduced,
+            # shape m x d_flat): this unrolled accumulation IS the precomputed projection
+            # B_Z @ z_prop — there is no per-step B @ (Z @ z) to eliminate.
             inside = True
             for row in range(m):
                 acc = 0.0
@@ -229,6 +232,9 @@ def _pt_mcmc_walk(
                 continue
 
             # ---- Repulsion vs a random subset of the (cold-chain) harvest ----
+            # Zero-allocation, fully-unrolled cosine similarity (dot products against the
+            # cached unit-harvest rows) — no np.linalg.norm and no temporary arrays in the
+            # hot loop, so numba keeps this branch allocation-free.
             s_prop = 0.0
             s_cur = 0.0
             if harvest_count > 0:
@@ -394,7 +400,7 @@ class ParallelTemperingSampler(Sampler):
         harvest_expansion_factor: float = 1.5,
         seed_bounds=(20, 100, 500, 2000, 5000),
         seed_eps: float = 1e-6,
-        max_steps_per_quota: int = 200,
+        max_steps_per_quota: int = 400,
         tol: float = 1e-6,
         rng_seed: int = GLOBAL_SEED,
     ):
@@ -416,7 +422,9 @@ class ParallelTemperingSampler(Sampler):
         :param harvest_expansion_factor: per-stalled-window relaxation of the harvest limit.
         :param seed_bounds: expanding box half-widths for the Chebyshev seed search.
         :param seed_eps: minimum inscribed radius required of the seed.
-        :param max_steps_per_quota: outer-step budget = this times the quota.
+        :param max_steps_per_quota: outer-step budget = this times the quota (default 400 —
+            a generous budget so the walker can overcome repulsion collisions and fill the
+            quota with a healthy angular spread rather than a tiny near-origin volume).
         :param tol: feasibility tolerance for the strict in-cone test.
         :param rng_seed: seed for numba's RNG (and NumPy) for reproducibility; ``<0`` disables.
         """
