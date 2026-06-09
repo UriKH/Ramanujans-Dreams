@@ -193,13 +193,15 @@ class DiscreteTestHarness(TestHarness):
         """Run a single scenario and stash the engine alongside the harvested rays.
 
         :param scenario_name: archetype key understood by ``_generate_matrix``.
-        :param target_quota: number of primitive vectors requested.
+        :param target_quota: exact number of primitive vectors to request.
         :param seeding: whether to seed the synthetic-matrix RNG for reproducibility.
         """
         A_prime = self._generate_matrix(scenario_name, seeding)
         engine = self.EngineClass(A_prime)
         start = time.time()
-        rays = engine.harvest(target_quota)
+        # exact=True so the diagnostic suite always targets the literal quota and never
+        # the cone-volume-scaled count (the production path scales; the suite must not).
+        rays = engine.harvest(target_quota, exact=True)
         elapsed = time.time() - start
         self.results[scenario_name] = {
             "rays": rays,

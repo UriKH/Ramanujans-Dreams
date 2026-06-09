@@ -28,6 +28,7 @@ import scipy.optimize as opt
 from numba import njit
 
 from dreamer.extraction.samplers.conditioner import HyperSpaceConditioner
+from dreamer.extraction.samplers.raycast_sampler import RaycastPipelineSampler
 from dreamer.extraction.samplers.sampler import Sampler
 from dreamer.utils.logger import Logger
 from dreamer.utils.rand import GLOBAL_SEED
@@ -398,6 +399,13 @@ class DiscreteMCMCSampler(Sampler):
         self.B = np.asarray(B_reduced, dtype=np.float64)
         self.d_flat = int(self.Z.shape[1])
 
+        # Cone-volume fraction (Gaussian dart-throw) — reused verbatim from the raycaster
+        # so the requested quota scales with the cone's solid angle, exactly as before.
+        self.fraction = float(RaycastPipelineSampler._estimate_cone_fraction(
+            self.B, self.d_flat,
+            samples=min(500_000, max(10_000, 10 ** self.d_flat)),
+        ))
+
         self.initial_lambda = initial_lambda
         self.gamma = gamma
         self.target_yield_ratio = target_yield_ratio
@@ -467,13 +475,20 @@ class DiscreteMCMCSampler(Sampler):
     def harvest(self, compute_n_samples, exact: bool = False) -> np.ndarray:
         """Harvest useful primitive integer trajectory directions via the discrete walk.
 
-        :param compute_n_samples: quota as an int, or a callable ``d_flat -> int``.
-        :param exact: kept for :class:`Sampler` compatibility; the walk already targets
-            the quota exactly and stops on reaching it.
+        :param compute_n_samples: quota as an int (taken literally), or a callable
+            ``d_flat -> int``.  For a callable the requested count is scaled by the
+            cone-volume fraction (``requested * fraction * 1.05``, floor 5) — the same
+            volume-dependent quota the raycaster uses — unless ``exact`` is set.
+        :param exact: if ``True`` with a callable, the requested count is used as-is
+            (no volume scaling); the walk targets the quota exactly and stops on reaching it.
         :return: ``(n, d_orig)`` array of unique primitive integer vectors, all with
             original-space norm ``<= max_useful_norm``; empty array on a handled failure.
         """
-        quota = int(compute_n_samples(self.d_flat)) if callable(compute_n_samples) else int(compute_n_samples)
+        if callable(compute_n_samples):
+            requested = int(compute_n_samples(self.d_flat))
+            quota = requested if exact else max(int(requested * self.fraction * 1.05), 5)
+        else:
+            quota = int(compute_n_samples)
         if quota <= 0 or self.d_flat == 0:
             return np.empty((0, self.d_orig), dtype=np.int64)
 
