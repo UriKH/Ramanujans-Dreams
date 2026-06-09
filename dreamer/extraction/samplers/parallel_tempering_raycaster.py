@@ -343,7 +343,6 @@ class ParallelTemperingSampler(Sampler):
         A_prime,
         *,
         beta_ladder=(1.0, 0.1, 0.01, 0.0),
-        swap_interval: int = 50,
         initial_lambda: float = 0.5,
         gamma: float = 1.0,
         target_yield_ratio: float = 0.01,
@@ -362,7 +361,6 @@ class ParallelTemperingSampler(Sampler):
         """
         :param A_prime: ``(rows, d_orig)`` constraint matrix for the shard.
         :param beta_ladder: descending temperature coefficients (1.0 cold .. 0.0 explorer).
-        :param swap_interval: attempt adjacent replica swaps every this many steps.
         :param initial_lambda: starting/ceiling base gravity weight.
         :param gamma: repulsion weight.
         :param target_yield_ratio: desired cold-chain useful-primitives-per-step the PID targets.
@@ -397,7 +395,6 @@ class ParallelTemperingSampler(Sampler):
         ))
 
         self.beta_ladder = np.asarray(beta_ladder, dtype=np.float64)
-        self.swap_interval = swap_interval
         self.initial_lambda = initial_lambda
         self.gamma = gamma
         self.target_yield_ratio = target_yield_ratio
@@ -496,11 +493,17 @@ class ParallelTemperingSampler(Sampler):
             Logger.Levels.debug,
         ).log()
 
-        max_steps = max(self.monitor_window, quota * self.max_steps_per_quota)
+        # Top-K safety net: over-sample 10% then return the shortest `quota` vectors,
+        # so the user always gets the best (lowest-norm) trajectories the walk found.
+        internal_quota = max(int(quota * 1.10), quota)
+        max_steps = max(self.monitor_window, internal_quota * self.max_steps_per_quota)
+        # Dynamic swap interval: ~100 swap attempts over the walk regardless of budget
+        # (a fixed interval starves swaps when the quota fills in few steps).
+        dynamic_swap_interval = max(20, max_steps // 100)
 
         harvest, count, accept_rate = _pt_mcmc_walk(
             self.Z, self.B, z0.astype(np.int64), v0.astype(np.int64), self.beta_ladder,
-            quota, max_steps, self.swap_interval,
+            internal_quota, max_steps, dynamic_swap_interval,
             self.initial_lambda, self.gamma,
             self.target_yield_ratio, self.learning_rate, self.min_gravity_floor,
             self.monitor_window, self.repulsion_subset,
@@ -519,4 +522,8 @@ class ParallelTemperingSampler(Sampler):
             except NoUsefulPointsError as err:
                 Logger(str(err), Logger.Levels.warning).log()
             return np.empty((0, self.d_orig), dtype=np.int64)
-        return np.unique(harvest[:count], axis=0)
+
+        unique = np.unique(harvest[:count], axis=0)
+        # sort by L2 norm ascending and truncate to the user's exact quota
+        order = np.argsort(np.linalg.norm(unique, axis=1))
+        return unique[order][:quota]
