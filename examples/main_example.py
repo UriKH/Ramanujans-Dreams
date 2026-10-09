@@ -84,7 +84,7 @@ if __name__ == '__main__':
         },
         # Post-process graphing (writes under system.EXPORT_GRAPHS; all off by default).
         graph={
-            'PLOT_BEST_DELTA_SEQUENCE': True,   # δ-sequence of the best trajectory per (CMF, constant)
+            'PLOT_BEST_DELTA_SEQUENCE': False,   # δ-sequence of the best trajectory per (CMF, constant)
             'PLOT_DELTA_HISTOGRAMS': False,      # δ histograms per shard and per CMF
             'WRITE_BUMPINESS_TABLE': False,      # per-shard δ non-smoothness (semivariogram + δ-seq TV)
             'DELTA_SEQUENCE_DEPTH': 1000,
@@ -92,9 +92,9 @@ if __name__ == '__main__':
     )
 
     System(
-        function_sources=[pFq([log(2), pi], 2, 1, -1)],
+        function_sources=[pFq(log(2), 2, 1, -1)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
-        searcher=search.SimulatedAnnealingMod,
+        searcher=search.SearcherModV1,
         post_processor=post_process.Tier3PostProcessModV1,
-    ).run(constants=[log(2), pi])
+    ).run(constants=[log(2)])
