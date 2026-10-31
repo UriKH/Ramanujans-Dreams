@@ -200,7 +200,9 @@ class MeijerGGrouping(Grouping):
             raise ValueError(
                 f"n must be <= p and m must be <= q: n={self.n}, p={self.p}, m={self.m}, q={self.q}"
             )
-        return [(0, self.m), (self.m, self.q), (self.q, self.q + self.n), (self.q + self.n, None)]
+        # ramanujantools orders the MeijerG axes a0..a_{p-1}, b0..b_{q-1}
+        # (``cmf.matrices.keys()``), so the blocks are a[:n], a[n:], b[:m], b[m:].
+        return [(0, self.n), (self.n, self.p), (self.p, self.p + self.m), (self.p + self.m, None)]
 
 
 class GroupingFactory:
