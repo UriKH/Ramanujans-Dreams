@@ -148,13 +148,20 @@ class Grouping(ABC):
     def group(self) -> List[np.ndarray]:
         """
         Return the column-index groups for the given per-coordinate shift.
+
+        Each block ``(start, stop)`` from :meth:`groups` is split by equal
+        fractional shift.  The returned indices are **absolute** column indices
+        (offset by the block's ``start``), so they can be used directly on the
+        full point matrix.  ``stop=None`` means "to the last column".
         """
         reduced = self.reduce_shift(self.shift)
         groups: List[np.ndarray] = []
 
-        for g in self.groups(self.shift):
-            for off in np.unique(r := reduced[g[0]:g[1]]):
-                groups.append(np.where(r == off)[0])
+        for start, stop in self.groups(self.shift):
+            stop = len(reduced) if stop is None else stop
+            block = reduced[start:stop]
+            for off in np.unique(block):
+                groups.append(np.where(block == off)[0] + start)
         return groups
 
 
