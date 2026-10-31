@@ -54,11 +54,46 @@ For CMFs of 7 or more dimensions allow for up to 10 minutes of finding shards.
 
 #### Memory and cores
 
-Denote dimesnion with D:
-- For CMF of $D \leq 3$: ask for 16 GB of RAM, 16 cores
-- For CMF of $4 \leq D \leq 5$: ask for 32 GB of RAM, 32 cores
-- For CMF of $6 \leq D \leq 10$: ask for 64 GB of RAM, 64 cores
-- For CMF of $11 \leq D$: ask for 128 GB of RAM, 128 cores
+Denote dimesnion with D (for both pFq and MeijerG, $D = p + q$). We assume the search space of a shard has the full dimension D (no trajectory constraint removes a direction).
+
+**Cores: request $2D + 1$ cores, run with $2D$ workers** (`TOTAL_CORES = 2D`) and look-ahead on (`ANNEAL_LOOKAHEAD = 'auto'`, the default).
+- Each Simulated Annealing step walks the $2D$ neighbours of the current trajectory (±1 in each direction), so $2D$ workers walk a whole step at once. The search budget per seed (500 accepted moves, at most 10,000 steps) does not depend on D.
+- With look-ahead, workers that would sit idle already walk the most likely next step. Measured: 3-D runs 1.2–1.4x faster, 5-D runs 1.3x faster, with identical results.
+- More workers than $2D$ barely help: in 5-D, 16 workers instead of 10 gave 4% more speed for 60% more cost. Without look-ahead, more than about $2D$ workers give nothing.
+- The extra core is for the main process (it runs the SA loop, the watchdog threads and the monitor). Measured on Zeus: 0.11 cores on average, 0.24 at the 95th percentile, short peaks of 0.9. One core is enough; RD does not reserve it by itself, so it must be requested.
+- Shard extraction and analysis also run on the $2D$ workers. They are spread evenly over the workers, so fewer cores make them take longer but cost the same.
+
+| D | Workers (`TOTAL_CORES`) | Cores to request |
+|---|---|---|
+| 3 | 6 | 7 |
+| 5 | 10 | 11 |
+| 7 | 14 | 15 |
+| 8 | 16 | 17 |
+| 10 | 20 | 21 |
+| 15 | 30 | 31 |
+
+**Memory** (not billed; kept as before):
+- For CMF of $D \leq 3$: ask for 16 GB of RAM
+- For CMF of $4 \leq D \leq 5$: ask for 32 GB of RAM
+- For CMF of $6 \leq D \leq 10$: ask for 64 GB of RAM
+- For CMF of $11 \leq D$: ask for 128 GB of RAM
+
+Measured: a 3-D run with 8 workers peaked at 2.2 GB on Zeus.
+
+#### Performance on Zeus
+
+Calibration job 4852776 (31-10-26, `zeus_new_q`, node n088, Intel Xeon Platinum 8358 @ 2.6 GHz, 2 threads per core, node load about 46 of 128): the ${}_2F_1(-\frac{1}{2})$ $\log(\frac{3}{2})$ run (shard extraction, analysis and SA) with 8 workers and look-ahead.
+
+| Machine | Wall time | Busy cores (average) |
+|---|---|---|
+| Laptop (18 cores), mean of 3 runs | 126.5 s (125.8, 124.7, 129.0) | 7.1 |
+| Zeus | 433.5 s (405 s of computation + about 28 s Python start) | 6.4 |
+
+**Zeus is about 3.4x slower than the laptop** for the same run and the same number of workers. Use this factor to plan walltimes: Zeus time ≈ 3.4 × laptop time.
+
+Estimates with this factor (laptop timings x 3.4):
+- A 3-D run takes about 7 minutes.
+- A 5-D run (for example ${}_3F_2(\frac{1}{2})$, about 180 shards) takes about 35–40 hours, about 6 NIS each. The 72 h walltime leaves room for about 2x more work than estimated.
 
 #### Analysis
 
