@@ -37,6 +37,24 @@ shifts).  Within a fractional-shift group the swap is a valid lattice
 symmetry even when the integer parts differ, which is why we sort the
 absolute ``x`` and subtract the per-coordinate shift afterwards (for the
 common all-zero shift this reduces to a plain block sort).
+
+The :math:`MeijerG` family
+==========================
+:math:`G^{m,n}_{p,q}` is symmetric under
+:math:`S_n \times S_{p-n} \times S_m \times S_{q-m}` acting on
+``a[:n], a[n:], b[:m], b[m:]``.  ramanujantools orders the axes
+``a0..a_{p-1}, b0..b_{q-1}``, so the column blocks are
+``(0,n), (n,p), (p,p+m), (p+m,end)`` (again split by fractional shift).
+
+Verification (no shard may be lost)
+===================================
+Each family *declares* its groups through a :class:`Grouping`;
+:func:`symmetry_for_cmf` then cross-checks them with
+:func:`verify_symmetry_groups` against the CMF matrices
+(:math:`M_{\sigma(k)}(\sigma x) = M_k(x)` for every axis, tested exactly at
+generic rational points) and drops any group that fails.  A wrong
+declaration therefore only weakens deduplication; it can never merge a
+shard that is not truly symmetric to one already kept.
 """
 
 from __future__ import annotations

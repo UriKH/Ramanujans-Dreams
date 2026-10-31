@@ -32,7 +32,13 @@ So extraction does two things:
 2. **Locate the shards**: each shard is a convex cell `A·x < b` (an intersection
    of hyperplane half-spaces) together with an **interior integer point** to
    search from. A CMF can produce many shards; symmetry can be exploited to
-   avoid extracting equivalent ones twice.
+   avoid extracting equivalent ones twice (`IGNORE_DUPLICATE_SEARCHABLES`).
+   Each CMF family declares its own symmetry groups (pFq: permutations within
+   the x block and within the y block; MeijerG: within `a[:n]`, `a[n:]`,
+   `b[:m]`, `b[m:]`), always restricted to coordinates with the same
+   fractional shift. Before use, every declared group is checked against the
+   CMF matrices and dropped if it is not an exact symmetry, so a wrong
+   declaration can only reduce deduplication — it never drops a shard.
 
 Once a shard is known, this stage also knows how to **sample trajectory
 directions** inside it — the recession cone of valid integer directions — which
