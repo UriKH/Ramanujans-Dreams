@@ -1480,7 +1480,13 @@ class TrajectoryAttributesHandler:
         in ``search.DEPTH_CONVERGENCE_THRESHOLD``.
 
         Returns ``(converges, limits)`` — ``converges`` is True iff successive
-        estimates differ by less than ``search.LIMIT_DIFF_ERROR_BOUND``.
+        estimates differ by less than ``search.LIMIT_DIFF_ERROR_BOUND`` **and are
+        not all identical**.  The estimates are exact rationals, so identical
+        values mean a *frozen* walk: the normalised walk column is the same at
+        every depth (e.g. a pFq start that keeps a parameter on non-positive
+        integers), the sequence approaches nothing, and LIReC can only fit the
+        constant with a rational approximation (δ ≈ 1, constant in depth).  Such
+        a trajectory never converges to an irrational limit, so it is rejected.
         """
         depth = depth or self._depth
         # Check identification *before* walking limits — an unidentified trajectory
@@ -1514,6 +1520,15 @@ class TrajectoryAttributesHandler:
 
         if len(floats) < 2:
             # Not enough usable estimates to judge convergence.
+            return False, limits
+
+        if all(f == floats[0] for f in floats[1:]):
+            # Frozen walk: the exact estimate never moves (see docstring).
+            Logger(
+                f'Frozen walk: the p/q estimate is identical at every checked depth; '
+                f'not a converging trajectory. {self._trajectory_repr()}',
+                Logger.Levels.debug,
+            ).log()
             return False, limits
 
         # check that the estimated limits are consistent (within error bound)
