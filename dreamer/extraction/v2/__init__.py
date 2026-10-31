@@ -18,6 +18,7 @@ from .symmetry import (
     BlockSortSymmetry,
     SymmetryStrategy,
     symmetry_for_cmf,
+    verify_symmetry_groups,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "Strategy",
     "SymmetryStrategy",
     "symmetry_for_cmf",
+    "verify_symmetry_groups",
 ]

@@ -1418,3 +1418,44 @@ class TestNoLostShards:
         """Counts recorded in context/shard_symmetries/SYMMETRIES.md (z = -1)."""
         assert _orbit_audit(_rt_pfq(3, 1), [0, 0, 0, 0])[0] == 50
         assert _orbit_audit(_rt_pfq(2, 2), [0, 0, 0, 0])[0] == 100
+
+
+class TestVerifySymmetryGroups:
+    """The safety net drops any declared group that is not an exact symmetry."""
+
+    def test_keeps_true_groups_unchanged(self):
+        from dreamer.extraction.v2 import verify_symmetry_groups
+
+        kept = verify_symmetry_groups(_rt_pfq(3, 3), [[0, 1, 2], [3, 4, 5]], [0] * 6)
+        assert [list(map(int, g)) for g in kept] == [[0, 1, 2], [3, 4, 5]]
+
+    def test_drops_planted_non_symmetry(self):
+        """a0<->a1 is not a symmetry of G^{2,1}_{3,3} (a0 is in the a[:n] block)."""
+        from dreamer.extraction.v2 import verify_symmetry_groups
+
+        kept = verify_symmetry_groups(_rt_mg(2, 1, 3, 3), [[0, 1], [3, 4]], [0] * 6)
+        assert [list(map(int, g)) for g in kept] == [[3, 4]]
+
+    def test_drops_group_with_mixed_fractional_shift(self):
+        from dreamer.extraction.v2 import verify_symmetry_groups
+
+        kept = verify_symmetry_groups(_rt_pfq(2, 2), [[0, 1], [2, 3]], [0, _HALF, 0, 0])
+        assert [list(map(int, g)) for g in kept] == [[2, 3]]
+
+    def test_drops_singletons(self):
+        from dreamer.extraction.v2 import verify_symmetry_groups
+
+        assert verify_symmetry_groups(_rt_pfq(2, 1), [[0], []], [0, 0, 0]) == []
+
+    def test_factory_guards_against_a_wrong_family_grouping(self, monkeypatch):
+        """Re-introduce the old b-first MeijerG blocks: the verifier must still
+        prevent any shard from being lost."""
+        from dreamer.extraction.v2 import symmetry as symmetry_mod
+
+        def old_b_first_blocks(self, shift):
+            return [(0, self.m), (self.m, self.q), (self.q, self.q + self.n), (self.q + self.n, None)]
+
+        monkeypatch.setattr(symmetry_mod.MeijerGGrouping, "groups", old_b_first_blocks)
+        n_orbits, n_merged, n_missing, _ = _orbit_audit(_rt_mg(2, 1, 2, 2), [0, 0, 0, 0])
+        assert n_merged == 0
+        assert n_missing == 0
