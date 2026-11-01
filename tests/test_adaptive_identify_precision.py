@@ -106,6 +106,16 @@ def test_wrong_target_is_not_identified(wrong):
     assert not _gompertz(constant=wrong).identified()
 
 
+@pytest.mark.timeout(60)
+def test_digit_estimate_stays_numeric():
+    """The digit estimate of a walk whose column changes by a huge exact rational must not go
+    symbolic (sympy's exact floor(log(...)) factorises the integers and never returns)."""
+    h = _handler(MeijerG(0, 2, 2, 1, 1), GOMPERTZ, (0, 0, 0), (-2, -1, 0), walk_type=2)
+    digits = h._walk_correct_digits(1000)
+    assert digits is None or isinstance(digits, int)
+    assert not h.identified()
+
+
 def test_too_few_digits_skip_the_retry(lirec_calls, monkeypatch):
     monkeypatch.setattr(config.search, "IDENTIFY_MIN_DIGITS", 10 ** 6)
     assert not _gompertz().identified()
