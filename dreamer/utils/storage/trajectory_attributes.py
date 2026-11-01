@@ -1925,7 +1925,9 @@ class TrajectoryAttributesHandler:
         )
         if worst == 0:
             return None
-        return int(sp.floor(-sp.log(worst, 10)))
+        # Numerically, from the exact integers: sympy's exact floor(log(...)) factorises them.
+        worst = sp.Rational(worst)
+        return math.floor(math.log10(worst.q) - math.log10(worst.p))
 
     def _form_correct_digits(self, form: sp.Expr, walk_values: list) -> float:
         """Correct digits of the constant reconstructed by ``form`` on ``walk_values``."""
