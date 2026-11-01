@@ -543,7 +543,9 @@ class TrajectoryAttributesHandler:
     def _tier1_walk_depths(self) -> set:
         """Depths the Tier-1 computation reads W at (see section comment)."""
         depth = int(self._depth)
-        depths = {depth, min(int(search_config.IDENTIFY_DEPTH), depth)}
+        id_depth = min(int(search_config.IDENTIFY_DEPTH), depth)
+        # the identification depth's digits probe (low-precision LIReC retry)
+        depths = {depth, id_depth, self._digits_probe_depth(id_depth)}
         for coef in search_config.DEPTH_CONVERGENCE_THRESHOLD:
             d = round(coef * depth)
             depths.update((d, max(d - 1, 0)))
@@ -1793,18 +1795,39 @@ class TrajectoryAttributesHandler:
                 # signal that identification succeeded (see ``identified``).
                 return matched, walk_values
 
-        # Compute p, q using LIReC (values evaluated at CONSTANT_NO_DIGITS_LOW_RES).
+        # Compute p, q using LIReC (values evaluated at CONSTANT_NO_DIGITS_LOW_RES); a
+        # slow-converging walk with fewer correct digits than that is retried with
+        # part of its own correct digits (see ``_identify_low_precision``).
+        found = self._lirec_relation(walk_values, search_config.CONSTANT_NO_DIGITS_LOW_RES)
+        if found is None:
+            found = self._identify_low_precision(depth, walk_values)
+        if found is None:
+            return None, walk_values
+        p, q, _ = found
+
+        if self._searchable:
+            self._searchable.cache.append((tuple(p), tuple(q)))
+        return (p, q), walk_values
+
+    def _lirec_relation(self, walk_values: list, digits: int):
+        """LIReC on the constant and the walk column, both evaluated to ``digits`` digits.
+
+        LIReC accepts only relations that hold to its input precision, so ``digits``
+        must not exceed the digits the walk column really has.
+
+        :return: ``(p, q, form)`` — ``form`` is the relation as an expression in the
+            column symbols ``1, c1, c2, …`` — when LIReC finds a relation that
+            reconstructs the constant within ``IDENTIFY_CHECK_THRESHOLD``; else ``None``.
+        """
         try:
-            res = db.identify(
-                [low_res_constant] + [v.evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES) for v in walk_values[1:]]
-            )
+            res = db.identify([self.constant().evalf(digits)] + [v.evalf(digits) for v in walk_values[1:]])
         except Exception as e:
             Logger(f'Error while identifying constant. LIReC failed with: "{e}"', Logger.Levels.warning).log()
-            return None, walk_values
+            return None
 
         # LIReC may also return an empty list when it cannot identify the constant
         if len(res) == 0:
-            return None, walk_values
+            return None
 
         # extract p, q from LIReC result
         res = res[0]
@@ -1826,11 +1849,93 @@ class TrajectoryAttributesHandler:
         if sp.N(err, 15) > search_config.IDENTIFY_CHECK_THRESHOLD:
             # LIReC provided a combination that does not reconstruct the constant
             # to tolerance (spurious relation) — treat as not identified.
-            return None, walk_values
+            return None
+        return p, q, estimated_expr
 
-        if self._searchable:
-            self._searchable.cache.append((tuple(p), tuple(q)))
-        return (p, q), walk_values
+    def _identify_low_precision(self, depth: int, walk_values: list):
+        """Retry LIReC with the digits a slow-converging walk really has.
+
+        A walk with fewer than ``CONSTANT_NO_DIGITS_LOW_RES`` correct digits at
+        ``depth`` (e.g. δ ≈ −0.94 at depth 1000: ~190 digits) satisfies its true
+        relation only to those digits, so LIReC at the full precision finds nothing.
+        LIReC gets ``IDENTIFY_LIREC_DIGITS_FRACTION`` of the walk's correct digits
+        ``s``; the relation is accepted only if it also holds on the digits LIReC
+        never saw (at least ``IDENTIFY_VERIFY_DIGITS_FRACTION · s`` correct digits)
+        and gains digits from the shallower depth to ``depth``.  A spurious relation
+        fitted to the lower precision matches the constant only to about that
+        precision, and does not improve with depth.
+
+        :return: ``(p, q, form)`` as :meth:`_lirec_relation`, or ``None``.
+        """
+        digits = self._walk_correct_digits(depth)
+        if digits is None or not search_config.IDENTIFY_MIN_DIGITS <= digits < search_config.CONSTANT_NO_DIGITS_LOW_RES:
+            return None
+        found = self._lirec_relation(walk_values, int(digits * search_config.IDENTIFY_LIREC_DIGITS_FRACTION))
+        if found is None:
+            return None
+
+        form = found[2]
+        shallow_values, _ = self._effective_walk_values(self._digits_probe_depth(depth))
+        verified = self._form_correct_digits(form, walk_values)
+        earlier = self._form_correct_digits(form, shallow_values) if shallow_values is not None else None
+        if (verified < search_config.IDENTIFY_VERIFY_DIGITS_FRACTION * digits
+                or earlier is None or not verified > earlier):
+            Logger(
+                f'Low-precision LIReC relation rejected: {verified:.1f} correct digits at depth {depth} '
+                f'({earlier} at the shallower depth), walk has ~{digits}. {self._trajectory_repr()}',
+                Logger.Levels.debug,
+            ).log()
+            return None
+        Logger(
+            f'Identified at reduced LIReC precision ({int(digits * search_config.IDENTIFY_LIREC_DIGITS_FRACTION)} '
+            f'of ~{digits} correct digits at depth {depth}). {self._trajectory_repr()}',
+            Logger.Levels.debug,
+        ).log()
+        return found
+
+    @staticmethod
+    def _digits_probe_depth(depth: int) -> int:
+        """The shallower depth the walk's correct digits are estimated against.
+
+        The shallowest convergence-check depth, so for the full walk depth it is a
+        stored checkpoint (see ``_tier1_walk_depths``).
+        """
+        return round(min(search_config.DEPTH_CONVERGENCE_THRESHOLD) * depth)
+
+    def _walk_correct_digits(self, depth: int) -> Optional[int]:
+        """Estimated correct digits of the normalised walk column at ``depth``.
+
+        The column converges to a limit vector; its agreement with the column at
+        :meth:`_digits_probe_depth` bounds the error at ``depth`` from above (the
+        shallower column is the less accurate one), so the estimate is conservative.
+
+        :return: the worst entry's relative agreement in digits, or ``None`` when it
+            cannot be measured (failed / degenerate walk, or an unchanged column).
+        """
+        shallow = self._digits_probe_depth(depth)
+        if not 0 < shallow < depth:
+            return None
+        deep_values, _ = self._effective_walk_values(depth)
+        shallow_values, _ = self._effective_walk_values(shallow)
+        if deep_values is None or shallow_values is None:
+            return None
+        worst = max(
+            (sp.Abs((a - b) / b) for a, b in zip(shallow_values[1:], deep_values[1:]) if b != 0),
+            default=sp.Integer(0),
+        )
+        if worst == 0:
+            return None
+        return int(sp.floor(-sp.log(worst, 10)))
+
+    def _form_correct_digits(self, form: sp.Expr, walk_values: list) -> float:
+        """Correct digits of the constant reconstructed by ``form`` on ``walk_values``."""
+        precision = search_config.CONSTANT_NO_DIGITS_LOW_RES + 50
+        syms = [1] + list(sp.symbols(f'c:{self.traj_size()}')[1:])
+        estimated = form.subs({sym: v for sym, v in zip(syms, walk_values)})
+        if not estimated.is_finite:
+            return float('-inf')   # zero denominator on this column
+        err = sp.Abs(sp.Float(estimated, precision) - self.constant().evalf(precision))
+        return float('inf') if err == 0 else float(-sp.log(err, 10))
 
     def p_vector(self, depth: Optional[int] = None) -> list:
         """Projection vector p such that p·walk gives the numerator sequence."""
