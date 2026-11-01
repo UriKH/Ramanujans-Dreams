@@ -102,6 +102,24 @@ class SearchConfig(Configurable):
         default=1e-10,
         metadata={"description": "Tolerance used when deciding whether a searched trajectory identifies the constant."},
     )
+    IDENTIFY_MIN_DIGITS: int = field(
+        default=30,
+        metadata={"description": "Fewest correct digits (estimated from the walk column at 0.9N vs N) a "
+                  "walk needs for the low-precision LIReC retry. A trajectory that fails LIReC at "
+                  "CONSTANT_NO_DIGITS_LOW_RES digits because it converges slowly is retried with part of "
+                  "its own correct digits; below this floor no retry is made."},
+    )
+    IDENTIFY_LIREC_DIGITS_FRACTION: float = field(
+        default=0.5,
+        metadata={"description": "Fraction of the walk's estimated correct digits given to LIReC in the "
+                  "low-precision retry. The remaining digits are held out to verify the relation."},
+    )
+    IDENTIFY_VERIFY_DIGITS_FRACTION: float = field(
+        default=0.9,
+        metadata={"description": "A relation found by the low-precision retry is accepted only if it "
+                  "reproduces the constant to at least this fraction of the walk's estimated correct "
+                  "digits (i.e. on digits LIReC never saw), and gains digits from depth 0.9N to N."},
+    )
     IDENTIFY_DEPTH: int = field(
         default=1000,
         metadata={"description": "Walk depth at which the p/q integer relation is identified via "

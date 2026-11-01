@@ -193,8 +193,10 @@ def test_identified_trajectory_walks_depth_steps_once(monkeypatch, shard, depth,
 @pytest.mark.parametrize("depth", [1000, 1200])
 def test_unidentified_trajectory_never_walks_more_than_before(monkeypatch, shard, depth):
     """Unidentified: identification walks IDENTIFY_DEPTH and (by design) retries
-    at the full depth D.  New: D steps in total (the retry continues from the
-    first walk); old: IDENTIFY_DEPTH + D.  No convergence/δ walk either way."""
+    at the full depth D; each attempt also reads the column at 0.9× its depth
+    (the low-precision LIReC retry's digit estimate).  New: D steps in total (the
+    retry continues from the first walk, the 0.9× columns are stored on the way);
+    old: one walk from 0 per requested depth.  No convergence/δ walk either way."""
     from ramanujantools import Matrix
 
     def run(raw_walks=None):
@@ -210,8 +212,10 @@ def test_unidentified_trajectory_never_walks_more_than_before(monkeypatch, shard
     monkeypatch.setattr(ta.db, "identify", lambda values: [])   # LIReC finds nothing
     new = run()
     old = run(_old_raw_walks)
+    id_depth = int(config.search.IDENTIFY_DEPTH)
+    attempts = [id_depth] if depth == id_depth else [id_depth, depth]
     assert new == depth
-    assert old == (depth if depth == int(config.search.IDENTIFY_DEPTH) else 1000 + depth)
+    assert old == sum(d + TrajectoryAttributesHandler._digits_probe_depth(d) for d in attempts)
     assert new <= old
 
 
