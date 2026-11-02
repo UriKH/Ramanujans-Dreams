@@ -125,7 +125,9 @@ ATTRIBUTE_META: Dict[str, AttributeMeta] = {
         # v4 (2026-11-01): a walk with fewer correct digits than
         # CONSTANT_NO_DIGITS_LOW_RES is retried at its own precision — slow-
         # converging trajectories (δ ≈ −0.9…−1) were never identified before.
-        version=4,
+        # v5 (2026-11-02): the estimate p·v/q·v is compared with the constant
+        # signed (was |p·v/q·v|) — δ ≈ −1 for every negative constant before.
+        version=5,
     ),
     **{name: AttributeMeta(deps=(TIER1,)) for name in TIER1_ATTRIBUTES},
     "traj_size": AttributeMeta(),

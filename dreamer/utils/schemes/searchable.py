@@ -162,7 +162,7 @@ class Searchable(ABC):
                 v2 = sp.Matrix(v2).T
                 numerator = v1.dot(values_vec)
                 denom = v2.dot(values_vec)
-                err = sp.Abs(abs(sp.Rational(numerator, denom)) - low_res_constant)
+                err = sp.Abs(sp.Rational(numerator, denom) - low_res_constant)
                 return sp.N(err, 25) < search_config.CACHE_ACCEPTANCE_THRESHOLD
 
             matched = self.cache.find(matcher)
@@ -231,7 +231,7 @@ class Searchable(ABC):
             if not estimated or not err:
                 numerator = p.dot(values_vec)
                 denom = q.dot(values_vec)
-                estimated = abs(sp.Rational(numerator, denom))
+                estimated = sp.Rational(numerator, denom)
             # The error must be resolved beyond the constant's own rounding;
             # raise the precision until it is (see ``resolved_error``).
             err, _, _ = resolved_error(
@@ -379,7 +379,7 @@ class Searchable(ABC):
             q = sp.Matrix(q).T
             numerator = p.dot(values_vec)
             denom = q.dot(values_vec)
-            estimated = abs(sp.Rational(numerator, denom))
+            estimated = sp.Rational(numerator, denom)
             floats.append(estimated)
 
         f1, f2, f3 = floats
