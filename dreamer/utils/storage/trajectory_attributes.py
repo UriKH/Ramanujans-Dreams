@@ -11,7 +11,7 @@ from sympy.abc import n
 
 from LIReC.db.access import db
 from ramanujantools import LinearRecurrence, Matrix, Limit, linear_recurrence
-from dreamer.utils.constants.high_precision import high_precision, resolved_error
+from dreamer.utils.constants.high_precision import delta_from_error, high_precision, log_of_integer, resolved_error
 from dreamer.utils.constants.constant import is_joint_value
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searchable import Searchable
@@ -1283,10 +1283,12 @@ class TrajectoryAttributesHandler:
                 Logger.Levels.debug,
             ).log()
             return False, float('-inf')
-        estimated = sp.Abs(sp.Rational(numerator, denom))
-        denom_int = sp.Abs(sp.denom(estimated))
+        # Built-in abs() on exact numbers: sp.Abs runs sympy's assumption system, which can
+        # primality-test a huge denominator (minutes, depending on the hash seed).
+        estimated = abs(sp.Rational(numerator, denom))
+        denom_int = abs(sp.denom(estimated))
 
-        if sp.Abs(denom_int) <= search_config.MIN_ESTIMATE_DENOMINATOR:
+        if denom_int <= search_config.MIN_ESTIMATE_DENOMINATOR:
             Logger(f'Guardrail reached - not good enough approximation. Ignoring trajectory\n'
                    f'Reason: Denominator <= {search_config.MIN_ESTIMATE_DENOMINATOR}',
                    Logger.Levels.debug).log()
@@ -1311,7 +1313,7 @@ class TrajectoryAttributesHandler:
         # Match Searchable.calc_delta: use the integer denominator of the
         # rational estimate for the delta formula, not the raw symbolic q·walk
         # (which can be a fractional Rational).
-        return True, -1 - sp.log(err) / sp.log(denom_int)
+        return True, delta_from_error(err, denom_int)
 
     def delta_sequence(self, depth: Optional[int | list] = None) -> list:
         """
@@ -1455,7 +1457,7 @@ class TrajectoryAttributesHandler:
                 for d, lim in zip(depths, limits):
                     try:
                         q = lim.as_rational().q
-                        ys.append(float(sp.log(q).evalf(30)))
+                        ys.append(float(log_of_integer(q)))
                         xs.append(d)
                     except Exception:
                         continue  # degenerate step — skip this depth
@@ -1517,7 +1519,7 @@ class TrajectoryAttributesHandler:
             denom = q.dot(values_vec)
             if denom == 0:
                 continue
-            estimated = sp.Abs(sp.Rational(numerator, denom))
+            estimated = abs(sp.Rational(numerator, denom))
             floats.append(estimated)
 
         if len(floats) < 2:
@@ -1696,7 +1698,7 @@ class TrajectoryAttributesHandler:
             denom = q.dot(wc)
             if denom == 0:
                 return None
-            estimated = sp.Abs(sp.Rational(p.dot(wc), denom))
+            estimated = abs(sp.Rational(p.dot(wc), denom))
             # delta() has populated _high_res_constant at the escalated precision.
             constant = self._high_res_constant
             if constant is None:
@@ -1786,7 +1788,7 @@ class TrajectoryAttributesHandler:
                 v2 = sp.Matrix(v2).T
                 numerator = v1.dot(walk_col)
                 denom = v2.dot(walk_col)
-                err = sp.Abs(sp.Abs(sp.Rational(numerator, denom)) - low_res_constant)
+                err = sp.Abs(abs(sp.Rational(numerator, denom)) - low_res_constant)
                 return sp.N(err, 25) < search_config.CACHE_ACCEPTANCE_THRESHOLD
 
             if matched := self._searchable.cache.find(matcher):
@@ -1845,8 +1847,8 @@ class TrajectoryAttributesHandler:
         q = [q_dict[sym] for sym in ext_syms]
 
         estimated = estimated_expr.subs({sym: v for sym, v in zip(ext_syms, list(walk_values))})
-        err = sp.Abs(estimated - self.constant())
-        if sp.N(err, 15) > search_config.IDENTIFY_CHECK_THRESHOLD:
+        err = abs(sp.N(estimated - self.constant(), 15))   # numeric: no assumption system on huge integers
+        if err > search_config.IDENTIFY_CHECK_THRESHOLD:
             # LIReC provided a combination that does not reconstruct the constant
             # to tolerance (spurious relation) — treat as not identified.
             return None
@@ -1920,7 +1922,7 @@ class TrajectoryAttributesHandler:
         if deep_values is None or shallow_values is None:
             return None
         worst = max(
-            (sp.Abs((a - b) / b) for a, b in zip(shallow_values[1:], deep_values[1:]) if b != 0),
+            (abs(sp.Rational((a - b) / b)) for a, b in zip(shallow_values[1:], deep_values[1:]) if b != 0),
             default=sp.Integer(0),
         )
         if worst == 0:
