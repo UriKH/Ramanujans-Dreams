@@ -3,6 +3,7 @@ from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, cast
 from numba import njit
 
+from dreamer.utils.deprecation import warn_deprecated
 from dreamer.utils.rand import *
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
@@ -185,6 +186,7 @@ class GeneticSearchMethod(SearchMethod):
         :raises ValueError: If key GA hyperparameters are outside valid ranges.
         :return: None.
         """
+        warn_deprecated("GeneticSearchMethod", "dreamer.search.methods.genetic_search.GeneticSearch")
         super().__init__(space, constant, use_LIReC, data_manager, share_data)
 
         self.elite_fraction = search_config.GA_ELITE_FRACTION

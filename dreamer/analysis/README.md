@@ -52,7 +52,7 @@ writer (buffered appends).
 
 Because analysis and search share the same per-trajectory store and attribute
 machinery, the analyzer is built on top of the search stage's `SerialSearcher`
-rather than a separate engine.
+(its `sample_pairs` only) rather than a separate engine.
 
 ---
 
@@ -62,7 +62,7 @@ rather than a separate engine.
 |------|------------------|
 | `analyzers/serial_scan/analyzer_mod.py` | `AnalyzerModV1` — the stage orchestrator: dedup shards, sample, Tier-1, filter, rank. |
 | `analyzers/serial_scan/config.py` | Defaults specific to the serial-scan analyzer. |
-| `analysis_methods/serial_scan_analyzer.py` | The analysis method (sampling + prioritisation logic) the module wraps. |
+| `analysis_methods/serial_scan_analyzer.py` | **Deprecated** pre-DTO `Analyzer` (legacy δ path); not used by `AnalyzerModV1`, removed in dreamer v2. |
 | `errors.py` | Analysis-specific exceptions. |
 
 ---

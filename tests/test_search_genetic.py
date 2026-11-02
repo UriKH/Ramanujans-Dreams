@@ -15,6 +15,9 @@ from dreamer.search.searchers.genetic_mod import GeneticSearchMod
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.storage.storage_objects import DataManager, SearchData, SearchVector
 
+# The legacy genetic searcher is deprecated (tests/test_legacy_deprecation.py); it is still tested until removed.
+pytestmark = pytest.mark.filterwarnings("ignore:.* is deprecated and will be removed in dreamer v2:DeprecationWarning")
+
 
 def _configure_ga(
     monkeypatch,

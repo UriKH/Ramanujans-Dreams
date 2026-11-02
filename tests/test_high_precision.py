@@ -337,6 +337,7 @@ class TestNodeCoverage:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.timeout(300)
+@pytest.mark.filterwarnings("ignore:.* is deprecated and will be removed in dreamer v2:DeprecationWarning")
 def test_legacy_calc_delta_matches_handler(monkeypatch, log2_shard):
     """``Searchable.calc_delta`` (DataManager path) and the handler compute the
     same δ for the same trajectory, walk type and depth."""
@@ -361,6 +362,7 @@ def test_legacy_calc_delta_matches_handler(monkeypatch, log2_shard):
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.filterwarnings("ignore:.* is deprecated and will be removed in dreamer v2:DeprecationWarning")
 def test_legacy_calc_delta_gives_up_beyond_max(monkeypatch, log2_shard):
     """If the estimate agrees with the constant beyond MAX_CONSTANT_RESOLUTION,
     the legacy path skips the trajectory instead of returning a noise δ."""

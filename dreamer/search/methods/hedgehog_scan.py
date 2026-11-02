@@ -5,6 +5,7 @@ from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.storage_objects import DataManager, SearchVector, SearchData
 from dreamer.configs import config
 from dreamer.extraction.shard import Shard
+from dreamer.utils.deprecation import warn_deprecated
 
 import mpmath as mp
 from functools import partial
@@ -56,6 +57,7 @@ class SerialSearcher(SearchMethod):
             returns the number of trajectories to sample.
         :return: The data manager containing the search results.
         """
+        warn_deprecated("SerialSearcher.search", "SearcherModV1 (SerialSearcher.sample_pairs is not deprecated)")
         if not starts:
             starts = self.space.get_interior_point()
         if starts is None:

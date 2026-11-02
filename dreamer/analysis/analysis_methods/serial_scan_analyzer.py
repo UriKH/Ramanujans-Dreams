@@ -9,6 +9,7 @@ from dreamer.search.methods.hedgehog_scan import SerialSearcher
 from dreamer.configs import config
 from dreamer.extraction.shard import Shard
 from dreamer.utils import monitoring
+from dreamer.utils.deprecation import warn_deprecated
 from typing import Dict, List
 from ramanujantools.cmf import CMF
 
@@ -27,6 +28,7 @@ class Analyzer(AnalyzerScheme):
         :param const: Constant to analyze for
         :param shards: Shards to analyze
         """
+        warn_deprecated("analysis_methods.serial_scan_analyzer.Analyzer", "AnalyzerModV1")
         self.const = const
         self.shards = shards
 

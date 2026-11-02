@@ -107,6 +107,9 @@ matches); also `on a cached walk`, `failed`, `outside the cone` when non-zero.
 
 > Note: `methods/genetic.py` + `searchers/genetic_mod.py` are a legacy (V1)
 > genetic searcher kept for reference; the pipeline uses `GeneticSearchModV2`.
+> They, `SerialSearcher.search` and `Searchable.calc_delta` / `compute_trajectory_data`
+> are the legacy δ path: **deprecated** (they warn), without the current identification
+> and precision fixes, and removed in dreamer v2. `SerialSearcher.sample_pairs` stays.
 
 ---
 

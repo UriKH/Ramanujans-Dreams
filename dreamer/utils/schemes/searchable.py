@@ -12,6 +12,7 @@ from typing import Tuple, Optional, List, Union
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.constants.high_precision import high_precision, resolved_error
 from dreamer.utils.logger import Logger
+from dreamer.utils.deprecation import warn_deprecated
 from dreamer.utils.storage.storage_objects import SearchData, SearchVector
 from dreamer.configs import config
 from dreamer.utils.storage.frequency_list import FrequencyList
@@ -96,6 +97,7 @@ class Searchable(ABC):
         :param traj_len: The length of the trajectory vector.
         :return: The pair (delta, estimated_value).
         """
+        warn_deprecated("Searchable.calc_delta", "TrajectoryAttributesHandler.delta")
         # Do walk
         try:
             with Logger.simple_timer('Initial walk and inverse'):
@@ -287,6 +289,7 @@ class Searchable(ABC):
         :param use_LIReC: Use LIReC to compute delta (default)
         :return: SearchData object containing the results of the search.
         """
+        warn_deprecated("Searchable.compute_trajectory_data", "TrajectoryAttributesHandler")
         # with Logger.simple_timer('compute_trajectory_matrix'):
         sd = SearchData(SearchVector(start, traj))
         try:
