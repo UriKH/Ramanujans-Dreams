@@ -125,9 +125,12 @@ ATTRIBUTE_META: Dict[str, AttributeMeta] = {
         # v4 (2026-11-01): a walk with fewer correct digits than
         # CONSTANT_NO_DIGITS_LOW_RES is retried at its own precision — slow-
         # converging trajectories (δ ≈ −0.9…−1) were never identified before.
-        # v5 (2026-11-02): the estimate p·v/q·v is compared with the constant
-        # signed (was |p·v/q·v|) — δ ≈ −1 for every negative constant before.
-        version=5,
+        # Not bumped (2026-11-02): the estimate p·v/q·v is now compared with the
+        # constant signed (was |p·v/q·v|).  Values of positive constants are
+        # unchanged, so they stay valid; stored Tier-1 values of a NEGATIVE
+        # constant written before this change (δ ≈ −1) are outdated — recompute
+        # them with REUSE_POLICY="recompute".
+        version=4,
     ),
     **{name: AttributeMeta(deps=(TIER1,)) for name in TIER1_ATTRIBUTES},
     "traj_size": AttributeMeta(),
