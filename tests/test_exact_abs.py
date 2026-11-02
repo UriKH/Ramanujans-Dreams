@@ -1,10 +1,10 @@
 """δ of trajectories with huge exact denominators must not stall in sympy's assumption system.
 
-``sp.Abs(Integer)`` asks whether the integer is non-negative; depending on the process's hash
-seed (the order sympy walks its facts in) the inference reaches ``Integer.is_prime`` and runs a
-pure-Python primality test on the reduced denominator — ~25 min for the 27,822-digit
-denominator below (Zeus run #22, analysis task 257).  The seed is per process, so the
-trajectory is evaluated in subprocesses with the seeds that stalled.
+``sp.Abs(Integer)`` and ``sp.log(Integer)`` ask sympy facts about the integer (non-negative,
+negative, …); depending on the process's hash seed and cache state the inference reaches
+``Integer.is_prime`` and runs a pure-Python primality test on the reduced denominator — ~25 min
+for the 27,822-digit denominator below (Zeus run #22, analysis task 257).  The seed is per
+process, so the trajectory is evaluated in subprocesses under several seeds.
 """
 import os
 import subprocess
@@ -32,7 +32,7 @@ print(h.identified(), h.delta())
 
 
 @pytest.mark.timeout(300)
-@pytest.mark.parametrize("hash_seed", ["4", "6"])
+@pytest.mark.parametrize("hash_seed", [str(s) for s in range(8)])
 def test_stalled_trajectory_delta_is_fast(hash_seed):
     env = dict(os.environ, PYTHONHASHSEED=hash_seed, PYTHONPATH=ROOT)
     out = subprocess.run([sys.executable, "-c", SCRIPT], env=env, cwd=ROOT, capture_output=True, text=True,
