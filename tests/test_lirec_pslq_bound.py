@@ -10,6 +10,8 @@ Coverage:
   - Soundness of the bound: a relation whose norm exceeds it has ``roi < min_roi``, so
     LIReC rejects it anyway (the bound never cuts an acceptable relation).
   - Equivalence: identifications that LIReC finds are identical with the bound on and off.
+  - Masking: a huge chance relation no longer hides a true small one found in the same
+    PSLQ iteration (``maxcoeff`` also filters candidates).
   - PSLQ calls with an explicit ``maxcoeff`` and calls outside ``poly_check`` are untouched.
   - ``install`` / ``uninstall`` are idempotent and restore LIReC's functions.
 """
@@ -95,6 +97,18 @@ def test_found_identifications_identical_with_and_without_bound():
         bound.install()
     assert with_bound == without
     assert sum(1 for r in with_bound if r) == 6, "LIReC should identify six of the inputs"
+
+
+def test_bound_unmasks_a_small_relation_hidden_by_a_chance_fit():
+    """[1, 1/32] at 15 digits: unbounded PSLQ returns a ~34-digit chance fit (LIReC rejects
+    it, losing c = 1/32); within the bound it returns the true (1, -32)."""
+    with mp.workdps(15):
+        x = [mp.mpf(1), mp.mpf(1) / 32]
+        unbounded = bound._REAL_PSLQ(x, None, mp.inf, mp.inf, False)
+        limit = bound.acceptance_norm_bound(2, 15, 2)
+        bounded = bound._REAL_PSLQ(x, None, limit, mp.inf, False)
+    assert max(abs(c) for c in unbounded) > limit
+    assert bounded in ([1, -32], [-1, 32])
 
 
 # ---------------------------------------------------------------------------

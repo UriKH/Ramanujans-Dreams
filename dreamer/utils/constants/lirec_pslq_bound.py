@@ -22,13 +22,25 @@ The bound (no new parameter)
   there).  Hence an accepted relation has ``‖m‖∞ < 2^(B / min_roi)`` and
   ``‖m‖₂ < √n · 2^(B / min_roi)``.
 
-So setting ``maxcoeff = ⌈√n · 2^(B / min_roi)⌉ + 1`` changes no outcome:
+Setting ``maxcoeff = ⌈√n · 2^(B / min_roi)⌉ + 1`` never loses a relation LIReC accepts.
+``maxcoeff`` acts twice in PSLQ: as the stop rule (``norm >= maxcoeff``) and as a filter —
+each iteration returns the first column whose error is below ``tol`` *and* whose
+coefficients are all below ``maxcoeff``.
 
-* if unbounded PSLQ would return an acceptable relation ``m``, the certificate never
-  exceeds ``‖m‖₂ < maxcoeff`` before ``m`` is found, so the bounded run returns the same
-  ``m`` at the same iteration;
-* if it would return a relation LIReC rejects (``roi < min_roi``) or never return, the
-  bounded run returns ``None`` — and ``poly_check`` returns ``None`` in all three cases.
+* If unbounded PSLQ returns an acceptable relation ``m`` at iteration ``k``: before ``k`` no
+  column passes the error test, so both runs are identical (the stop rule cannot fire,
+  since ``norm <= ‖m‖₂ < maxcoeff``); at ``k`` the columns ahead of ``m`` fail the error
+  test in both runs and ``m`` passes the filter — the bounded run returns the same ``m``.
+* Otherwise unbounded PSLQ returns a relation LIReC rejects (``roi < min_roi``), or never
+  returns; ``poly_check`` gives ``None``.  The bounded run gives ``None`` too, *or* — when the
+  rejected relation was a huge chance fit found in the same iteration as a genuine small
+  one — the small one, which LIReC then judges by its usual ``roi`` rule.  Seen on a
+  frozen 3F2 column at 15 digits: ``[1, 1/32]`` → unbounded ``(-1.6e32, 5.2e33)`` (rejected,
+  the true ``c2 = 1/32`` lost), bounded ``(1, -32)``.
+
+So the bound only removes the infinite tail and relations LIReC would discard; on 1015
+stored 2F1 / 3F2 trajectories LIReC's output was identical except for that one frozen
+column (an extra, true relation; the first relation, which RD uses, unchanged).
 
 It always triggers before precision runs out: the certificate can grow to about
 ``2^(working precision)``, while the stop sits at ``2^(B / min_roi)`` with ``min_roi > 1``.
