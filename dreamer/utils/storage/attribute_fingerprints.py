@@ -103,6 +103,10 @@ ATTRIBUTE_META: Dict[str, AttributeMeta] = {
             "search.CONSTANT_NO_DIGITS_HIGH_RES",
             "search.CONSTANT_NO_DIGITS_LOW_RES",
             "search.MAX_CONSTANT_RESOLUTION",
+            # Low-precision LIReC retry for slow-converging walks (added 2026-11-01).
+            "search.IDENTIFY_MIN_DIGITS",
+            "search.IDENTIFY_LIREC_DIGITS_FRACTION",
+            "search.IDENTIFY_VERIFY_DIGITS_FRACTION",
             # Joint targets: ``identified`` of a joint row is joint-form
             # recognition, a Tier-1 value (added 2026-10-11).
             "search.JOINT_RECOGNITION_DEPTH",
@@ -118,7 +122,15 @@ ATTRIBUTE_META: Dict[str, AttributeMeta] = {
         # trajectories before.
         # v3 (2026-10-31): a frozen walk (p/q estimate identical at every
         # convergence-check depth) is not identified — spurious δ ≈ 1 before.
-        version=3,
+        # v4 (2026-11-01): a walk with fewer correct digits than
+        # CONSTANT_NO_DIGITS_LOW_RES is retried at its own precision — slow-
+        # converging trajectories (δ ≈ −0.9…−1) were never identified before.
+        # Not bumped (2026-11-02): the estimate p·v/q·v is now compared with the
+        # constant signed (was |p·v/q·v|).  Values of positive constants are
+        # unchanged, so they stay valid; stored Tier-1 values of a NEGATIVE
+        # constant written before this change (δ ≈ −1) are outdated — recompute
+        # them with REUSE_POLICY="recompute".
+        version=4,
     ),
     **{name: AttributeMeta(deps=(TIER1,)) for name in TIER1_ATTRIBUTES},
     "traj_size": AttributeMeta(),
