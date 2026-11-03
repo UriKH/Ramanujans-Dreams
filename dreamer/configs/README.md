@@ -152,6 +152,7 @@ The largest category. Shared knobs plus one block per optimiser
 | `GA_*` | Genetic-algorithm knobs. |
 | `SA_*` | Small-Angle search knobs. |
 | `ANNEAL_*` | Simulated-Annealing knobs. `ANNEAL_LOOKAHEAD` (`auto`/`on`/`off`) speculatively pre-walks the next step's candidate neighbourhoods on idle eval workers — same search path and rows; fills both the workers a step does not use and those idle while the step waits for its slowest walk (`auto` = the pool may run more than d_flat workers). |
+| `ANNEAL_CONCURRENT_SHARDS`, `ANNEAL_WORKERS_PER_SHARD` | Shards searched at once by simulated annealing (0 = auto: min(#shards, cores // workers per shard, what memory allows); 1 = one after another) and workers per shard process (0 = 2·D). Each shard process gets its share of `TOTAL_CORES` and of the memory budget (`MEMORY_LIMIT_MB`). Results per shard are unchanged. |
 | `GRAD_*` | Gradient-Ascent knobs. |
 | `SPSA_*` | Hybrid SPSA + Adam knobs. |
 
