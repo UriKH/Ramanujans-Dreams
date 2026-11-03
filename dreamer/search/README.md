@@ -43,7 +43,7 @@ point and δ is the landscape:
 |-----------------|--------|------|
 | `SmallAngleSearchMod` | small-angle hill-climb | nudge the direction by the smallest resolvable angle. |
 | `GeneticSearchModV2` | genetic algorithm | evolve a population of directions. |
-| `SimulatedAnnealingMod` | simulated annealing | temperature-controlled random walk over directions; idle eval workers pre-walk the next step's candidates (`ANNEAL_LOOKAHEAD`) without changing the search path. |
+| `SimulatedAnnealingMod` | simulated annealing | temperature-controlled random walk over directions; idle eval workers pre-walk the next step's candidates (`ANNEAL_LOOKAHEAD`) without changing the search path. Independent shards run concurrently, each in its own process with its own eval pool (`ANNEAL_CONCURRENT_SHARDS`, `searchers/shard_concurrency.py`) — every shard's rows match a one-after-another run, except where a trajectory's identification depends on which (p, q) forms its shard had cached by then (a known, rare order effect). |
 | `GradientAscentMod` | gradient ascent (Adam) | follow a finite-difference δ-gradient. |
 | `HybridSPSAMod` | SPSA + Adam + discrete fallback | 2-evaluation stochastic gradient, good at high dimension. |
 
@@ -100,7 +100,7 @@ matches); also `on a cached walk`, `failed`, `outside the cone` when non-zero.
 
 | Path | What it contains |
 |------|------------------|
-| `searchers/` | The **stage modules** (one per method) — the external interface wired into `System`: `hedgehog_scan_mod.py`, `small_angle_mod.py`, `genetic_search_mod.py`, `annealing_mod.py`, `gradient_ascent_mod.py`, `spsa_adam_mod.py`, plus the shared `micro_climb_finalize.py`. |
+| `searchers/` | The **stage modules** (one per method) — the external interface wired into `System`: `hedgehog_scan_mod.py`, `small_angle_mod.py`, `genetic_search_mod.py`, `annealing_mod.py`, `gradient_ascent_mod.py`, `spsa_adam_mod.py`, plus the shared `micro_climb_finalize.py` and `shard_concurrency.py` (concurrent shard scheduler, used by simulated annealing). |
 | `methods/` | The **algorithms** themselves. `hedgehog_scan.py` (the `SerialSearcher` reused by analysis), and one sub-package per optimiser: `small_angle/`, `genetic_search/`, `annealing/`, `gradient_ascent/`. |
 | `methods/flatland/` | Shared direction-space machinery: `geometry.py`, `lattice.py`, `seed.py`, `discrete_local_max.py`, `evaluator.py`, `parallel_eval.py`. |
 | `errors.py` | Search-specific exceptions (e.g. `SearchStalled`). |
