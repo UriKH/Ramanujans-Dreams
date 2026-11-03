@@ -386,6 +386,12 @@ class Searchable(ABC):
         diff1 = abs(f1 - f2)
         diff2 = abs(f3 - f2)
 
+        # Exact rationals that never move mean a frozen walk (normalised column
+        # constant in depth) — not a converging trajectory; see
+        # TrajectoryAttributesHandler._convergence_sanity_check.
+        if f1 == f2 == f3:
+            return False, (lim1, lim2, lim3)
+
         # check diffs
         if diff1 < search_config.LIMIT_DIFF_ERROR_BOUND and diff2 < search_config.LIMIT_DIFF_ERROR_BOUND:
             return True, (lim1, lim2, lim3)

@@ -12,6 +12,10 @@ Algorithm is faithful to ``context/resources/code/algos/annealing.py`` and
   reduce); a doubling counter is incremented; on exceeding
   ``ANNEAL_MAX_DOUBLINGS`` the counter is reset and a fresh seed direction is
   drawn (reference's dead "give up" branch fixed to its evident intent).
+* Seeds (initial and every reseed) come from one queue: the shard's stored
+  identified rows — usually the analysis stage's — best first, then the fresh
+  reservoir.  Rays already used as a seed or accepted as a position are
+  skipped, so each reseed lands somewhere new.
 * On reseed the tabu list is fully cleared — the old region's history is
   irrelevant to the new starting point.
 * A hard ``ANNEAL_MAX_TOTAL_STEPS`` ceiling prevents infinite stalls from
@@ -31,7 +35,11 @@ from dreamer.configs import config
 from dreamer.utils.lru import make_handler_cache
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
-from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
+from dreamer.search.methods.flatland.evaluator import (
+    active_objective,
+    evaluate_in_flatland,
+    flatland_trajectory_key,
+)
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.search.methods.flatland.seed import resolve_injected_seed
 from dreamer.search.methods.flatland.parallel_eval import WalkPrefetcher, evaluate_batch
@@ -41,6 +49,7 @@ from dreamer.utils.logger import Logger
 from dreamer.utils import monitoring
 from runmon.estimators import sa_estimator
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
+from dreamer.utils.storage.optimization_objectives import score_record
 from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
 
 search_config = config.search
@@ -92,6 +101,10 @@ class SimulatedAnnealingSearch(SearchMethod):
         """
         super().__init__(space, constant, use_LIReC)
         self.constant = constant
+        # Seed-candidate state (see _select_seed); ``run`` refills it per search.
+        self._seed_queue: List[np.ndarray] = []
+        self._reservoir_queued = False
+        self._used_rays: set = set()
 
     # ------------------------------------------------------------------
     # Public entry points
@@ -208,6 +221,19 @@ class SimulatedAnnealingSearch(SearchMethod):
         max_traj_len = search_config.SEARCH_MAX_TRAJ_LEN
         traj_norm_name = search_config.SEARCH_TRAJ_NORM
 
+        # Seed candidates for the initial seed and every reseed (see _select_seed):
+        # the shard's stored identified rows (best first), then the reservoir.
+        # ``_used_rays`` holds the trajectory ids of seeds already used and of every
+        # accepted position, so a reseed always moves to an unexplored candidate.
+        self._seed_queue: List[np.ndarray] = self._stored_seed_candidates(geom, eval_ctx, constant)
+        self._reservoir_queued = False
+        self._used_rays: set = set()
+        Logger(
+            f"Simulated Annealing: {len(self._seed_queue)} stored identified trajectories "
+            f"queued as seed candidates in shard {shard_id} ({constant.name}).",
+            Logger.Levels.debug,
+        ).log()
+
         if initial_trajectory is None:
             initial_trajectory = getattr(shard, "selected_trajectory", None)
         cur_z = resolve_injected_seed(
@@ -216,6 +242,8 @@ class SimulatedAnnealingSearch(SearchMethod):
         )
         if cur_z is None:
             cur_z = self._select_seed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
+        else:
+            self._used_rays.add(self._ray_id(cur_z, eval_ctx))
         cur_delta, _ = evaluate_in_flatland(cur_z, **eval_ctx)
         best_delta = cur_delta
 
@@ -352,6 +380,7 @@ class SimulatedAnnealingSearch(SearchMethod):
                     iter_left -= 1
 
             if accepted:
+                self._used_rays.add(self._ray_id(cur_z, eval_ctx))
                 doubling_count = 0
                 if cur_delta > best_delta:
                     best_delta = cur_delta
@@ -403,8 +432,17 @@ class SimulatedAnnealingSearch(SearchMethod):
         traj_norm_name: str,
     ) -> np.ndarray:
         """
-        Pick the first reservoir trajectory (ascending L2 norm) that identifies
-        *and* has at least one valid neighbour within the trajectory-length cap.
+        Pop the next seed candidate that identifies *and* has at least one valid
+        neighbour within the trajectory-length cap.
+
+        Candidates come from ``self._seed_queue`` in order: the shard's stored
+        identified rows, best objective first (see :meth:`_stored_seed_candidates`
+        — usually the analysis stage's trajectories), then, once those are used
+        up, the fresh reservoir (ascending L2 norm).  Candidates whose ray was
+        already used as a seed or accepted as a position in this run are skipped,
+        so every reseed moves SA to a region it has not explored yet.  (The
+        sampler is deterministic per shard, so re-drawing the reservoir on every
+        reseed — the old behaviour — always returned the original seed.)
 
         A seed whose entire neighbourhood is filtered by the traj-len cap would
         immediately enter the no-neighbours stall loop (doubling → reseed → repeat),
@@ -417,22 +455,21 @@ class SimulatedAnnealingSearch(SearchMethod):
         :param constant: The constant to identify.
         :param max_traj_len: Maximum allowed trajectory norm (``SEARCH_MAX_TRAJ_LEN``).
         :param traj_norm_name: Which norm to use (``SEARCH_TRAJ_NORM``).
-        :raises NoInitialIdentification: if no reservoir trajectory identifies *constant*
-            while also having a reachable neighbourhood.
+        :raises NoInitialIdentification: if no remaining candidate identifies
+            *constant* while also having a reachable neighbourhood.
         :return: Flatland coordinate vector of the seed trajectory.
         """
-        trajectories = ShardSamplingOrchestrator(self.space).sample_trajectories(
-            search_config.ANNEAL_RESERVOIR_SIZE
-        )
-        candidates: List[Tuple[float, Position]] = []
-        for t in trajectories:
-            norm = float(np.linalg.norm([float(t[s]) for s in geom.symbols]))
-            candidates.append((norm, t))
-        candidates.sort(key=lambda pair: pair[0])
-
-        for _, t in candidates:
-            z = geom.to_flatland(t)
+        while True:
+            if not self._seed_queue and not self._reservoir_queued:
+                self._seed_queue = self._reservoir_candidates(geom)
+                self._reservoir_queued = True
+            if not self._seed_queue:
+                raise NoInitialIdentification(shard_id, constant)
+            z = self._seed_queue.pop(0)
             if not np.any(z):
+                continue
+            ray = self._ray_id(z, eval_ctx)
+            if ray in self._used_rays:
                 continue
             # Skip seeds whose entire neighbourhood is outside the traj-len cap —
             # they would immediately enter the no-neighbours stall cycle.
@@ -444,9 +481,76 @@ class SimulatedAnnealingSearch(SearchMethod):
                 continue
             _, identified = evaluate_in_flatland(z, **eval_ctx)
             if identified:
+                self._used_rays.add(ray)
                 return z
 
-        raise NoInitialIdentification(shard_id, constant)
+    def _reservoir_candidates(self, geom: FlatlandGeometry) -> List[np.ndarray]:
+        """
+        Draw ``ANNEAL_RESERVOIR_SIZE`` fresh trajectories from the shard sampler.
+
+        :param geom: Flatland geometry for the current shard.
+        :return: Their flatland vectors, ascending real-space L2 norm.
+        """
+        trajectories = ShardSamplingOrchestrator(self.space).sample_trajectories(
+            search_config.ANNEAL_RESERVOIR_SIZE
+        )
+        candidates: List[Tuple[float, Position]] = []
+        for t in trajectories:
+            norm = float(np.linalg.norm([float(t[s]) for s in geom.symbols]))
+            candidates.append((norm, t))
+        candidates.sort(key=lambda pair: pair[0])
+        return [geom.to_flatland(t) for _, t in candidates]
+
+    def _stored_seed_candidates(
+        self, geom: FlatlandGeometry, eval_ctx: dict, constant: Constant,
+    ) -> List[np.ndarray]:
+        """
+        Seed candidates from the shard's already-stored identified rows.
+
+        The analysis stage writes its trajectories into the same per-shard store,
+        so a shard that passed analysis already holds identified trajectories —
+        while the fresh reservoir (a handful of samples, often clustered in one
+        part of the cone) may hold none.  Rows qualify when they identify
+        *constant* with a finite objective score, start at this search's start
+        point, and map exactly onto a flatland ray of this shard (same
+        trajectory id).  Scoring them reuses the stored row, so it costs no walk.
+
+        :param geom: Flatland geometry for the current shard.
+        :param eval_ctx: Evaluation context (``seen_trajectories``, ``start`` …).
+        :param constant: The constant being searched.
+        :return: Flatland vectors, best objective score first (ties by trajectory id).
+        """
+        start = eval_ctx["start"]
+        start_t = [int(start[s]) for s in geom.symbols]
+        objective_name = active_objective()
+        scored: List[Tuple[float, str, np.ndarray]] = []
+        for trajectory_id, by_const in eval_ctx["seen_trajectories"].items():
+            rec = by_const.get(constant.name)
+            if rec is None or rec.get("direction") is None:
+                continue
+            if [int(c) for c in rec.get("start_point") or []] != start_t:
+                continue
+            result = score_record(rec, objective_name)
+            if result is None:
+                continue
+            score, identified = result
+            if not identified or not math.isfinite(score):
+                continue
+            z = geom.to_flatland(Position(dict(zip(geom.symbols, rec["direction"]))))
+            if not np.any(z) or not geom.is_inside(z) or self._ray_id(z, eval_ctx) != trajectory_id:
+                continue
+            scored.append((score, trajectory_id, z))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [z for _, _, z in scored]
+
+    @staticmethod
+    def _ray_id(z: np.ndarray, eval_ctx: dict) -> str:
+        """Trajectory id of the primitive ray of flatland vector *z* (no walk)."""
+        _, trajectory_id, _ = flatland_trajectory_key(
+            z, geom=eval_ctx["geom"], shard=eval_ctx["shard"], start=eval_ctx["start"],
+            shard_id=eval_ctx["shard_id"], shard_encoding_str=eval_ctx["shard_encoding_str"],
+        )
+        return trajectory_id
 
     def _try_reseed(
         self,

@@ -162,6 +162,81 @@ class TestSASeedSelection:
             method._select_seed(geom, ctx, "sid", e, max_traj_len=1_000.0, traj_norm_name="linf")
 
 
+class TestSASeedQueue:
+    """Seeds come from stored identified rows (best first), then the reservoir;
+    rays already used as a seed or accepted position are never reused."""
+
+    @pytest.fixture
+    def setup(self, whole_space_shard, symbols, monkeypatch):
+        import dreamer.search.methods.annealing.annealing_scan as ann
+        from dreamer.extraction.samplers import ShardSamplingOrchestrator
+
+        method = SimulatedAnnealingSearch(whole_space_shard, e, use_LIReC=False)
+        geom = FlatlandGeometry(whole_space_shard)
+        start = whole_space_shard.get_interior_point()
+        ctx = dict(
+            geom=geom, shard=whole_space_shard, start=start,
+            constant=e, cmf_id="", shard_id="sid", shard_encoding_str="",
+            sink=lambda x: None, seen_trajectories={}, handler_cache={},
+        )
+        reservoir = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(0)})
+        monkeypatch.setattr(ShardSamplingOrchestrator, "sample_trajectories",
+                            lambda self, n: {reservoir})
+        monkeypatch.setattr(ann, "evaluate_in_flatland", lambda z, **kw: (1.0, True))
+        start_t = [int(start[s]) for s in geom.symbols]
+
+        def store(direction, delta, identified=True, start_point=None):
+            """Add a stored row for *direction* to the context's seen cache."""
+            z = np.array(direction, dtype=np.int64)
+            tid = method._ray_id(z, ctx)
+            ctx["seen_trajectories"][tid] = {e.name: {
+                "direction": list(direction), "start_point": start_point or start_t,
+                "delta": delta, "identified": identified,
+            }}
+            return tid
+
+        return method, geom, ctx, store
+
+    def _select(self, method, geom, ctx):
+        return list(method._select_seed(geom, ctx, "sid", e, max_traj_len=1_000.0, traj_norm_name="linf"))
+
+    def test_stored_rows_queued_best_first_and_filtered(self, setup):
+        method, geom, ctx, store = setup
+        store([0, 1], 0.2)
+        store([1, 1], 0.5)
+        store([2, 1], 0.9, identified=False)       # not identified → excluded
+        store([1, 2], float("-inf"))               # non-finite score → excluded
+        store([3, 1], 0.7, start_point=[9, 9])     # other start point → excluded
+        queue = method._stored_seed_candidates(geom, ctx, e)
+        assert [list(z) for z in queue] == [[1, 1], [0, 1]]
+
+    def test_reseed_moves_to_next_unused_then_reservoir(self, setup):
+        method, geom, ctx, store = setup
+        store([0, 1], 0.2)
+        store([1, 1], 0.5)
+        method._seed_queue = method._stored_seed_candidates(geom, ctx, e)
+        assert self._select(method, geom, ctx) == [1, 1]   # best stored row
+        assert self._select(method, geom, ctx) == [0, 1]   # reseed: next stored row
+        assert self._select(method, geom, ctx) == [1, 0]   # then the reservoir
+        with pytest.raises(NoInitialIdentification):        # all used up
+            self._select(method, geom, ctx)
+
+    def test_accepted_positions_are_not_reseeded(self, setup):
+        method, geom, ctx, store = setup
+        store([0, 1], 0.2)
+        store([1, 1], 0.5)
+        method._seed_queue = method._stored_seed_candidates(geom, ctx, e)
+        method._used_rays.add(method._ray_id(np.array([1, 1]), ctx))  # explored by SA
+        assert self._select(method, geom, ctx) == [0, 1]
+
+    def test_scaled_copy_of_used_ray_is_skipped(self, setup):
+        method, geom, ctx, store = setup
+        method._used_rays.add(method._ray_id(np.array([1, 0]), ctx))
+        method._seed_queue = [np.array([2, 0]), np.array([0, 1])]
+        method._reservoir_queued = True
+        assert self._select(method, geom, ctx) == [0, 1]
+
+
 # ---------------------------------------------------------------------------
 # 3. Metropolis acceptance
 # ---------------------------------------------------------------------------

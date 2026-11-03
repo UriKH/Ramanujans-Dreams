@@ -116,7 +116,9 @@ ATTRIBUTE_META: Dict[str, AttributeMeta] = {
         # v2 (2026-10-11): δ trusts |estimate − constant| only beyond the
         # constant's rounding (was: any nonzero error) — spurious δ on long
         # trajectories before.
-        version=2,
+        # v3 (2026-10-31): a frozen walk (p/q estimate identical at every
+        # convergence-check depth) is not identified — spurious δ ≈ 1 before.
+        version=3,
     ),
     **{name: AttributeMeta(deps=(TIER1,)) for name in TIER1_ATTRIBUTES},
     "traj_size": AttributeMeta(),
