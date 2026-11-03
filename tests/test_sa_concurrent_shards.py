@@ -3,10 +3,11 @@
 Coverage:
   - plan_shards: automatic K from cores and CMF dimension, the memory cap, a fixed K,
     never more than the number of shards, K = 1 → sequential plan.
-  - run_shards: every shard runs once with its core / memory share; a shard whose
-    search raises is reported and the others finish; a shard whose process dies is
-    re-run alone; one that dies again is reported as failed; never-started shards
-    are not penalised by another shard's death.
+  - run_shards: every shard runs once with its core / memory share; shard processes
+    pass the run directory on to their pools; a shard whose search raises is reported
+    and the others finish; a shard whose process dies is re-run alone; one that dies
+    again is reported as failed, with the cause (exit code); never-started shards are
+    not penalised by another shard's death.
   - End to end: SimulatedAnnealingMod on all shards of a real 2F1 log(2) CMF writes
     byte-identical per-shard JSONL files sequentially and concurrently.
 """
@@ -44,9 +45,10 @@ class TestPlan:
         cores(128)
         assert sc.plan_shards(3, [5, 5, 5]).concurrent == 3
 
-    def test_memory_caps_k(self, cores):
+    def test_memory_caps_k(self, cores, caplog):
         cores(128, fit=35)                                         # memory fits 35 workers
         assert sc.plan_shards(18, [5] * 18).concurrent == 3
+        assert "3 shard(s) at a time instead of 12" in caplog.text   # says why, and how to override
 
     def test_requested_and_workers_override(self, cores):
         cores(64)
@@ -76,6 +78,14 @@ def task_raise(sid, marker_dir):
     return task_report(sid, marker_dir)
 
 
+def task_monitor_dir(sid, marker_dir):
+    """Record the run directory this shard process would hand to its own pools."""
+    from dreamer.utils import monitoring
+    with open(os.path.join(marker_dir, sid), "w") as f:
+        f.write(str(monitoring.worker_run_dir()))
+    return sid
+
+
 def task_die_once(sid, marker_dir):
     """'flaky' kills its process the first time only; 'poison' every time."""
     flag = os.path.join(marker_dir, f"{sid}.tried")
@@ -97,6 +107,16 @@ class TestRunShards:
         assert out == {"a": "ok", "b": "ok", "c": "ok"} and sorted(done) == ["a", "b", "c"]
         assert {open(tmp_path / s).read() for s in "abc"} == {"3 777"}
 
+    def test_shard_processes_report_to_the_run(self, tmp_path, monkeypatch):
+        """A shard process joins the parent's run as a worker and passes the run
+        directory on to its own eval pool (``worker_run_dir``)."""
+        run = tmp_path / "run"
+        run.mkdir()
+        monkeypatch.setattr("dreamer.utils.monitoring.worker_run_dir", lambda: str(run))
+        out = sc.run_shards(task_monitor_dir, [("a", ("a", str(tmp_path)))], PLAN)
+        assert out == {"a": "ok"}
+        assert open(tmp_path / "a").read() == str(run)
+
     def test_raising_shard_reported_others_finish(self, tmp_path):
         jobs = [(s, (s, str(tmp_path))) for s in ("a", "bad", "c")]
         out = sc.run_shards(task_raise, jobs, PLAN)
@@ -106,7 +126,8 @@ class TestRunShards:
         jobs = [(s, (s, str(tmp_path))) for s in ("a", "flaky", "poison", "d", "e")]
         out = sc.run_shards(task_die_once, jobs, PLAN)
         assert out["flaky"] == "ok"                     # died once, fine when re-run
-        assert out["poison"] == "failed: process died twice"
+        assert out["poison"].startswith("failed: process died twice (")
+        assert "exit code 1" in out["poison"]           # the real cause, not a guess
         assert all(out[s] == "ok" for s in ("a", "d", "e"))
         assert all((tmp_path / s).exists() for s in ("a", "flaky", "d", "e"))
 
