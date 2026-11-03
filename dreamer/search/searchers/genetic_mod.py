@@ -11,6 +11,7 @@ from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.storage import Exporter, Formats
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.utils import monitoring
+from dreamer.utils.deprecation import warn_deprecated
 
 
 class GeneticSearchMod(SearcherModScheme):
@@ -28,6 +29,7 @@ class GeneticSearchMod(SearcherModScheme):
         :param searchables: Shards/searchables to optimize.
         :param use_LIReC: Optional backend flag forwarded to trajectory evaluation.
         """
+        warn_deprecated("GeneticSearchMod", "GeneticSearchModV2")
         super().__init__(
             searchables,
             use_LIReC,
