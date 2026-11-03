@@ -229,6 +229,17 @@ class TestSASeedQueue:
         method._used_rays.add(method._ray_id(np.array([1, 1]), ctx))  # explored by SA
         assert self._select(method, geom, ctx) == [0, 1]
 
+    def test_rational_start_points_match_exactly(self, setup, symbols):
+        """Shifted CMFs have rational start points, stored as strings ('1/2').  The seed
+        queue must compare them exactly — not crash on int('1/2'), and not truncate
+        1/2 to 0 (which would match rows of a different start point)."""
+        method, geom, ctx, store = setup
+        ctx["start"] = Position({symbols[0]: sp.Rational(1, 2), symbols[1]: sp.Rational(3, 2)})
+        store([0, 1], 0.2, start_point=["1/2", "3/2"])     # this start, as JSON stores it
+        store([1, 1], 0.5, start_point=[0, 1])             # the truncated start: another point
+        queue = method._stored_seed_candidates(geom, ctx, e)
+        assert [list(z) for z in queue] == [[0, 1]]
+
     def test_scaled_copy_of_used_ray_is_skipped(self, setup):
         method, geom, ctx, store = setup
         method._used_rays.add(method._ray_id(np.array([1, 0]), ctx))
