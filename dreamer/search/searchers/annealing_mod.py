@@ -6,6 +6,11 @@ For each unique shard (deduplicated by ``shard_id`` across all constants) it
 opens a ``worker_pool`` writing ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` and
 runs simulated annealing **once per identified constant**.  A constant whose
 reservoir produces no initial identification is logged and skipped.
+
+Shards are independent searches, so when the cores allow, several run at once,
+each in its own process with its own eval pool (``ANNEAL_CONCURRENT_SHARDS``,
+see :mod:`shard_concurrency`); every shard's rows are the same as when run one
+after another.
 """
 
 import os
@@ -26,6 +31,7 @@ from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.search.searchers.micro_climb_finalize import finalize_best_trajectories
+from dreamer.search.searchers.shard_concurrency import plan_shards, run_shards
 from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.utils import monitoring
@@ -73,13 +79,38 @@ class SimulatedAnnealingMod(SearcherModScheme):
                 shard_by_id[shard_id] = shard
                 shard_identified[shard_id].add(const)
 
-        for shard_id, shard in SmartTQDM(
-            shard_by_id.items(),
-            desc="Simulated annealing in shards: ",
-            **sys_config.TQDM_CONFIG,
-        ):
-            identified_consts = list(shard_identified[shard_id])
-            self._run_shard(shard, identified_consts)
+        # Shards are independent searches: run several at once when the cores
+        # allow (see shard_concurrency); each shard's result is unchanged.
+        plan = plan_shards(
+            len(shard_by_id), [len(s.cmf.matrices) for s in shard_by_id.values()],
+            requested=search_config.ANNEAL_CONCURRENT_SHARDS,
+            workers_per_shard=search_config.ANNEAL_WORKERS_PER_SHARD,
+        )
+        if plan.concurrent <= 1:
+            for shard_id, shard in SmartTQDM(
+                shard_by_id.items(),
+                desc="Simulated annealing in shards: ",
+                **sys_config.TQDM_CONFIG,
+            ):
+                identified_consts = list(shard_identified[shard_id])
+                self._run_shard(shard, identified_consts)
+            return
+
+        jobs = [(shard_id, (shard, list(shard_identified[shard_id]), self.use_LIReC))
+                for shard_id, shard in shard_by_id.items()]
+        bar = SmartTQDM(total=len(jobs), desc="Simulated annealing in shards: ", **sys_config.TQDM_CONFIG)
+        try:
+            outcome = run_shards(run_annealing_shard, jobs, plan, label="Simulated annealing",
+                                 on_done=lambda _sid: bar.update(1))
+        finally:
+            bar.close()
+        failed = {sid: why for sid, why in outcome.items() if why != "ok"}
+        if failed:
+            Logger(
+                f"Simulated annealing: {len(failed)} of {len(jobs)} shard(s) failed: "
+                + "; ".join(f"{sid}: {why}" for sid, why in failed.items()),
+                Logger.Levels.warning,
+            ).log()
 
     def _run_shard(
         self,
@@ -87,83 +118,97 @@ class SimulatedAnnealingMod(SearcherModScheme):
         identified_consts: List[Constant],
     ) -> None:
         """Run SA for each identified constant of a single shard."""
-        cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
-        Logger(
-            f"Starting Simulated Annealing search on shard {shard_id} (cmf={cmf_id})",
-            Logger.Levels.debug,
-        ).log()
-        output_path = os.path.join(sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl")
-        seen_trajectories = load_seen_trajectories_for_search(output_path, shard_id)
+        run_annealing_shard(shard, identified_consts, self.use_LIReC)
 
-        handler_cache = make_handler_cache()
 
-        # Build the flatland geometry (integer nullspace + LLL/BKZ reduction) and
-        # interior start ONCE per shard — both are constant-independent.  The
-        # persistent per-shard process pool (shard+start handed in once) is reused
-        # across every constant and every annealing step for the neighbour walks.
-        geom = FlatlandGeometry(shard)
-        start = shard.get_interior_point()
-        eval_pool, pq_manager = make_shared_eval_pool(
-            shard, start, search_config.ANNEAL_NUM_EVAL_WORKERS
+def run_annealing_shard(shard: Shard, identified_consts: List[Constant], use_LIReC: bool) -> str:
+    """Run SA for each identified constant of a single shard (whole per-shard pipeline).
+
+    Builds the shard's geometry, eval pool and result writer, runs every
+    constant, then the micro-climb finalisation.  Module-level so a shard
+    process of a concurrent run (:mod:`shard_concurrency`) executes exactly the
+    code the sequential loop runs.
+
+    :return: The shard id (for the concurrent scheduler's bookkeeping).
+    """
+    cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
+    Logger(
+        f"Starting Simulated Annealing search on shard {shard_id} (cmf={cmf_id})",
+        Logger.Levels.debug,
+    ).log()
+    output_path = os.path.join(sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl")
+    seen_trajectories = load_seen_trajectories_for_search(output_path, shard_id)
+
+    handler_cache = make_handler_cache()
+
+    # Build the flatland geometry (integer nullspace + LLL/BKZ reduction) and
+    # interior start ONCE per shard — both are constant-independent.  The
+    # persistent per-shard process pool (shard+start handed in once) is reused
+    # across every constant and every annealing step for the neighbour walks.
+    geom = FlatlandGeometry(shard)
+    start = shard.get_interior_point()
+    eval_pool, pq_manager = make_shared_eval_pool(
+        shard, start, search_config.ANNEAL_NUM_EVAL_WORKERS
+    )
+
+    try:
+        with Logger.watchdog(
+            f"Simulated Annealing shard search (shard {shard_id})",
+            logging_config.WATCHDOG_TRAJECTORY_SECONDS,
+            detail=lambda: f"shard={shard_id} cmf={cmf_id}",
+        ), worker_pool(
+            worker_fn=sink_item_dto,
+            writer_fn=write_jsonl_line,
+            output_path=output_path,
+        ) as push:
+            for const in identified_consts:
+                method = SimulatedAnnealingSearch(shard, const, use_LIReC=use_LIReC)
+                stats = EvalStats(seen_trajectories, const.name)
+                try:
+                    with monitoring.shard(shard_id, const):
+                        method.run(
+                            constant=const,
+                            cmf_id=cmf_id,
+                            shard_id=shard_id,
+                            shard_encoding_str=shard_encoding_str,
+                            sink=push,
+                            seen_trajectories=seen_trajectories,
+                            handler_cache=handler_cache,
+                            stats=stats,
+                            geom=geom,
+                            start=start,
+                            pool=eval_pool,
+                        )
+                except NoInitialIdentification as e:
+                    Logger(str(e), Logger.Levels.warning).log()
+                    continue
+                finally:
+                    log_eval_stats("Simulated Annealing", shard_id, const.name, stats,
+                                   lookahead=getattr(method, "lookahead_stats", None))
+
+        # Assurance endgame on the best-δ trajectory(ies): no-op unless
+        # ENABLE_MICRO_HILL_CLIMB.  Runs after the result writer has flushed the
+        # JSONL, while geom / start / eval_pool are still alive.
+        finalize_best_trajectories(
+            shard=shard,
+            identified_consts=identified_consts,
+            geom=geom,
+            start=start,
+            eval_pool=eval_pool,
+            cmf_id=cmf_id,
+            shard_id=shard_id,
+            shard_encoding_str=shard_encoding_str,
+            output_path=output_path,
         )
+    finally:
+        if eval_pool is not None:
+            eval_pool.close()
+            eval_pool.join()
+        if pq_manager is not None:
+            pq_manager.shutdown()
 
-        try:
-            with Logger.watchdog(
-                f"Simulated Annealing shard search (shard {shard_id})",
-                logging_config.WATCHDOG_TRAJECTORY_SECONDS,
-                detail=lambda: f"shard={shard_id} cmf={cmf_id}",
-            ), worker_pool(
-                worker_fn=sink_item_dto,
-                writer_fn=write_jsonl_line,
-                output_path=output_path,
-            ) as push:
-                for const in identified_consts:
-                    method = SimulatedAnnealingSearch(shard, const, use_LIReC=self.use_LIReC)
-                    stats = EvalStats(seen_trajectories, const.name)
-                    try:
-                        with monitoring.shard(shard_id, const):
-                            method.run(
-                                constant=const,
-                                cmf_id=cmf_id,
-                                shard_id=shard_id,
-                                shard_encoding_str=shard_encoding_str,
-                                sink=push,
-                                seen_trajectories=seen_trajectories,
-                                handler_cache=handler_cache,
-                                stats=stats,
-                                geom=geom,
-                                start=start,
-                                pool=eval_pool,
-                            )
-                    except NoInitialIdentification as e:
-                        Logger(str(e), Logger.Levels.warning).log()
-                        continue
-                    finally:
-                        log_eval_stats("Simulated Annealing", shard_id, const.name, stats,
-                                       lookahead=getattr(method, "lookahead_stats", None))
-
-            # Assurance endgame on the best-δ trajectory(ies): no-op unless
-            # ENABLE_MICRO_HILL_CLIMB.  Runs after the result writer has flushed the
-            # JSONL, while geom / start / eval_pool are still alive.
-            finalize_best_trajectories(
-                shard=shard,
-                identified_consts=identified_consts,
-                geom=geom,
-                start=start,
-                eval_pool=eval_pool,
-                cmf_id=cmf_id,
-                shard_id=shard_id,
-                shard_encoding_str=shard_encoding_str,
-                output_path=output_path,
-            )
-        finally:
-            if eval_pool is not None:
-                eval_pool.close()
-                eval_pool.join()
-            if pq_manager is not None:
-                pq_manager.shutdown()
-
-        Logger(
-            f"Finished Simulated Annealing search on shard {shard_id}",
-            Logger.Levels.debug,
-        ).log()
+    Logger(
+        f"Finished Simulated Annealing search on shard {shard_id}",
+        Logger.Levels.debug,
+    ).log()
+    return shard_id
