@@ -37,6 +37,12 @@ jobs:
         flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
         # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-    - name: Test with pytest
+    - name: Runner diagnostics (diag branch only)
       run: |
-        pytest
+        nproc; free -m; uname -a
+        cat /sys/fs/cgroup/memory.max 2>/dev/null || true
+        cat /sys/fs/cgroup/memory.current 2>/dev/null || true
+        python -c "import multiprocessing as m, sys; print(sys.version, m.get_all_start_methods())"
+    - name: Test with pytest (diag branch only — memory budget tests)
+      run: |
+        pytest tests/test_memory_budget.py -v -s -p no:cacheprovider

@@ -136,16 +136,37 @@ class TestPoolIntegration:
         forkserver child on Linux, where a fixed budget left the four hungry
         workers ~10 MB short of the reserve and the pool never shrank (CI)."""
         import multiprocessing as mp
+        import time
+        from dreamer.utils.mp_context import start_method
         hog_mb, reserve = 120, 200
+        # DIAGNOSTIC (diag branch only): log every memory check of the pool.
+        real_avail = mb.available_memory_mb
+        t0 = time.time()
+        state = {}
+
+        def spy():
+            v = real_avail()
+            kids = mp.active_children()
+            print(f"[diag] t={time.time() - t0:6.3f}s avail={v:8.1f} limit={config.system.MEMORY_LIMIT_MB} "
+                  f"main={mb.rss_mb([os.getpid()]):6.1f} kids={len(kids)} "
+                  f"rss={[round(mb.rss_mb([p.pid])) for p in kids]} "
+                  f"in_flight={state['pool'].in_flight() if state else '-'} "
+                  f"procs={state['pool']._processes if state else '-'}", flush=True)
+            return v
+
+        monkeypatch.setattr(mb, "available_memory_mb", spy)
+        print(f"[diag] start method {start_method()}", flush=True)
         monkeypatch.setattr(config.system, "MEMORY_AWARE_WORKERS", True)
         monkeypatch.setattr(config.system, "MEMORY_RESERVE_MB", reserve)
         monkeypatch.setattr(config.system, "MEMORY_LIMIT_MB", 10**9)   # no pressure while warming up
         monkeypatch.setattr(mb, "per_worker_mb", lambda: 1)       # start wide on purpose
         monkeypatch.setattr(config.system, "POOL_SLOW_START", 0)
         with ResilientPool(4, name="t") as pool:
+            state["pool"] = pool
             assert pool._processes == 4
             assert list(pool.imap(_hog, [(i, 1) for i in range(8)])) == [i * i for i in range(8)]
             idle = mb.rss_mb([os.getpid()] + [p.pid for p in mp.active_children()])
+            print(f"[diag] idle={idle:.1f} kids={[p.pid for p in mp.active_children()]}", flush=True)
             # Room above the reserve for 1.5 hungry tasks: any two running at a check exceed it.
             monkeypatch.setattr(config.system, "MEMORY_LIMIT_MB", int(idle + reserve + 1.5 * hog_mb))
             out = list(pool.imap(_hog, [(i, hog_mb) for i in range(24)]))
