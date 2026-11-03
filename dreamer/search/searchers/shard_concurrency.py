@@ -20,13 +20,22 @@ How
   memory, so its eval pool sizes itself with the existing machinery.
 * ``K`` = min(#shards, cores // workers per shard, what memory allows for
   ``K × workers``); a configured value overrides the automatic choice.
-* A shard process that dies (e.g. out of memory) breaks the executor: the
-  shards that were running are re-run **one at a time** at the end (a shard
-  re-reads its own JSONL, so finished walks are not repeated); a shard that
-  kills its process again is reported as failed.  Other shards are unaffected.
+* A shard process that dies breaks the executor: the shards that were running
+  are re-run **one at a time** at the end (a shard re-reads its own JSONL, so
+  finished walks are not repeated); a shard that kills its process again is
+  reported as failed, with the cause (executor message and exit code / signal).
+  Other shards are unaffected.
   A shard whose search *raises* is reported and not retried.
-* Shard processes report to the run monitor as workers, and their eval pools
-  report to the same run directory.
+* Shard processes report to the run monitor as workers (events, watchdog), and
+  their eval pools report to the same run directory.  Progress *nodes* exist only
+  in the main process, so the web view shows the shards-finished bar, not each
+  shard's own progress.
+
+Caveat on "identical": a shard's rows are the same as in a sequential run as
+far as identification is independent of evaluation order.  It is not fully: the
+shard's (p, q) form cache is shared live between its eval workers, so which
+cached form a trajectory gets can depend on timing (and on the worker count),
+also without concurrency.  Seen once on an old code base; under investigation.
 
 Only simulated annealing uses this so far (GitHub issue #74 tracks the others).
 """
@@ -72,8 +81,17 @@ def plan_shards(n_shards: int, dims: Sequence[int], *, requested: int = 0,
         k = int(requested)
     else:
         k_cores = total // want
-        k_memory = max(1, memory_worker_cap(k_cores * want, log=False) // want)
+        fit = memory_worker_cap(k_cores * want, log=False)
+        k_memory = max(1, fit // want)
         k = min(k_cores, k_memory)
+        if k_memory < k_cores and n_shards > k_memory:
+            Logger(
+                f"Concurrent shards: memory allows ~{fit} worker(s) by the pre-run estimate "
+                f"(system.WORKER_MEMORY_MB / measured baseline + headroom), so {k_memory} shard(s) "
+                f"at a time instead of {k_cores}; set ANNEAL_CONCURRENT_SHARDS (and MEMORY_LIMIT_MB) "
+                f"to override.",
+                Logger.Levels.info,
+            ).log()
     k = max(1, min(k, int(n_shards)))
     if k <= 1:
         return ShardPlan(1, total, None)
@@ -89,6 +107,32 @@ def _memory_share(k: int) -> Optional[int]:
     budget = allocated_memory_mb() or available_memory_mb()
     reserve = float(getattr(config.system, "MEMORY_RESERVE_MB", 1024))
     return max(1, int((float(budget) - reserve) // k))
+
+
+def _break_reason(exc: BaseException, executor) -> str:
+    """Why a shard executor broke: the executor's message plus the dead processes'
+    exit codes (a negative code is the signal; SIGKILL is typical of the OOM killer)."""
+    import signal
+    parts = [str(exc) or type(exc).__name__]
+    cause = exc.__cause__
+    if cause is not None:
+        parts.append(f"cause: {cause!r}")
+    try:                                         # private attribute — best effort only
+        codes = sorted({p.exitcode for p in getattr(executor, "_processes", {}).values()
+                        if p.exitcode not in (None, 0)})
+    except Exception:
+        codes = []
+    for code in codes:
+        if code < 0:
+            try:
+                name = signal.Signals(-code).name
+            except ValueError:
+                name = f"signal {-code}"
+            hint = " (e.g. out of memory)" if name == "SIGKILL" else ""
+            parts.append(f"exit code {code} = {name}{hint}")
+        else:
+            parts.append(f"exit code {code}")
+    return "; ".join(parts)
 
 
 def _shard_process_init(config_overrides: dict, monitor_dir: Optional[str]) -> None:
@@ -137,6 +181,8 @@ def run_shards(task: Callable, jobs: Sequence[Tuple[str, tuple]], plan: ShardPla
         if on_done is not None:
             on_done(sid)
 
+    reasons: List[str] = []
+
     def run_batch(ids: List[str], workers: int) -> List[str]:
         """Run *ids*, at most *workers* in flight; return those in flight when a process died.
 
@@ -160,7 +206,9 @@ def run_shards(task: Callable, jobs: Sequence[Tuple[str, tuple]], plan: ShardPla
                         try:
                             fut.result()
                             finish(sid, "ok")
-                        except BrokenProcessPool:
+                        except BrokenProcessPool as exc:
+                            if not broken:
+                                reasons.append(_break_reason(exc, ex))
                             broken = True
                             died.append(sid)
                         except Exception as exc:     # the search itself raised — report, go on
@@ -173,13 +221,13 @@ def run_shards(task: Callable, jobs: Sequence[Tuple[str, tuple]], plan: ShardPla
     suspects = run_batch([sid for sid, _ in jobs], plan.concurrent)
     if suspects:
         Logger(
-            f"{label}: a shard process died (likely out of memory); re-running "
+            f"{label}: a shard process died ({reasons[-1]}); re-running "
             f"{len(suspects)} shard(s) that were in flight, one at a time.",
             Logger.Levels.warning,
         ).log()
     for sid in suspects:
         if run_batch([sid], 1):
-            Logger(f"{label}: shard {sid} killed its process again — giving up on it.",
+            Logger(f"{label}: shard {sid} killed its process again ({reasons[-1]}) — giving up on it.",
                    Logger.Levels.exception).log()
-            finish(sid, "failed: process died twice")
+            finish(sid, f"failed: process died twice ({reasons[-1]})")
     return outcome

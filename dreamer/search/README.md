@@ -43,7 +43,7 @@ point and δ is the landscape:
 |-----------------|--------|------|
 | `SmallAngleSearchMod` | small-angle hill-climb | nudge the direction by the smallest resolvable angle. |
 | `GeneticSearchModV2` | genetic algorithm | evolve a population of directions. |
-| `SimulatedAnnealingMod` | simulated annealing | temperature-controlled random walk over directions; idle eval workers pre-walk the next step's candidates (`ANNEAL_LOOKAHEAD`) without changing the search path. Independent shards run concurrently, each in its own process with its own eval pool (`ANNEAL_CONCURRENT_SHARDS`, `searchers/shard_concurrency.py`) — every shard's rows are identical to a one-after-another run. |
+| `SimulatedAnnealingMod` | simulated annealing | temperature-controlled random walk over directions; idle eval workers pre-walk the next step's candidates (`ANNEAL_LOOKAHEAD`) without changing the search path. Independent shards run concurrently, each in its own process with its own eval pool (`ANNEAL_CONCURRENT_SHARDS`, `searchers/shard_concurrency.py`) — every shard's rows match a one-after-another run, except where a trajectory's identification depends on which (p, q) forms its shard had cached by then (a known, rare order effect). |
 | `GradientAscentMod` | gradient ascent (Adam) | follow a finite-difference δ-gradient. |
 | `HybridSPSAMod` | SPSA + Adam + discrete fallback | 2-evaluation stochastic gradient, good at high dimension. |
 
