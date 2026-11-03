@@ -29,6 +29,7 @@ import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+import sympy as sp
 from ramanujantools import Position
 
 from dreamer.configs import config
@@ -521,14 +522,15 @@ class SimulatedAnnealingSearch(SearchMethod):
         :return: Flatland vectors, best objective score first (ties by trajectory id).
         """
         start = eval_ctx["start"]
-        start_t = [int(start[s]) for s in geom.symbols]
+        # Exact rationals: shifted CMFs have start points like 1/2, stored as '1/2'.
+        start_t = [sp.Rational(start[s]) for s in geom.symbols]
         objective_name = active_objective()
         scored: List[Tuple[float, str, np.ndarray]] = []
         for trajectory_id, by_const in eval_ctx["seen_trajectories"].items():
             rec = by_const.get(constant.name)
             if rec is None or rec.get("direction") is None:
                 continue
-            if [int(c) for c in rec.get("start_point") or []] != start_t:
+            if [sp.Rational(c) for c in rec.get("start_point") or []] != start_t:
                 continue
             result = score_record(rec, objective_name)
             if result is None:
