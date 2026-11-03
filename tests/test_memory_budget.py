@@ -129,17 +129,26 @@ class TestPoolIntegration:
     def test_running_pool_shrinks_and_stays_correct(self, monkeypatch):
         """A tight budget: while hungry tasks run, available memory (limit minus
         our process tree) falls below the reserve, so the pool shrinks — and
-        every result is still correct and in order."""
+        every result is still correct and in order.
+
+        The budget is set from the *measured* idle pool, not from an assumed
+        worker size: an idle worker is ~100 MB under spawn but far less as a
+        forkserver child on Linux, where a fixed budget left the four hungry
+        workers ~10 MB short of the reserve and the pool never shrank (CI)."""
+        import multiprocessing as mp
+        hog_mb, reserve = 120, 200
         monkeypatch.setattr(config.system, "MEMORY_AWARE_WORKERS", True)
-        own = mb.rss_mb([os.getpid()])
-        # Budget: main + reserve + room for ~2 idle workers; four hungry workers exceed it.
-        monkeypatch.setattr(config.system, "MEMORY_RESERVE_MB", 200)
-        monkeypatch.setattr(config.system, "MEMORY_LIMIT_MB", int(own + 200 + 2 * 150 + 200))
+        monkeypatch.setattr(config.system, "MEMORY_RESERVE_MB", reserve)
+        monkeypatch.setattr(config.system, "MEMORY_LIMIT_MB", 10**9)   # no pressure while warming up
         monkeypatch.setattr(mb, "per_worker_mb", lambda: 1)       # start wide on purpose
         monkeypatch.setattr(config.system, "POOL_SLOW_START", 0)
         with ResilientPool(4, name="t") as pool:
             assert pool._processes == 4
-            out = list(pool.imap(_hog, [(i, 120) for i in range(24)]))
+            assert list(pool.imap(_hog, [(i, 1) for i in range(8)])) == [i * i for i in range(8)]
+            idle = mb.rss_mb([os.getpid()] + [p.pid for p in mp.active_children()])
+            # Room above the reserve for 1.5 hungry tasks: any two running at a check exceed it.
+            monkeypatch.setattr(config.system, "MEMORY_LIMIT_MB", int(idle + reserve + 1.5 * hog_mb))
+            out = list(pool.imap(_hog, [(i, hog_mb) for i in range(24)]))
         assert out == [i * i for i in range(24)]
         assert pool.shrinks >= 1 and pool._processes < 4
 
