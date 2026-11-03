@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 import sympy as sp
 from LIReC.db.access import db
+from dreamer.utils.constants import lirec_pslq_bound  # noqa: F401  (bounds LIReC's PSLQ)
 import mpmath as mp
 import ramanujantools as rt
 from ramanujantools import Limit, Position

@@ -10,6 +10,7 @@ import sympy as sp
 from sympy.abc import n
 
 from LIReC.db.access import db
+from dreamer.utils.constants import lirec_pslq_bound  # noqa: F401  (bounds LIReC's PSLQ)
 from ramanujantools import LinearRecurrence, Matrix, Limit, linear_recurrence
 from dreamer.utils.constants.high_precision import high_precision, resolved_error
 from dreamer.utils.constants.constant import is_joint_value
