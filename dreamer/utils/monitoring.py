@@ -40,6 +40,8 @@ _ECHO_KINDS = {"walltime", "walltime_warning", "walltime_grace", "stall", "stall
 
 _handler: Optional[logging.Handler] = None
 _run_dir: Optional[str] = None
+#: Run directory this process reports to as a worker (see :func:`worker_run_dir`).
+_worker_dir: Optional[str] = None
 
 
 class _EventHandler(JsonlHandler):
@@ -281,15 +283,22 @@ def unregister_pool(handle: Optional[int]) -> None:
 
 
 def worker_run_dir() -> Optional[str]:
-    """Directory workers should write their events to (``None`` when off)."""
-    return run_dir()
+    """Directory workers should write their events to (``None`` when off).
+
+    In the main process: the monitored run's directory.  In a process that is
+    itself a monitored worker running its own pool (e.g. a shard process of a
+    concurrent search): the directory it was attached to, so its pool workers
+    report to the same run.
+    """
+    return run_dir() or _worker_dir
 
 
 def init_worker(directory: Optional[str]) -> None:
     """In a pool worker: own event file + watchdog + log lines from ``WORKER_EVENT_LOG_LEVEL``."""
-    global _handler
+    global _handler, _worker_dir
     if not directory or active():
         return
+    _worker_dir = directory
     runmon.init_worker(directory, on_watchdog=_log_watchdog)
     if _handler is None:
         _handler = _EventHandler(runmon.publish, level_value(config.monitor.WORKER_EVENT_LOG_LEVEL))
