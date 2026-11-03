@@ -10,7 +10,7 @@ from ramanujantools.cmf import CMF
 from typing import Tuple, Optional, List, Union
 
 from dreamer.utils.constants.constant import Constant
-from dreamer.utils.constants.high_precision import high_precision, resolved_error
+from dreamer.utils.constants.high_precision import delta_from_error, high_precision, resolved_error
 from dreamer.utils.logger import Logger
 from dreamer.utils.storage.storage_objects import SearchData, SearchVector
 from dreamer.configs import config
@@ -162,7 +162,7 @@ class Searchable(ABC):
                 v2 = sp.Matrix(v2).T
                 numerator = v1.dot(values_vec)
                 denom = v2.dot(values_vec)
-                err = sp.Abs(sp.Abs(sp.Rational(numerator, denom)) - low_res_constant)
+                err = sp.Abs(abs(sp.Rational(numerator, denom)) - low_res_constant)
                 return sp.N(err, 25) < search_config.CACHE_ACCEPTANCE_THRESHOLD
 
             matched = self.cache.find(matcher)
@@ -231,7 +231,7 @@ class Searchable(ABC):
             if not estimated or not err:
                 numerator = p.dot(values_vec)
                 denom = q.dot(values_vec)
-                estimated = sp.Abs(sp.Rational(numerator, denom))
+                estimated = abs(sp.Rational(numerator, denom))
             # The error must be resolved beyond the constant's own rounding;
             # raise the precision until it is (see ``resolved_error``).
             err, _, _ = resolved_error(
@@ -248,11 +248,11 @@ class Searchable(ABC):
 
             # check abnormal denominator and compute delta
             denom = sp.denom(estimated)
-            if sp.Abs(denom) <= search_config.MIN_ESTIMATE_DENOMINATOR:
+            if abs(denom) <= search_config.MIN_ESTIMATE_DENOMINATOR:
                 # probably didn't converge for some reason
                 return None, None, None
 
-            delta = -1 - sp.log(err) / sp.log(denom)
+            delta = delta_from_error(err, denom)
 
             # This part is not supposed to be reached at all, these are the final guardrails
             if delta == sp.oo or delta == sp.zoo:
@@ -379,7 +379,7 @@ class Searchable(ABC):
             q = sp.Matrix(q).T
             numerator = p.dot(values_vec)
             denom = q.dot(values_vec)
-            estimated = sp.Abs(sp.Rational(numerator, denom))
+            estimated = abs(sp.Rational(numerator, denom))
             floats.append(estimated)
 
         f1, f2, f3 = floats

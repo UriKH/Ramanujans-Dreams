@@ -252,3 +252,32 @@ def resolved_error(estimate: sp.Expr, constant: sp.Expr, digits: int, max_digits
         if digits >= max_digits:
             return None, digits, reference
         digits = int(min(digits * 2, max_digits))
+
+
+# Precision of the logarithms below: the results are used as 10–30-digit floats.
+LOG_DPS = 30
+
+
+def log_of_integer(value) -> sp.Float:
+    """Natural logarithm of an exact integer (any size), as a ``LOG_DPS``-digit ``Float``.
+
+    Computed with mpmath directly: ``sp.log(Integer)`` asks sympy facts about the
+    integer (``is_negative`` …), and depending on the process's hash seed the
+    assumption system runs a pure-Python primality test on it — minutes for the
+    10⁴-digit denominators of long trajectories.
+    """
+    import mpmath as mp
+    with mp.workdps(LOG_DPS):
+        return sp.Float(mp.log(mp.mpf(int(value))), LOG_DPS)
+
+
+def delta_from_error(err: sp.Expr, denominator) -> sp.Float:
+    """δ = −1 − log|err| / log(q) for an error ``err`` (> 0) and an exact denominator ``q``.
+
+    Numeric equivalent of ``-1 - sp.log(err) / sp.log(q)`` without sympy's
+    assumption system on the huge integer ``q`` (see :func:`log_of_integer`).
+    """
+    import mpmath as mp
+    with mp.workdps(LOG_DPS):
+        log_err = mp.log(mp.mpf(sp.Float(err, LOG_DPS)._mpf_))
+        return sp.Float(-1 - log_err / mp.log(mp.mpf(int(denominator))), LOG_DPS)
