@@ -361,6 +361,40 @@ def test_legacy_calc_delta_matches_handler(monkeypatch, log2_shard):
 
 
 @pytest.mark.timeout(300)
+def test_legacy_calc_delta_negated_constant(monkeypatch, log2_shard):
+    """``Searchable.calc_delta`` compares the *signed* form with the constant (see
+    ``tests/test_negative_constant.py``): −C gets C's δ, its cached form is reused for −C,
+    and a form cached for −C is never reused for +C (each miss is one LIReC call)."""
+    import numpy as np
+    from ramanujantools import Position
+    from dreamer.utils.schemes import searchable as searchable_module
+    from dreamer.utils.storage.frequency_list import FrequencyList
+
+    syms = list(log2_shard.cmf.matrices.keys())
+    traj = Position(dict(zip(syms, (2, 1, 3))))
+    start = log2_shard.get_interior_point()
+    monkeypatch.setattr(log2_shard, "use_inv_t", False)
+    monkeypatch.setattr(log2_shard, "cache", FrequencyList(max_size=100))
+    lirec_calls = []
+    real_identify = searchable_module.db.identify
+    monkeypatch.setattr(searchable_module.db, "identify",
+                        lambda values, *a, **kw: lirec_calls.append(1) or real_identify(values, *a, **kw))
+    traj_len = float(np.sqrt(sum(float(v) ** 2 for v in traj.values())))
+    m = log2_shard.cmf.trajectory_matrix(traj, start)
+
+    deltas = []
+    for constant, expected_calls in ((-R.log(2).value_sympy, 1),   # miss → LIReC
+                                     (-R.log(2).value_sympy, 1),   # cache hit
+                                     (R.log(2).value_sympy, 2)):   # −C's form must not match +C
+        delta, pq, _ = log2_shard.calc_delta(m, traj, start, constant, traj_len)
+        assert delta is not None and pq is not None
+        assert len(lirec_calls) == expected_calls
+        deltas.append(delta)
+    assert deltas[1] == pytest.approx(deltas[0], rel=1e-12)
+    assert deltas[2] == pytest.approx(deltas[0], rel=1e-12)
+
+
+@pytest.mark.timeout(300)
 def test_legacy_calc_delta_gives_up_beyond_max(monkeypatch, log2_shard):
     """If the estimate agrees with the constant beyond MAX_CONSTANT_RESOLUTION,
     the legacy path skips the trajectory instead of returning a noise δ."""

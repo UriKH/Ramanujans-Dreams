@@ -1283,9 +1283,10 @@ class TrajectoryAttributesHandler:
                 Logger.Levels.debug,
             ).log()
             return False, float('-inf')
-        # Built-in abs() on exact numbers: sp.Abs runs sympy's assumption system, which can
-        # primality-test a huge denominator (minutes, depending on the hash seed).
-        estimated = abs(sp.Rational(numerator, denom))
+        # Signed: the identified form converges to the signed constant (an |estimate|
+        # would be ≈ 2|C| off for C < 0).  Built-in abs() below, not sp.Abs: sympy's
+        # assumption system can primality-test a huge denominator (minutes, hash-seed dependent).
+        estimated = sp.Rational(numerator, denom)
         denom_int = abs(sp.denom(estimated))
 
         if denom_int <= search_config.MIN_ESTIMATE_DENOMINATOR:
@@ -1519,7 +1520,7 @@ class TrajectoryAttributesHandler:
             denom = q.dot(values_vec)
             if denom == 0:
                 continue
-            estimated = abs(sp.Rational(numerator, denom))
+            estimated = sp.Rational(numerator, denom)
             floats.append(estimated)
 
         if len(floats) < 2:
@@ -1698,7 +1699,7 @@ class TrajectoryAttributesHandler:
             denom = q.dot(wc)
             if denom == 0:
                 return None
-            estimated = abs(sp.Rational(p.dot(wc), denom))
+            estimated = sp.Rational(p.dot(wc), denom)
             # delta() has populated _high_res_constant at the escalated precision.
             constant = self._high_res_constant
             if constant is None:
@@ -1788,7 +1789,7 @@ class TrajectoryAttributesHandler:
                 v2 = sp.Matrix(v2).T
                 numerator = v1.dot(walk_col)
                 denom = v2.dot(walk_col)
-                err = sp.Abs(abs(sp.Rational(numerator, denom)) - low_res_constant)
+                err = sp.Abs(sp.Rational(numerator, denom) - low_res_constant)
                 return sp.N(err, 25) < search_config.CACHE_ACCEPTANCE_THRESHOLD
 
             if matched := self._searchable.cache.find(matcher):
