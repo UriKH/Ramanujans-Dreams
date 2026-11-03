@@ -144,12 +144,20 @@ class TestPoolIntegration:
         t0 = time.time()
         state = {}
 
+        def rollup(pid):
+            try:
+                for line in open(f'/proc/{pid}/smaps_rollup'):
+                    if line.startswith('Rss:'):
+                        return round(int(line.split()[1]) / 1024)
+            except OSError:
+                return None
+
         def spy():
             v = real_avail()
             kids = mp.active_children()
             print(f"[diag] t={time.time() - t0:6.3f}s avail={v:8.1f} limit={config.system.MEMORY_LIMIT_MB} "
                   f"main={mb.rss_mb([os.getpid()]):6.1f} kids={len(kids)} "
-                  f"rss={[round(mb.rss_mb([p.pid])) for p in kids]} "
+                  f"VmRSS={[round(mb.rss_mb([p.pid])) for p in kids]} smaps_rollup={[rollup(p.pid) for p in kids]} "
                   f"in_flight={state['pool'].in_flight() if state else '-'} "
                   f"procs={state['pool']._processes if state else '-'}", flush=True)
             return v
