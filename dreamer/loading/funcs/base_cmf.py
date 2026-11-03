@@ -30,6 +30,9 @@ class BaseCMF(Formatter):
         :param only_selected: If True, only extract shards from the selected start points.
         """
         self.cmf = cmf
+        # The user-given name (``self.cmf_name`` also carries the shift segment);
+        # kept so the JSON round-trip rebuilds the identical cmf_name / cmf_id.
+        self.base_name = cmf_name
 
         self.shifts = shifts
         if self.shifts is None:
@@ -52,6 +55,12 @@ class BaseCMF(Formatter):
         # Normalise: new 'consts' list → 'const' param; old 'const' str stays.
         if 'consts' in data:
             data['const'] = data.pop('consts')
+        if 'cmf' not in data or 'cmf_name' not in data:
+            raise ValueError(
+                "BaseCMF JSON must contain 'cmf_name' and 'cmf' (axis -> matrix); this looks like "
+                "the old export layout (matrices as top-level keys, no cmf_name), from which the "
+                "cmf_name / cmf_id cannot be reconstructed. Re-export the CMF."
+            )
         data['cmf'] = CMF(
             matrices={sp.sympify(k): Matrix(sp.sympify(v)) for k, v in data['cmf'].items()},
             validate=False
@@ -68,7 +77,9 @@ class BaseCMF(Formatter):
         """
         return {
             **super()._to_json_obj(),
-            **{sp.srepr(sym): sp.srepr(matrix) for sym, matrix in self.cmf.matrices.items()},
+            "cmf_name": self.base_name,
+            # Insertion order = axis order, which shard encodings depend on.
+            "cmf": {sp.srepr(sym): sp.srepr(matrix) for sym, matrix in self.cmf.matrices.items()},
         }
 
     def to_cmf(self) -> CMFData:

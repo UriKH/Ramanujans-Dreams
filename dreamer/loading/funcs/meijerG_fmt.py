@@ -2,7 +2,6 @@ import json
 from ramanujantools.cmf.meijer_g import MeijerG as rt_mg
 from dreamer.utils.constants.constant import Constant
 from dreamer.loading.funcs.formatter import Formatter
-from dreamer.configs import config
 from dreamer.utils.types import CMFData
 from ramanujantools import Position
 from typing import Optional, List, Tuple, Union
@@ -15,7 +14,7 @@ class MeijerG(Formatter):
                  m: int, n: int, p: int, q: int, z: sp.Expr | int, shifts: Optional[list] = None,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
-                 use_inv_t: bool = config.search.DEFAULT_USES_INV_T,
+                 use_inv_t: bool = None,
                  selected_trajectories: Optional[List[Optional[Tuple[Union[int, sp.Rational], ...]]]] = None
                  ):
         """
@@ -30,6 +29,8 @@ class MeijerG(Formatter):
         While 0 indicates no shift (None if not doesn't matter).
         :param selected_start_points: Optional list of start points to extract shards from.
         :param only_selected: If True, only extract shards from the selected start points.
+        :param use_inv_t: Walk type (True = type 1, M^-T). ``None`` = read
+            ``config.search.DEFAULT_USES_INV_T`` when the object is built.
         """
         self.m = m
         self.n = n
