@@ -37,6 +37,24 @@ shifts).  Within a fractional-shift group the swap is a valid lattice
 symmetry even when the integer parts differ, which is why we sort the
 absolute ``x`` and subtract the per-coordinate shift afterwards (for the
 common all-zero shift this reduces to a plain block sort).
+
+The :math:`MeijerG` family
+==========================
+:math:`G^{m,n}_{p,q}` is symmetric under
+:math:`S_n \times S_{p-n} \times S_m \times S_{q-m}` acting on
+``a[:n], a[n:], b[:m], b[m:]``.  ramanujantools orders the axes
+``a0..a_{p-1}, b0..b_{q-1}``, so the column blocks are
+``(0,n), (n,p), (p,p+m), (p+m,end)`` (again split by fractional shift).
+
+Verification (no shard may be lost)
+===================================
+Each family *declares* its groups through a :class:`Grouping`;
+:func:`symmetry_for_cmf` then cross-checks them with
+:func:`verify_symmetry_groups` against the CMF matrices
+(:math:`M_{\sigma(k)}(\sigma x) = M_k(x)` for every axis, tested exactly at
+generic rational points) and drops any group that fails.  A wrong
+declaration therefore only weakens deduplication; it can never merge a
+shard that is not truly symmetric to one already kept.
 """
 
 from __future__ import annotations
@@ -45,6 +63,9 @@ from abc import ABC, abstractmethod
 from typing import List, Optional, Sequence, Tuple
 from ramanujantools.cmf import CMF, MeijerG, pFq as rt_pFq
 import numpy as np
+import sympy as sp
+
+from dreamer.utils.logger import Logger
 
 Range = List[Tuple[int, int | None]]
 
@@ -148,13 +169,20 @@ class Grouping(ABC):
     def group(self) -> List[np.ndarray]:
         """
         Return the column-index groups for the given per-coordinate shift.
+
+        Each block ``(start, stop)`` from :meth:`groups` is split by equal
+        fractional shift.  The returned indices are **absolute** column indices
+        (offset by the block's ``start``), so they can be used directly on the
+        full point matrix.  ``stop=None`` means "to the last column".
         """
         reduced = self.reduce_shift(self.shift)
         groups: List[np.ndarray] = []
 
-        for g in self.groups(self.shift):
-            for off in np.unique(r := reduced[g[0]:g[1]]):
-                groups.append(np.where(r == off)[0])
+        for start, stop in self.groups(self.shift):
+            stop = len(reduced) if stop is None else stop
+            block = reduced[start:stop]
+            for off in np.unique(block):
+                groups.append(np.where(block == off)[0] + start)
         return groups
 
 
@@ -193,7 +221,9 @@ class MeijerGGrouping(Grouping):
             raise ValueError(
                 f"n must be <= p and m must be <= q: n={self.n}, p={self.p}, m={self.m}, q={self.q}"
             )
-        return [(0, self.m), (self.m, self.q), (self.q, self.q + self.n), (self.q + self.n, None)]
+        # ramanujantools orders the MeijerG axes a0..a_{p-1}, b0..b_{q-1}
+        # (``cmf.matrices.keys()``), so the blocks are a[:n], a[n:], b[:m], b[m:].
+        return [(0, self.n), (self.n, self.p), (self.p, self.p + self.m), (self.p + self.m, None)]
 
 
 class GroupingFactory:
@@ -226,4 +256,108 @@ def symmetry_for_cmf(cmf: CMF, shift: Sequence[float]) -> Optional[SymmetryStrat
     grouping = GroupingFactory.create(cmf, shift)
     if grouping is None:
         return None
-    return BlockSortSymmetry(grouping.group(), shift=list(shift))
+    groups = verify_symmetry_groups(cmf, grouping.group(), shift)
+    return BlockSortSymmetry(groups, shift=list(shift))
+
+
+def _evaluate(cmf: CMF, axis: sp.Symbol, point: dict) -> sp.Matrix:
+    """``M_axis`` evaluated at an exact rational ``point``."""
+    return sp.Matrix(cmf.matrices[axis]).xreplace(point)
+
+
+def _is_zero_matrix(matrix: sp.Matrix) -> bool:
+    """Exact zero test; only non-numeric leftovers are simplified."""
+    return all(
+        (entry == 0) if entry.is_Number else sp.simplify(entry) == 0
+        for entry in matrix
+    )
+
+
+def _is_exact_swap_symmetry(
+    cmf: CMF,
+    i: int,
+    j: int,
+    points: Sequence[dict],
+    at_points: Sequence[dict],
+) -> bool:
+    r"""
+    Whether swapping axes ``i`` and ``j`` is an exact symmetry of ``cmf``.
+
+    The swap :math:`\sigma` is a symmetry iff
+    :math:`M_{\sigma(k)}(\sigma x) = M_k(x)` for every axis :math:`k`.  Both
+    sides are rational functions, so the identity is tested exactly at the
+    given generic rational ``points`` (a non-identity vanishes at a random
+    rational point with negligible probability).
+
+    :param points: Axis-to-value substitutions (exact rationals).
+    :param at_points: Per point, ``{axis: M_axis(point)}`` (the unswapped side,
+        shared by every swap tested at that point).
+    :return: ``True`` if the identity holds at every point.
+    """
+    axes = list(cmf.matrices.keys())
+    target = {axes[i]: axes[j], axes[j]: axes[i]}
+    for point, evaluated in zip(points, at_points):
+        swapped = {**point, axes[i]: point[axes[j]], axes[j]: point[axes[i]]}
+        for k in axes:
+            if not _is_zero_matrix(evaluated[k] - _evaluate(cmf, target.get(k, k), swapped)):
+                return False
+    return True
+
+
+def _generic_points(axes: Sequence[sp.Symbol], count: int, seed: int) -> List[dict]:
+    """``count`` generic rational substitutions for ``axes`` (no poles hit in practice)."""
+    rng = np.random.default_rng(seed)
+    return [
+        {ax: sp.Rational(int(rng.integers(-997, 997)), int(rng.integers(101, 997))) for ax in axes}
+        for _ in range(count)
+    ]
+
+
+def verify_symmetry_groups(
+    cmf: CMF,
+    groups: Sequence[Sequence[int]],
+    shift: Sequence[float],
+    *,
+    num_points: int = 2,
+    seed: int = 0,
+) -> List[np.ndarray]:
+    r"""
+    Keep only the column groups that are verified exact symmetries of ``cmf``.
+
+    This is a cross-check of a family's *declared* groups (from its
+    :class:`Grouping`), not the definition of its symmetry.  A group of
+    columns :math:`g_0 < g_1 < \dots` is kept iff every coordinate in it has
+    the same fractional shift and every adjacent swap :math:`(g_t, g_{t+1})`
+    is an exact symmetry (adjacent transpositions generate :math:`S_k`, so
+    the whole group is then a symmetry).  A failing group is dropped with a
+    warning: deduplication can only become weaker, so no non-symmetric shard
+    is ever merged away.
+
+    :param cmf: The ramanujantools CMF the groups were declared for.
+    :param groups: Absolute column-index groups (as from :meth:`Grouping.group`).
+    :param shift: Per-coordinate shift (same column order as the groups).
+    :param num_points: Generic rational points to test each swap at.
+    :param seed: Seed for the test points (deterministic by default).
+    :return: The verified groups (groups of size < 2 are dropped as no-ops).
+    """
+    axes = list(cmf.matrices.keys())
+    frac = [sp.Rational(s) - sp.floor(sp.Rational(s)) for s in shift]
+    points = _generic_points(axes, num_points, seed)
+    at_points = [{k: _evaluate(cmf, k, point) for k in axes} for point in points]
+    kept: List[np.ndarray] = []
+    for group in groups:
+        cols = sorted(int(c) for c in np.atleast_1d(np.asarray(group)))
+        if len(cols) < 2:
+            continue
+        same_shift = len({frac[c] for c in cols}) == 1
+        if same_shift and all(
+            _is_exact_swap_symmetry(cmf, a, b, points, at_points) for a, b in zip(cols, cols[1:])
+        ):
+            kept.append(np.asarray(cols, dtype=np.intp))
+            continue
+        Logger(
+            f"Symmetry group {[str(axes[c]) for c in cols]} of {type(cmf).__name__} is not an "
+            "exact symmetry of the CMF; dropping it (less deduplication, no shards lost).",
+            Logger.Levels.warning,
+        ).log()
+    return kept
