@@ -23,8 +23,11 @@ from runmon.web.server import make_server
 
 @pytest.fixture
 def web(tmp_path):
+    # The hub samples the real machine: an allocation it cannot exceed and no memory / disk
+    # thresholds, so the only WARNING is the test's own (CI once added 'over_allocation').
     h = Hub(str(tmp_path / "run"), "web-test", HubConfig(sample_s=0.05, drain_s=0.02, status_s=0.05,
-                                                          heartbeat_s=0.1, walltime_check_s=0.05)).start()
+                                                          heartbeat_s=0.1, walltime_check_s=0.05,
+                                                          cores=10**6, mem_low_frac=0.0, disk_low_mb=0.0)).start()
     with h.tree.task("analysis", kind="stage"):
         pass
     h.event("worker_died", "a worker died", "WARNING", pool="eval")
