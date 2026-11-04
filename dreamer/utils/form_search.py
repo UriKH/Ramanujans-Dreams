@@ -205,77 +205,85 @@ def lll_relations(col: Sequence[sp.Rational], L: mp.mpf, weight_digits: int, coe
     return out
 
 
-def ladder_start(cols, L: mp.mpf, settings: FormSearchSettings, top_digits: Optional[int] = None,
+def ladder_start(fit_col, cols, L: mp.mpf, settings: FormSearchSettings, top_digits: Optional[int] = None,
                  levels: int = 12) -> Optional[Form]:
     """
-    A first valid form when nothing identified the trajectory: LLL on a geometric ladder of weights.
-    :param cols: Column at 0.9d, 0.95d, d.
+    A first valid form when nothing identified the trajectory: LLL on the fit column on a ladder of weights.
+    :param fit_col: Column at the fit depth (d/2): LLL sees only this column.
+    :param cols: Column at 0.9d, 0.95d, d (held out): candidates are checked and ranked here.
     :param L: Target at the working precision.
     :param settings: Search settings.
     :param top_digits: Largest LLL weight (below the working precision); default from the column size.
     :param levels: Ladder levels.
-    :return: The valid candidate holding to the most digits, or None.
+    :return: The valid candidate holding to the most digits at depth d, or None.
     """
-    col = cols[-1]
-    top = top_digits if top_digits is not None else working_dps(col) - 300
+    top = top_digits if top_digits is not None else working_dps(fit_col) - 300
     lo = 30
     ladder = sorted({int(lo * (top / lo) ** (k / (levels - 1))) for k in range(levels)}) if top > lo else [top]
     best = None
     for N in ladder:
-        for f in lll_relations(col, L, N, settings.coef_bound):
+        for f in lll_relations(fit_col, L, N, settings.coef_bound):
             if check_form(cols, f, L, settings)[0]:
-                d = form_digits(col, f, L)
+                d = form_digits(cols[-1], f, L)
                 if d is not None and (best is None or d > best[0]):
                     best = (d, f)
     return best[1] if best else None
 
 
-def refine(cols, L: mp.mpf, start: Form, settings: FormSearchSettings) -> Tuple[Form, int]:
+def refine(fit_col, cols, L: mp.mpf, start: Form, settings: FormSearchSettings) -> Tuple[Form, int]:
     """
-    Window steps: LLL at weight digits(current) + margin until no valid form holds to more digits.
-    :param cols: Column at 0.9d, 0.95d, d.
+    Window steps: LLL on the fit column at weight digits(current) + margin until no faster form exists.
+
+    A candidate replaces the current form only if it gains at least as many digits at depth d (held out) as at the
+    fit depth d/2.  A faster rate gains about twice as much at d; a form whose coefficients were tuned to the fit
+    depth (possible when an entry of the column vanishes and its coefficient is free) gains far less elsewhere.
+    :param fit_col: Column at the fit depth (d/2).
+    :param cols: Column at 0.9d, 0.95d, d (held out).
     :param L: Target at the working precision.
     :param start: Starting form (any valid form of the trajectory).
     :param settings: Search settings.
     :return: (fastest form found, number of LLL calls).
     """
-    col = cols[-1]
     cur, calls = start, 0
     for _ in range(settings.max_steps):
-        dig = form_digits(col, cur, L)
-        if dig is None or math.isinf(dig):
+        fit, held = form_digits(fit_col, cur, L), form_digits(cols[-1], cur, L)
+        if fit is None or held is None or math.isinf(fit) or math.isinf(held):
             break                                      # beyond the working precision: the caller raises it
         calls += 1
         better = []
-        for f in lll_relations(col, L, int(dig) + settings.margin_digits, settings.coef_bound):
-            d = form_digits(col, f, L)
-            if d is not None and d > dig + 1 and check_form(cols, f, L, settings)[0]:
-                better.append((d, f))
+        for f in lll_relations(fit_col, L, int(fit) + settings.margin_digits, settings.coef_bound):
+            f_fit, f_held = form_digits(fit_col, f, L), form_digits(cols[-1], f, L)
+            if f_fit is None or f_held is None:
+                continue
+            gain_fit, gain_held = f_fit - fit, f_held - held
+            if gain_held > 1 and gain_held >= gain_fit and check_form(cols, f, L, settings)[0]:
+                better.append((f_held, f))
         if not better:
             break
         cur = max(better, key=lambda t: t[0])[1]
     return cur, calls
 
 
-def best_equal_rate(cols, L: mp.mpf, form: Form, settings: FormSearchSettings) -> Tuple[Form, int]:
+def best_equal_rate(fit_col, cols, L: mp.mpf, form: Form, settings: FormSearchSettings) -> Tuple[Form, int]:
     """
-    Among the forms converging at the same rate as ``form``, the one with the best δ.
+    Among the forms converging at the same rate as ``form``, the one with the best δ at depth d.
 
-    Forms at one rate differ only in their reduced denominators.  The basis of those forms comes from one LLL call
-    at weight digits − margin.  With a single basis vector there is nothing to choose.  Otherwise combinations with
-    coefficients in {−1, 0, 1} are ranked by their exact reduced denominator (an integer gcd, cheap), and only the
-    ``equal_rate_top`` smallest are scored.
-    :param cols: Column at 0.9d, 0.95d, d.
+    Forms at one rate differ only in their reduced denominators.  Their basis comes from one LLL call on the fit
+    column at weight digits − margin.  With a single basis vector there is nothing to choose.  Otherwise combinations
+    with coefficients in {−1, 0, 1} are ranked by their exact reduced denominator at depth d (an integer gcd, cheap),
+    and only the ``equal_rate_top`` smallest at the same rate are scored.
+    :param fit_col: Column at the fit depth (d/2).
+    :param cols: Column at 0.9d, 0.95d, d (held out).
     :param L: Target at the working precision.
     :param form: The fastest form found by :func:`refine`.
     :param settings: Search settings.
     :return: (best form, number of LLL calls).
     """
     col = cols[-1]
-    dig = form_digits(col, form, L)
-    if dig is None or math.isinf(dig):
+    fit, dig = form_digits(fit_col, form, L), form_digits(col, form, L)
+    if fit is None or dig is None or math.isinf(fit) or math.isinf(dig):
         return form, 0
-    basis = lll_relations(col, L, max(int(dig) - settings.margin_digits, 10), settings.coef_bound)
+    basis = lll_relations(fit_col, L, max(int(fit) - settings.margin_digits, 10), settings.coef_bound)
     if len(basis) <= 1:
         return form, 1
     n = len(col)
@@ -300,26 +308,29 @@ def best_equal_rate(cols, L: mp.mpf, form: Form, settings: FormSearchSettings) -
         if checked >= settings.equal_rate_top:
             break
         d = form_digits(col, f, L)
-        if d is None or d < dig - 1:
-            continue                                   # not at the final rate
+        if d is None or abs(d - dig) > 1:
+            continue                                   # not at the final rate (or tuned to the fit depth)
         checked += 1
         if check_form(cols, f, L, settings)[0]:
-            s = form_delta(col, f, L)
-            if s is not None and (best[0] is None or s > best[0] + 1e-12):
-                best = (s, f)
+            s_ = form_delta(col, f, L)
+            if s_ is not None and (best[0] is None or s_ > best[0] + 1e-12):
+                best = (s_, f)
     return best[1], 1
 
 
-def search(cols, L: mp.mpf, start: Form, settings: FormSearchSettings) -> FormSearchResult:
+def search(fit_col, cols, L: mp.mpf, start: Form, settings: FormSearchSettings) -> FormSearchResult:
     """
     The fastest-converging form of the trajectory, then the best δ at that rate.
+    LLL only sees the column at the fit depth d/2; every decision is scored at depths 0.9d … d (held out), so a form
+    cannot gain δ by fitting the depth it is scored at.
+    :param fit_col: Column at the fit depth (d/2, exact rationals).
     :param cols: Column at 0.9d, 0.95d, d (exact rationals).
     :param L: Target at ``working_dps(cols[-1])`` digits.
     :param start: A valid form of the trajectory (LIReC's, a cached one, or :func:`ladder_start`'s).
     :param settings: Search settings.
     :return: The result.
     """
-    fast, calls = refine(cols, L, start, settings)
-    final, more = best_equal_rate(cols, L, fast, settings)
+    fast, calls = refine(fit_col, cols, L, start, settings)
+    final, more = best_equal_rate(fit_col, cols, L, fast, settings)
     return FormSearchResult(form=final, delta=form_delta(cols[-1], final, L), lll_calls=calls + more,
                             improved=final != start)

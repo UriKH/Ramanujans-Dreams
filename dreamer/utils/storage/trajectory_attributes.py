@@ -1783,11 +1783,12 @@ class TrajectoryAttributesHandler:
         if constant.is_rational:
             return vectors
         cols = []
-        for fraction in (0.9, 0.95, 1.0):
+        for fraction in (0.5, 0.9, 0.95, 1.0):     # 0.5: the fit depth (LLL); 0.9 … 1: held out (scoring)
             col, _ = self._effective_walk_values(round(fraction * self._depth))
             if col is None:
                 return vectors
             cols.append([sp.Rational(c) for c in col])
+        fit_col, cols = cols[0], cols[1:]
         if len(cols[-1]) < 3:
             return vectors
         settings = fs.FormSearchSettings(
@@ -1811,10 +1812,10 @@ class TrajectoryAttributesHandler:
             with mp.workdps(dps):
                 L = mp.mpf(high_precision(constant, dps)._mpf_)
                 if start is None:
-                    start = fs.ladder_start(cols, L, settings, top_digits=dps - 300)
+                    start = fs.ladder_start(fit_col, cols, L, settings, top_digits=dps - 300)
                     if start is None:
                         return None
-                result = fs.search(cols, L, start, settings)
+                result = fs.search(fit_col, cols, L, start, settings)
                 digits = fs.form_digits(cols[-1], result.form, L)
             if dps >= cap or (digits is not None and digits < dps - fs.PRECISION_HEADROOM):
                 break
