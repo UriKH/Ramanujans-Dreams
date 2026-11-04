@@ -24,6 +24,22 @@ import sympy as sp
 
 Form = Tuple[Tuple[sp.Rational, ...], Tuple[sp.Rational, ...]]
 
+#: First working precision (digits); doubled while the best form's accuracy comes within PRECISION_HEADROOM of it.
+START_DPS = 2000
+#: A form is measured reliably only if its correct digits stay this far below the working precision.
+PRECISION_HEADROOM = 400
+#: An error within this many digits of the working precision is rounding noise of L: the form holds at least that far.
+PRECISION_FLOOR_DIGITS = 30
+
+
+def beyond_precision(err: mp.mpf) -> bool:
+    """
+    Whether an error is at the precision floor of the current working precision (cannot be measured here).
+    :param err: |approximant − L| at the working precision.
+    :return: True when err is 0 or within PRECISION_FLOOR_DIGITS of 10^-dps.
+    """
+    return err == 0 or err < mp.mpf(10) ** (PRECISION_FLOOR_DIGITS - mp.mp.dps)
+
 
 @dataclass(frozen=True)
 class FormSearchSettings:
@@ -93,13 +109,14 @@ def form_digits(col, form: Form, L: mp.mpf) -> Optional[float]:
     :param col: Walk column.
     :param form: (p, q).
     :param L: Target at the working precision.
-    :return: Digits, or None when q·v = 0 or the error is below the precision.
+    :return: Digits; ``inf`` when the error is below the working precision (the form holds to at least
+        ``mp.dps`` digits — raise the precision to measure it); None when q·v = 0.
     """
     r = approximant(col, form)
     if r is None:
         return None
     err = abs(to_mpf(r) - L)
-    return None if err == 0 else float(-mp.log10(err))
+    return math.inf if beyond_precision(err) else float(-mp.log10(err))
 
 
 def form_delta(col, form: Form, L: mp.mpf) -> Optional[float]:
@@ -114,7 +131,7 @@ def form_delta(col, form: Form, L: mp.mpf) -> Optional[float]:
     if r is None or r.q == 1:
         return None
     err = abs(to_mpf(r) - L)
-    return None if err == 0 else float(-1 - mp.log(err) / mp.log(int(r.q)))
+    return None if beyond_precision(err) else float(-1 - mp.log(err) / mp.log(int(r.q)))
 
 
 def check_form(cols: Sequence[Sequence[sp.Rational]], form: Form, L: mp.mpf,
@@ -143,8 +160,10 @@ def check_form(cols: Sequence[Sequence[sp.Rational]], form: Form, L: mp.mpf,
     if ests[-1].q <= settings.min_denominator:
         return False, "small denominator"
     errs = [abs(to_mpf(e) - L) for e in (ests[0], ests[-1])]
-    if errs[1] == 0:
-        return False, "below precision"
+    if beyond_precision(errs[1]):
+        # Holds beyond the working precision (≥ mp.dps digits, far above chance). The caller raises the
+        # precision and checks again, so the final form is always verified at a precision above its accuracy.
+        return True, "beyond precision"
     if not errs[1] < errs[0]:
         return False, "error not shrinking"
     # A relation among 2n numbers with coefficients ≤ C holds by chance to about (2n − 1)·log10 C digits.
@@ -186,17 +205,19 @@ def lll_relations(col: Sequence[sp.Rational], L: mp.mpf, weight_digits: int, coe
     return out
 
 
-def ladder_start(cols, L: mp.mpf, settings: FormSearchSettings, levels: int = 12) -> Optional[Form]:
+def ladder_start(cols, L: mp.mpf, settings: FormSearchSettings, top_digits: Optional[int] = None,
+                 levels: int = 12) -> Optional[Form]:
     """
     A first valid form when nothing identified the trajectory: LLL on a geometric ladder of weights.
     :param cols: Column at 0.9d, 0.95d, d.
     :param L: Target at the working precision.
     :param settings: Search settings.
+    :param top_digits: Largest LLL weight (below the working precision); default from the column size.
     :param levels: Ladder levels.
     :return: The valid candidate holding to the most digits, or None.
     """
     col = cols[-1]
-    top = working_dps(col) - 300
+    top = top_digits if top_digits is not None else working_dps(col) - 300
     lo = 30
     ladder = sorted({int(lo * (top / lo) ** (k / (levels - 1))) for k in range(levels)}) if top > lo else [top]
     best = None
@@ -222,8 +243,8 @@ def refine(cols, L: mp.mpf, start: Form, settings: FormSearchSettings) -> Tuple[
     cur, calls = start, 0
     for _ in range(settings.max_steps):
         dig = form_digits(col, cur, L)
-        if dig is None:
-            break
+        if dig is None or math.isinf(dig):
+            break                                      # beyond the working precision: the caller raises it
         calls += 1
         better = []
         for f in lll_relations(col, L, int(dig) + settings.margin_digits, settings.coef_bound):
@@ -252,7 +273,7 @@ def best_equal_rate(cols, L: mp.mpf, form: Form, settings: FormSearchSettings) -
     """
     col = cols[-1]
     dig = form_digits(col, form, L)
-    if dig is None:
+    if dig is None or math.isinf(dig):
         return form, 0
     basis = lll_relations(col, L, max(int(dig) - settings.margin_digits, 10), settings.coef_bound)
     if len(basis) <= 1:

@@ -1799,18 +1799,28 @@ class TrajectoryAttributesHandler:
             limit_diff_bound=sp.Rational(str(search_config.LIMIT_DIFF_ERROR_BOUND)),
             min_denominator=search_config.MIN_ESTIMATE_DENOMINATOR,
         )
-        dps = fs.working_dps(cols[-1])
-        with mp.workdps(dps):
-            L = mp.mpf(high_precision(constant, dps)._mpf_)
-            if vectors is not None:
-                start = (tuple(sp.Rational(x) for x in vectors[0]), tuple(sp.Rational(x) for x in vectors[1]))
-            else:
-                start = fs.ladder_start(cols, L, settings)
+        # Precision: start low and double only while the best form's accuracy comes close to it, so the constant
+        # is never evaluated far beyond the digits the forms actually have (capped at fs.working_dps).
+        cap = fs.working_dps(cols[-1])
+        dps = min(cap, fs.START_DPS)
+        start = None
+        if vectors is not None:
+            start = (tuple(sp.Rational(x) for x in vectors[0]), tuple(sp.Rational(x) for x in vectors[1]))
+        original = start
+        while True:
+            with mp.workdps(dps):
+                L = mp.mpf(high_precision(constant, dps)._mpf_)
                 if start is None:
-                    return None
-            result = fs.search(cols, L, start, settings)
+                    start = fs.ladder_start(cols, L, settings, top_digits=dps - 300)
+                    if start is None:
+                        return None
+                result = fs.search(cols, L, start, settings)
+                digits = fs.form_digits(cols[-1], result.form, L)
+            if dps >= cap or (digits is not None and digits < dps - fs.PRECISION_HEADROOM):
+                break
+            start, dps = result.form, min(cap, 2 * dps)
         p, q = list(result.form[0]), list(result.form[1])
-        if self._searchable and result.improved:
+        if self._searchable and result.form != original:
             self._searchable.cache.append((tuple(p), tuple(q)))
         return p, q
 
