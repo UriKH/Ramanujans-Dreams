@@ -320,6 +320,20 @@ class TestNodeCoverage:
         absval = sp.Abs(sp.Add(sp.Integer(3), -sp.pi, evaluate=False), evaluate=False)
         assert agreeing_digits(arb_value(absval, 80), (sp.pi - 3).evalf(110)) >= 80
 
+    @pytest.mark.parametrize("expr", [
+        sp.polygamma(1, sp.Rational(1, 3)),
+        sp.polygamma(0, sp.Rational(2, 5)),
+        sp.zeta(2, sp.Rational(1, 3)),
+        sp.zeta(3, sp.Rational(3, 4)),
+        # L(2, χ₋₃) as used in the run spec (rows #1, #5, #6, #24)
+        (sp.polygamma(1, sp.Rational(1, 3)) - sp.polygamma(1, sp.Rational(2, 3))) / 9,
+    ])
+    def test_polygamma_and_hurwitz_zeta(self, expr):
+        """polygamma(m, x) and the Hurwitz zeta ζ(s, a) are evaluated with arb (sympy's evalf is very slow at
+        thousands of digits), and agree with sympy."""
+        ours = arb_value(expr, 500)
+        assert agreeing_digits(ours, expr.evalf(530)) >= 500
+
     def test_log_of_non_positive_is_unsupported(self):
         """log of a value ≤ 0 is not real: Unsupported (→ evalf fallback)."""
         with pytest.raises(Unsupported):
