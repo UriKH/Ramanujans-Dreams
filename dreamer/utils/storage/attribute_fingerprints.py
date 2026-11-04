@@ -107,6 +107,13 @@ ATTRIBUTE_META: Dict[str, AttributeMeta] = {
             "search.IDENTIFY_MIN_DIGITS",
             "search.IDENTIFY_LIREC_DIGITS_FRACTION",
             "search.IDENTIFY_VERIFY_DIGITS_FRACTION",
+            # Form search (added 2026-11-04): the identified form is the fastest one.
+            "search.IDENTIFY_FORM_SEARCH",
+            "search.FORM_SEARCH_MARGIN_DIGITS",
+            "search.FORM_SEARCH_COEF_BOUND",
+            "search.FORM_SEARCH_MAX_STEPS",
+            "search.FORM_SEARCH_SIGNIFICANCE_DIGITS",
+            "search.FORM_SEARCH_EQUAL_RATE_TOP",
             # Joint targets: ``identified`` of a joint row is joint-form
             # recognition, a Tier-1 value (added 2026-10-11).
             "search.JOINT_RECOGNITION_DEPTH",

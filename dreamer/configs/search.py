@@ -120,6 +120,37 @@ class SearchConfig(Configurable):
                   "reproduces the constant to at least this fraction of the walk's estimated correct "
                   "digits (i.e. on digits LIReC never saw), and gains digits from depth 0.9N to N."},
     )
+    IDENTIFY_FORM_SEARCH: bool = field(
+        default=False,
+        metadata={"description": "Refine the identified p/q form to the fastest-converging form of the walk column "
+                  "(LLL at a weight just above the current form's accuracy, repeated until no faster form "
+                  "exists; then the best delta among forms at that rate). The result does not depend on the "
+                  "start form (LIReC, cache, or an LLL ladder when LIReC finds nothing), so it is independent of "
+                  "evaluation order. Only for walk columns with at least 3 entries and irrational targets."},
+    )
+    FORM_SEARCH_MARGIN_DIGITS: int = field(
+        default=30,
+        metadata={"description": "Form search: the LLL weight is the current form's correct digits plus this margin, "
+                  "so only strictly faster forms survive."},
+    )
+    FORM_SEARCH_COEF_BOUND: int = field(
+        default=10 ** 12,
+        metadata={"description": "Form search: largest coefficient of a candidate form."},
+    )
+    FORM_SEARCH_MAX_STEPS: int = field(
+        default=10,
+        metadata={"description": "Form search: most window steps (each one LLL call)."},
+    )
+    FORM_SEARCH_SIGNIFICANCE_DIGITS: int = field(
+        default=100,
+        metadata={"description": "Form search: a candidate must hold to this many digits beyond what chance gives "
+                  "for its coefficient size ((2n - 1) * log10 of the largest coefficient)."},
+    )
+    FORM_SEARCH_EQUAL_RATE_TOP: int = field(
+        default=5,
+        metadata={"description": "Form search: forms at the final rate scored exactly (the smallest reduced "
+                  "denominators first)."},
+    )
     IDENTIFY_DEPTH: int = field(
         default=1000,
         metadata={"description": "Walk depth at which the p/q integer relation is identified via "

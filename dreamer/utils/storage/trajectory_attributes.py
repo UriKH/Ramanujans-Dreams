@@ -1760,9 +1760,59 @@ class TrajectoryAttributesHandler:
                 # Cheap identification failed — retry at the full walk depth so a
                 # slow-converging trajectory still identifies (result-preserving).
                 vectors, walk_values = self._identify_at(self._depth)
+            if search_config.IDENTIFY_FORM_SEARCH:
+                vectors = self._search_form(vectors)
             return vectors, walk_values
 
         return self.__get_utility("pq_vector", compute)
+
+    def _search_form(self, vectors):
+        """Refine an identified (p, q) to the fastest-converging form of the walk column (``form_search``).
+
+        Starts from ``vectors`` (LIReC's form or a cached one), or from an LLL ladder when nothing identified the
+        trajectory.  The result depends only on the walk column at the walk depth, not on the start form, so it is
+        independent of evaluation order.  Skipped for rational targets (any rational L has degenerate forms) and
+        for columns with fewer than 3 entries (one form only).  The refined form is added to the shard cache.
+
+        :param vectors: ``(p, q)`` from identification, or None.
+        :return: The refined ``(p, q)``, the input when the search does not apply, or None.
+        """
+        import mpmath as mp
+        from dreamer.utils import form_search as fs
+        constant = sp.sympify(self.constant())
+        if constant.is_rational:
+            return vectors
+        cols = []
+        for fraction in (0.9, 0.95, 1.0):
+            col, _ = self._effective_walk_values(round(fraction * self._depth))
+            if col is None:
+                return vectors
+            cols.append([sp.Rational(c) for c in col])
+        if len(cols[-1]) < 3:
+            return vectors
+        settings = fs.FormSearchSettings(
+            margin_digits=search_config.FORM_SEARCH_MARGIN_DIGITS,
+            coef_bound=search_config.FORM_SEARCH_COEF_BOUND,
+            max_steps=search_config.FORM_SEARCH_MAX_STEPS,
+            significance_digits=search_config.FORM_SEARCH_SIGNIFICANCE_DIGITS,
+            equal_rate_top=search_config.FORM_SEARCH_EQUAL_RATE_TOP,
+            limit_diff_bound=sp.Rational(str(search_config.LIMIT_DIFF_ERROR_BOUND)),
+            min_denominator=search_config.MIN_ESTIMATE_DENOMINATOR,
+        )
+        dps = fs.working_dps(cols[-1])
+        with mp.workdps(dps):
+            L = mp.mpf(high_precision(constant, dps)._mpf_)
+            if vectors is not None:
+                start = (tuple(sp.Rational(x) for x in vectors[0]), tuple(sp.Rational(x) for x in vectors[1]))
+            else:
+                start = fs.ladder_start(cols, L, settings)
+                if start is None:
+                    return None
+            result = fs.search(cols, L, start, settings)
+        p, q = list(result.form[0]), list(result.form[1])
+        if self._searchable and result.improved:
+            self._searchable.cache.append((tuple(p), tuple(q)))
+        return p, q
 
     def _identify_at(self, depth: int):
         """Identify the (p, q) integer relation from the walk column at ``depth``.
