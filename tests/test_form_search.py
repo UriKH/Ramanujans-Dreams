@@ -108,3 +108,22 @@ def test_two_entry_column_is_unchanged(form_search_on, monkeypatch):
     assert on.identified() == off.identified()
     if on.identified():
         assert on.delta() == pytest.approx(off.delta(), abs=1e-12)
+
+
+L2CHI = (sp.polygamma(1, sp.Rational(1, 3)) - sp.polygamma(1, sp.Rational(2, 3))) / 9
+
+
+@pytest.mark.timeout(600)
+def test_coefficients_cannot_be_tuned_to_the_scored_depth(form_search_on):
+    """Run-spec row #24 (L(2,χ₋₃), 3F2(4), F seed): column entry c1 → 0, so its coefficient is free and LLL fitted at
+    depth d could tune it to cancel the error *at d* (δ −0.458 instead of −0.471, a gain that does not grow with
+    depth). The search fits at d/2 and scores at d, so it returns the clean form L = −(2/9)·c2."""
+    cmf = rt_pFq(3, 2, 4)
+    syms = list(cmf.matrices.keys())
+    pos = lambda t: Position(dict(zip(syms, map(sp.Rational, t))))
+    h = TrajectoryAttributesHandler.from_cmf(cmf, pos((-1, -1, 0, 0, 0)), pos((0, 0, sp.Rational(1, 2), 1, 1)),
+                                             constant=L2CHI, walk_depth=1000, walk_type=2)
+    assert h.identified()
+    assert h.delta() == pytest.approx(-0.4711, abs=2e-3)
+    ratio = sp.Rational(sum(h.p_vector()), sum(h.q_vector()))      # p = (0, 0, a), q = (b, 0, 0) up to scale
+    assert ratio == sp.Rational(-2, 9)
