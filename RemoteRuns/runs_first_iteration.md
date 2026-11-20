@@ -34,7 +34,7 @@ Line format: (constant, CMF, known best start and trajectory, search type)
 19. $\zeta(3)+\zeta(5)$, ${}_8F_7(1)$, F.
 20. $\zeta(2)-\gamma^2$, $G_{3,4}^{4,3}(1)$, $(0, 0, 0; 0, 0, 0, 0)$, $(0, 0, 0; 1, 1, 1, 1)$, D.
 21. $\gamma+\log(z)$, $G_{2,3}^{3,2}(z)$, D. Note: $z$ is an integer. Might be cool to try for $z=2$.
-22. Euler-Gompertz $\mathcal{G}$, $G_{2,1}^{0,1}(1)$, $(1,1; 0)$, $(1,1; 0)$, D.
+22. Euler-Gompertz $\mathcal{G}$, $G_{2,1}^{0,2}(1)$, $(1,1; 0)$, $(1,1; 0)$, D.
 23. $\frac{\pi}{\sqrt 3}$, ${}_3F_2(-\frac{1}{3})$, $(\frac{1}{2}, 1, \frac{1}{2}; \frac{1}{2}, \frac{3}{2})$, $(3, 3, 2; 0, 6)$, F.
 24. $L(2,\chi-3)$, ${}_3F_2(4)$, $(0, 0, \frac{1}{2}; 1, 1)$, $(-1, -1, 0; 0, 0)$, F.
 
