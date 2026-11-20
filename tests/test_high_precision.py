@@ -334,6 +334,17 @@ class TestNodeCoverage:
         ours = arb_value(expr, 500)
         assert agreeing_digits(ours, expr.evalf(530)) >= 500
 
+    @pytest.mark.parametrize("expr", [
+        sp.expint(1, 1),
+        sp.E * sp.expint(1, 1),                  # the Gompertz constant as written in the tests / run scripts
+        sp.expint(3, sp.Rational(1, 2)),
+    ])
+    def test_generalized_exponential_integral(self, expr):
+        """E_ν(z) (sympy ``expint``) is evaluated with arb (mpmath's evalf takes minutes at thousands of digits),
+        and agrees with sympy."""
+        ours = arb_value(expr, 500)
+        assert agreeing_digits(ours, expr.evalf(530)) >= 500
+
     def test_log_of_non_positive_is_unsupported(self):
         """log of a value ≤ 0 is not real: Unsupported (→ evalf fallback)."""
         with pytest.raises(Unsupported):
