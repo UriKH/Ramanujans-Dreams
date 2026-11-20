@@ -18,7 +18,8 @@ not support falls back to ``expr.evalf(digits)``.
 
 Supported nodes: integers, rationals, floats, π, e, γ (Euler), Catalan, the
 golden ratio, ``+``, ``×``, powers (integer exponents; rational exponents of
-positive bases), ``exp``, ``log``, ``zeta`` (also Hurwitz ``zeta(s, a)``), ``polygamma``, ``Ei``, ``polylog``, ``gamma``,
+positive bases), ``exp``, ``log``, ``zeta`` (also Hurwitz ``zeta(s, a)``), ``polygamma``, ``Ei``,
+``expint`` (E_ν), ``polylog``, ``gamma``,
 ``Abs``, ``sin``/``cos``/``atan`` and generalized hypergeometric ``hyper``.
 
 **Resolved errors** (:func:`resolved_error`).  The constant ``C`` is used rounded
@@ -126,6 +127,12 @@ def _to_arb(expr: sp.Expr):
         value = acb(_to_arb(args[1])).polygamma(acb(int(m)))
         if not value.imag.is_zero():
             raise Unsupported(f"non-real polygamma {expr}")
+        return value.real
+    if func is sp.expint:
+        from flint import acb
+        value = acb(_to_arb(args[1])).expint(acb(_to_arb(args[0])))   # E_ν(z)
+        if not value.imag.is_zero():
+            raise Unsupported(f"non-real expint {expr}")
         return value.real
     if func is sp.Ei:
         return _to_arb(args[0]).ei()
