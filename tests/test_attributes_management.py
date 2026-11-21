@@ -846,6 +846,42 @@ class TestCoboundaryEigenvalues:
         for a, b in zip(fa, ga):
             assert abs(a - b) <= 1e-7 * max(1.0, a)
 
+    @pytest.mark.parametrize("walk_type", [1, 2])
+    @pytest.mark.parametrize("global_dps", [8, 15])
+    def test_independent_of_global_mpmath_precision(self, walk_type, global_dps):
+        """The eigenvalues must not depend on the process-global ``mp.dps``.
+
+        LIReC sets ``mpmath.mp.dps`` globally, so a pool worker's precision depends
+        on the tasks it ran before; eigenvalue-derived attributes then differed
+        between runs with different worker histories (found comparing sequential
+        vs concurrent SA shards: dps 15 gave a float64-rounded λ, dps 8 a λ wrong
+        from the 10th digit).  Real case: 2F1(-1), log 2 shard.
+        """
+        import mpmath as mp
+        cmf = rt_pFq(2, 1, sp.Integer(-1))
+        x = sp.symbols("x:2")
+        y = sp.symbols("y:1")
+        start = Position({x[0]: -1, x[1]: 2, y[0]: 1})
+        traj = Position({x[0]: -13, x[1]: 12, y[0]: 4})
+
+        def eigs():
+            h = TrajectoryAttributesHandler.from_cmf(cmf, traj, start, constant=None, walk_type=walk_type)
+            vals = h._pfq_coboundary_eigenvalues()
+            assert vals is not None  # fast path engaged
+            return [sp.N(e, 30) for e in vals]
+
+        saved = mp.mp.dps
+        try:
+            mp.mp.dps = 50
+            ref = eigs()
+            mp.mp.dps = global_dps
+            got = eigs()
+        finally:
+            mp.mp.dps = saved
+        assert len(got) == len(ref)
+        for a, b in zip(got, ref):
+            assert abs(a - b) <= sp.Float(10, 30) ** -25 * max(1, abs(b))
+
     def test_non_pfq_falls_back(self, minimal_handler):
         """A handler whose CMF is not a pFq returns None from the fast path
         (and still produces eigenvalues via the generic route)."""
