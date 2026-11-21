@@ -287,6 +287,14 @@ class SearchConfig(Configurable):
         default=10,
         metadata={"description": "Number of initial candidate trajectories sampled for the SA seed selection."},
     )
+    ANNEAL_CONCURRENT_SHARDS: int = field(
+        default=0,
+        metadata={"description": "Shards searched at the same time, each in its own process with its own eval pool. 0 = auto: min(#shards, cores // workers per shard, what memory allows); 1 = one shard after another. Every shard's search and rows are the same either way (shards are independent); only the wall time changes."},
+    )
+    ANNEAL_WORKERS_PER_SHARD: int = field(
+        default=0,
+        metadata={"description": "Workers per shard process when shards run concurrently. 0 = 2*D (D = CMF dimension: the neighbour walks of one annealing step)."},
+    )
     ANNEAL_NUM_EVAL_WORKERS: int = field(
         default=0,
         metadata={"description": "Worker cap for evaluating the neighbour batch in each SA step. 0/None = use the full core budget (search_worker_budget); a positive value caps at min(value, budget). A resolved count <= 1 runs serial."},
