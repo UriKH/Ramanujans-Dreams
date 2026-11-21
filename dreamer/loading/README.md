@@ -47,6 +47,21 @@ to several constants at once, so a CMF shared by `pi` and `log(2)` is loaded onc
 Concrete formatters live in `funcs/` — currently `pFq` (hypergeometric),
 `MeijerG`, and `BaseCMF` (wrap an arbitrary `ramanujantools` CMF directly).
 
+### Walk type of a CMF (`use_inv_t`)
+
+Every formatter takes `use_inv_t`, the walk type of that CMF:
+
+| `use_inv_t` | Walk read by RD |
+|---|---|
+| `None` (default) | follows the global `config.search.DEFAULT_USES_INV_T` **at walk time** |
+| `True` | type 1 — the inverse transpose `W^-T` of the walk (RD's mathematics is built on it) |
+| `False` | type 2 — the walk `W` itself |
+
+An explicit `True` / `False` overrides the global setting for that CMF only. `None` is
+saved to the exported JSON as `null`, so a reloaded CMF keeps following the global.
+The resolved walk type is stored in every result row (`walk_type`) and is part of the
+row's fingerprints. Resolution rule: `dreamer/utils/walk_type.py`.
+
 ---
 
 ## Directory contents

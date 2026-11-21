@@ -11,7 +11,9 @@ class CMFData:
     shift: Position
     selected_points: Optional[List[Tuple[int | sp.Rational, ...]]] = None
     only_selected: bool = False
-    use_inv_t: bool = True
+    # Per-CMF walk type: True = type 1, False = type 2, None = follow the global
+    # ``search.DEFAULT_USES_INV_T`` at walk time (see ``dreamer.utils.walk_type``).
+    use_inv_t: Optional[bool] = None
     cmf_name: str = 'UnknownCMF'
     # Optional trajectories paired 1:1 with ``selected_points``.  When a point's
     # trajectory is not None, the shard encoding is derived from one step along it

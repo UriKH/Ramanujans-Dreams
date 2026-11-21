@@ -183,6 +183,7 @@ class Grapher:
                 start, direction = reconstruct_positions(cmf, record)
                 handler = TrajectoryAttributesHandler.from_cmf(
                     cmf, direction, start, constant=constant_sympy, walk_depth=depth,
+                    walk_type=record.get("walk_type"),  # the row's own walk type
                 )
                 deltas = handler.delta_sequence(depth)
             except Exception as e:

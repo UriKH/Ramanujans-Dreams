@@ -19,11 +19,12 @@ class Formatter(ABC):
     def __init__(self, const: Union[str, Constant, List[Union[str, Constant]]], shifts: list,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
-                 use_inv_t: bool = None,
+                 use_inv_t: Optional[bool] = None,
                  cmf_name_segments: Optional[List[List[Union[str, sp.Expr, int]]]] = None,
                  selected_trajectories: Optional[List[Optional[Tuple[Union[int, sp.Rational], ...]]]] = None):
-        if use_inv_t is None:
-            use_inv_t = config.search.DEFAULT_USES_INV_T
+        # Per-CMF walk type: True = type 1 (W^-T), False = type 2 (W).  None follows the
+        # global search.DEFAULT_USES_INV_T at walk time (dreamer.utils.walk_type) — it
+        # is deliberately not resolved here, so a saved CMF keeps following the global.
 
         # Trajectories pair 1:1 with selected_start_points.  A None entry (or an entirely
         # omitted list) means "use the start point as-is" (must be a strict interior point);

@@ -14,7 +14,7 @@ class pFq(Formatter):
                  p: int, q: int, z: sp.Expr | int, shifts: Optional[list] = None,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
-                 use_inv_t: bool = None,
+                 use_inv_t: Optional[bool] = None,
                  selected_trajectories: Optional[List[Optional[Tuple[Union[int, sp.Rational], ...]]]] = None
                  ):
         """
@@ -27,6 +27,9 @@ class pFq(Formatter):
         While 0 indicates no shift (None if not doesn't matter).
         :var selected_start_points: Optional list of start points to extract shards from.
         :var only_selected: If True, only extract shards from the selected start points.
+        :var use_inv_t: Walk type of this CMF: ``True`` = type 1 (``W^-T``), ``False`` = type 2
+            (``W``); overrides ``config.search.DEFAULT_USES_INV_T``. ``None`` = follow that
+            global setting at walk time.
         :var selected_trajectories: Optional list of trajectories paired 1:1 with
             ``selected_start_points``.  A non-None trajectory lets a border start point
             resolve to the correct shard via one step; a None entry uses the start point
