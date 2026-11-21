@@ -18,7 +18,8 @@ not support falls back to ``expr.evalf(digits)``.
 
 Supported nodes: integers, rationals, floats, π, e, γ (Euler), Catalan, the
 golden ratio, ``+``, ``×``, powers (integer exponents; rational exponents of
-positive bases), ``exp``, ``log``, ``zeta``, ``Ei``, ``polylog``, ``gamma``,
+positive bases), ``exp``, ``log``, ``zeta`` (also Hurwitz ``zeta(s, a)``), ``polygamma``, ``Ei``,
+``expint`` (E_ν), ``polylog``, ``gamma``,
 ``Abs``, ``sin``/``cos``/``atan`` and generalized hypergeometric ``hyper``.
 
 **Resolved errors** (:func:`resolved_error`).  The constant ``C`` is used rounded
@@ -116,6 +117,23 @@ def _to_arb(expr: sp.Expr):
         return x.log()
     if func is sp.zeta and len(args) == 1:
         return _to_arb(args[0]).zeta()
+    if func is sp.zeta and len(args) == 2:
+        return _to_arb(args[0]).zeta(_to_arb(args[1]))          # Hurwitz zeta ζ(s, a)
+    if func is sp.polygamma:
+        m = args[0]
+        if not (m.is_Integer and m >= 0):
+            raise Unsupported(f"polygamma of non-integer order {expr}")
+        from flint import acb
+        value = acb(_to_arb(args[1])).polygamma(acb(int(m)))
+        if not value.imag.is_zero():
+            raise Unsupported(f"non-real polygamma {expr}")
+        return value.real
+    if func is sp.expint:
+        from flint import acb
+        value = acb(_to_arb(args[1])).expint(acb(_to_arb(args[0])))   # E_ν(z)
+        if not value.imag.is_zero():
+            raise Unsupported(f"non-real expint {expr}")
+        return value.real
     if func is sp.Ei:
         return _to_arb(args[0]).ei()
     if func is sp.polylog:
