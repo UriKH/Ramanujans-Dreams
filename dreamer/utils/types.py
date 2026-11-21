@@ -20,6 +20,9 @@ class CMFData:
     # (``point + trajectory``) so a point lying on a shard border still resolves to
     # the correct shard.  ``None`` for a point ⇒ behave as if no trajectory was given.
     selected_trajectories: Optional[List[Tuple[int | sp.Rational, ...]]] = None
+    # Set when this CMF is the type-1 formal adjoint of a type-2 request
+    # (``dreamer.loading.funcs.walk_type_conversion.Type2Source``): maps walked rays back.
+    type2_source: Optional[object] = None
 
     def __hash__(self):
         return hash((self.cmf, self.shift))

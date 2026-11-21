@@ -224,7 +224,8 @@ def test_pool_monitor_info_in_snapshot():
 def test_simulated_annealing_reports_estimate(monkeypatch):
     """Real SA on the 2F1 log(2) shard: the shard node carries an estimate + T."""
     from dreamer.extraction.extractor import ShardExtractor
-    from dreamer.loading import pFq
+    from dreamer.loading import BaseCMF
+    from ramanujantools.cmf import pFq as _rt_pFq
     from dreamer.search.methods.annealing.annealing_scan import SimulatedAnnealingSearch
     from dreamer.search.methods.flatland.geometry import FlatlandGeometry
     from dreamer import log
@@ -239,7 +240,8 @@ def test_simulated_annealing_reports_estimate(monkeypatch):
     monkeypatch.setattr(config.search, "ANNEAL_MAX_ITERS", 6)
     monkeypatch.setattr(config.search, "ANNEAL_MAX_TOTAL_STEPS", 12)
     monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ())
-    shards = ShardExtractor([LOG2], pFq(LOG2, 2, 1, -1).to_cmf()).extract()
+    # BaseCMF: a native type-2 walk (a type-2 pFq formatter is converted to type 1, R1).
+    shards = ShardExtractor([LOG2], BaseCMF(LOG2, "pFq_2_1_-1", _rt_pFq(2, 1, -1)).to_cmf()).extract()
     shard = next(s for s in shards
                  if tuple(int(v) for v in s.get_interior_point().values()) == (1, 1, 3))
     cmf_id, shard_id, enc = derive_cmf_and_shard_ids(shard)

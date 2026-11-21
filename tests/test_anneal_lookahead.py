@@ -437,14 +437,16 @@ def _log2_shard(monkeypatch):
     (1, 1, 3) identifies log(2) on all sampled trajectories (d_flat = 3).
     """
     from dreamer.extraction.extractor import ShardExtractor
-    from dreamer.loading import pFq
+    from dreamer.loading import BaseCMF
+    from ramanujantools.cmf import pFq as _rt_pFq
 
     monkeypatch.setattr(config.search, "DEFAULT_USES_INV_T", False)
     monkeypatch.setattr(config.extraction, "STRATEGY", "heuristic")
     monkeypatch.setattr(config.extraction, "IGNORE_DUPLICATE_SEARCHABLES", True)
     monkeypatch.setattr(config.extraction, "LOAD_SHARD_CACHE", False)
     monkeypatch.setattr(sys_config, "EXPORT_CMFS", None)
-    shards = ShardExtractor([LOG2], pFq(LOG2, 2, 1, -1).to_cmf()).extract()
+    # BaseCMF: a native type-2 walk (a type-2 pFq formatter is converted to type 1, R1).
+    shards = ShardExtractor([LOG2], BaseCMF(LOG2, "pFq_2_1_-1", _rt_pFq(2, 1, -1)).to_cmf()).extract()
     for sh in shards:
         if tuple(int(v) for v in sh.get_interior_point().values()) == (1, 1, 3):
             return sh
