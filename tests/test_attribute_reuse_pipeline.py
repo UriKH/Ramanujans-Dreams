@@ -29,7 +29,8 @@ LOG2 = log(2)
 @pytest.fixture(scope="module")
 def shard():
     from dreamer.extraction.extractor import ShardExtractor
-    from dreamer.loading import pFq
+    from dreamer.loading import BaseCMF
+    from ramanujantools.cmf import pFq as _rt_pFq
 
     old = (config.search.DEFAULT_USES_INV_T, config.extraction.STRATEGY,
            config.extraction.LOAD_SHARD_CACHE, sys_config.EXPORT_CMFS)
@@ -38,7 +39,8 @@ def shard():
     config.extraction.LOAD_SHARD_CACHE = False
     sys_config.EXPORT_CMFS = None
     try:
-        shards = ShardExtractor([LOG2], pFq(LOG2, 2, 1, -1).to_cmf()).extract()
+        # BaseCMF: a native type-2 walk (a type-2 pFq formatter is converted to type 1, R1).
+        shards = ShardExtractor([LOG2], BaseCMF(LOG2, "pFq_2_1_-1", _rt_pFq(2, 1, -1)).to_cmf()).extract()
     finally:
         (config.search.DEFAULT_USES_INV_T, config.extraction.STRATEGY,
          config.extraction.LOAD_SHARD_CACHE, sys_config.EXPORT_CMFS) = old

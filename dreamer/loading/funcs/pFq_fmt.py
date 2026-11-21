@@ -3,6 +3,7 @@ from ramanujantools.cmf import pFq as rt_pFq
 from dreamer.utils.constants.constant import Constant
 from dreamer.loading.funcs.formatter import Formatter
 from dreamer.utils.types import CMFData
+from dreamer.utils.walk_type import resolve_walk_type
 from typing import Optional, List, Tuple, Union
 import sympy as sp
 from ramanujantools import Position
@@ -90,6 +91,10 @@ class pFq(Formatter):
         Converts the pFq to a CMF.
         :return: A tuple (CMF, shifts)
         """
+        if resolve_walk_type(self.use_inv_t) == 2:
+            # A type-2 request is walked as type 1 on the formal-adjoint CMF (REQUESTS R1).
+            from dreamer.loading.funcs.walk_type_conversion import convert_type2_request
+            return convert_type2_request(self)
         cmf = rt_pFq(self.p, self.q, self.z)
         shifts = Position({k: v for k, v in zip(cmf.matrices.keys(), self.shifts)})
         return CMFData(cmf, shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name,

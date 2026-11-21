@@ -269,4 +269,8 @@ class TestUseInvTDefault:
         monkeypatch.setattr(config.search, "DEFAULT_USES_INV_T", value)
         f = make()
         assert f.use_inv_t is None
-        assert resolve_walk_type(f.to_cmf().use_inv_t) == (1 if value else 2)
+        assert resolve_walk_type(f.use_inv_t) == (1 if value else 2)
+        # A pFq / MeijerG resolved to type 2 is walked as type 1 on its formal adjoint (R1).
+        data = f.to_cmf()
+        assert resolve_walk_type(data.use_inv_t) == 1
+        assert (data.type2_source is None) == value

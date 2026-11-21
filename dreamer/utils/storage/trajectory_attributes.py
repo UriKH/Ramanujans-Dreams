@@ -332,6 +332,7 @@ def build_trajectory_dtos(
 
     walk_type = int(handler.walk_type())
     walk_depth = int(handler.walk_depth())
+    type2_source = getattr(getattr(handler, "_searchable", None), "type2_source", None)
     fingerprint = tier1_config_fingerprint(handler.walk_depth(), walk_type=walk_type)
 
     dtos: List[TrajectoryDTO] = []
@@ -353,6 +354,10 @@ def build_trajectory_dtos(
         )
         if extra:
             extra["fingerprints"] = computed_fingerprints(extra, walk_depth, walk_type)
+        if type2_source is not None:
+            # A converted type-2 request: the ray in the requested (type-2) coordinates.
+            extra = dict(extra or {})
+            extra["type2"] = type2_source.row_entry(start_t, dir_t)
 
         dtos.append(TrajectoryDTO(
             trajectory_id=trajectory_id,
