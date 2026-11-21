@@ -893,14 +893,15 @@ class TrajectoryAttributesHandler:
                 coeffs = [mp.mpf(str(sp.N(c, 50))) if sp.im(c) == 0
                           else mp.mpc(complex(c)) for c in charpoly.all_coeffs()]
                 roots = mp.polyroots(coeffs, maxsteps=200, extraprec=200)
-            if self.walk_type() == 1:
-                # Eigenvalues of M.inv().T are the reciprocals of M's.  Drop
-                # (near-)zero roots instead of mapping them to infinity: an
-                # infinite eigenvalue is not a usable Poincaré eigenvalue and
-                # would poison downstream ratios (log of infinity → the "delta
-                # from infinity" errors).
-                roots = [1 / rt for rt in roots if abs(rt) > 1e-30]
-            eigs = [_mpc_to_sympy(rt) for rt in roots]
+                if self.walk_type() == 1:
+                    # Eigenvalues of M.inv().T are the reciprocals of M's.  Drop
+                    # (near-)zero roots instead of mapping them to infinity: an
+                    # infinite eigenvalue is not a usable Poincaré eigenvalue and
+                    # would poison downstream ratios (log of infinity → the "delta
+                    # from infinity" errors).  Inside workdps: at the global
+                    # precision (set by LIReC, so worker-dependent) 1/rt lost digits.
+                    roots = [1 / rt for rt in roots if abs(rt) > 1e-30]
+                eigs = [_mpc_to_sympy(rt) for rt in roots]
             return sorted(eigs, key=lambda e: self._eigenvalue_norm(e), reverse=True)
         except Exception as exc:  # noqa: BLE001 — any failure → generic fallback
             Logger(
