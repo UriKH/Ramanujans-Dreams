@@ -82,7 +82,7 @@ class SearchConfig(Configurable):
     )
     DEFAULT_USES_INV_T: bool = field(
         default=True,
-        metadata={"description": "Default toggle for using inverse-transformed trajectories in search."},
+        metadata={"description": "Global walk type: True = type 1 (the inverse transpose W^-T of the walk, RD's default), False = type 2 (W itself). A CMF's own use_inv_t (True/False) overrides it for that CMF; use_inv_t=None follows this setting at walk time."},
     )
 
     # ============================== Delta calculation and validation settings ==============================

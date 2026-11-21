@@ -28,6 +28,7 @@ from dreamer.utils.storage.trajectory_attributes import (
     tier1_config_fingerprint,
     walk_depth_for,
 )
+from dreamer.utils.walk_type import searchable_walk_type
 from dreamer.configs import config
 from dreamer.utils.storage.attribute_fingerprints import tier1_record_fresh
 from dreamer.utils.task_memory import release_task_memory
@@ -79,7 +80,9 @@ def flatland_trajectory_key(
     trajectory_id = derive_trajectory_id(
         shard_id, shard.cmf_name, shard_encoding_str, start_t, dir_t
     )
-    current_fp = tier1_config_fingerprint(walk_depth_for(shard.cmf, direction))
+    current_fp = tier1_config_fingerprint(
+        walk_depth_for(shard.cmf, direction), walk_type=searchable_walk_type(shard),
+    )
     return direction, trajectory_id, current_fp
 
 

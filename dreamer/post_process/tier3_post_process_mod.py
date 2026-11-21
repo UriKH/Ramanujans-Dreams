@@ -90,7 +90,7 @@ Tier3Task = namedtuple(
 
 #: Stored-row fields a Tier-3 worker needs (positions + the Tier-1 seed).
 _SEED_FIELDS = (
-    "trajectory_id", "constant", "start_point", "direction", "walk_depth",
+    "trajectory_id", "constant", "start_point", "direction", "walk_depth", "walk_type",
     "delta", "identified", "p_vector", "q_vector", "projection_column",
 )
 
@@ -109,8 +109,10 @@ def _tier3_task(task: "Tier3Task"):
     try:
         cmf = stage_extra("cmf_lookup", {})[task.cmf_name]
         start, direction = reconstruct_positions(cmf, task.record)
+        # The row's own walk type (a per-CMF use_inv_t may differ from the global).
         handler = TrajectoryAttributesHandler.from_cmf(
             cmf, direction, start, walk_depth=task.record.get("walk_depth"),
+            walk_type=task.record.get("walk_type"),
         )
         return attributes_patch(handler, task.constant, task.record, task.specs, context=task.context)
     except Exception as e:  # noqa: BLE001 — one bad row must not abort the stage
@@ -299,7 +301,9 @@ class Tier3PostProcessModV1(PostProcessModScheme):
             for record in by_const.values():
                 tid = record.get("trajectory_id")
                 # Missing or stale (per-attribute fingerprint, REUSE_POLICY).
-                missing = set(stale_attributes(record, names, record.get("walk_depth")))
+                missing = set(stale_attributes(
+                    record, names, record.get("walk_depth"), record.get("walk_type"),
+                ))
                 if not missing:
                     continue
                 # Cheap pre-skip: if every missing attribute is gated off for this

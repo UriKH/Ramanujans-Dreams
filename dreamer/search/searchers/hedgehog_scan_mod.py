@@ -68,6 +68,7 @@ from dreamer.utils.stage_pool import (
     run_tier1_task,
 )
 from dreamer.utils.storage.attribute_fingerprints import stale_attributes, tier1_is_fresh
+from dreamer.utils.walk_type import searchable_walk_type
 
 search_config = config.search
 
@@ -237,6 +238,7 @@ class SearcherModV1(SearcherModScheme):
                 shard_id, shard.cmf_name, shard_encoding_str, start_t, dir_t,
             )
             walk_depth = walk_depth_for(shard.cmf, traj)
+            walk_type = searchable_walk_type(shard)
             bucket = seen_trajectories.get(trajectory_id, {})
 
             # Per searched constant (see attribute_fingerprints / REUSE_POLICY):
@@ -248,10 +250,10 @@ class SearcherModV1(SearcherModScheme):
             seeded: List[tuple] = []
             for c in identified_consts:
                 rec = bucket.get(c.name)
-                if not tier1_is_fresh(rec, walk_depth):
+                if not tier1_is_fresh(rec, walk_depth, walk_type):
                     new_consts.append(c)
                     continue
-                stale = set(stale_attributes(rec, tier2_names, walk_depth))
+                stale = set(stale_attributes(rec, tier2_names, walk_depth, walk_type))
                 if stale:
                     seeded.append((c, rec, tuple(sp_ for sp_ in tier2_specs if attribute_name(sp_) in stale)))
             if not new_consts and not seeded:

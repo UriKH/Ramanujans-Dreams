@@ -11,6 +11,7 @@ from ramanujantools.cmf import CMF
 from typing import Tuple, Optional, List, Union
 
 from dreamer.utils.constants.constant import Constant
+from dreamer.utils.walk_type import searchable_walk_type
 from dreamer.utils.constants.high_precision import delta_from_error, high_precision, resolved_error
 from dreamer.utils.logger import Logger
 from dreamer.utils.deprecation import warn_deprecated
@@ -28,12 +29,13 @@ class Searchable(ABC):
     A template for a general searchable object (e.g., shards)
     """
 
-    def __init__(self, cmf: CMF, constants: Union[Constant, List[Constant]], shift: Position, use_inv_t: bool, cmf_name: str):
+    def __init__(self, cmf: CMF, constants: Union[Constant, List[Constant]], shift: Position, use_inv_t: Optional[bool], cmf_name: str):
         """
         :param cmf: The CMF to search in.
         :param constants: A constant or list of constants to search for.
         :param shift: The shift in the starting point of the CMF.
-        :param use_inv_t: If true, use inverse of the walk matrix to compute the limit.
+        :param use_inv_t: Per-CMF walk type: ``True`` = type 1 (inverse transpose of the walk),
+            ``False`` = type 2, ``None`` = follow ``search.DEFAULT_USES_INV_T`` at walk time.
         :param cmf_name: The name of the CMF.
         """
         self.cache = FrequencyList(max_size=100)
@@ -105,7 +107,7 @@ class Searchable(ABC):
                 walked = trajectory_matrix.walk(
                     {n: 1}, search_config.DEPTH_FROM_TRAJECTORY_LEN(traj_len, self.dim), {n: 0}
                 )
-                if self.use_inv_t:
+                if searchable_walk_type(self) == 1:
                     walked = walked.inv().T
         except Exception as e:
             Logger(
@@ -374,7 +376,7 @@ class Searchable(ABC):
         # transform to floats
         for lim in limits:
             mat = lim.current
-            if self.use_inv_t:
+            if searchable_walk_type(self) == 1:
                 mat = mat.inv().T
             t1_col = (mat / mat[0, walk_col_ind]).col(walk_col_ind)
             values = [item for item in t1_col]

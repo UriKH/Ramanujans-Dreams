@@ -72,7 +72,11 @@ EXEMPT_KNOBS: Dict[str, str] = {
     ),
 }
 
-#: Walk type is chosen from this knob when the handler is built (``__init__``).
+#: Walk type is chosen from this knob when the handler is built (``__init__``),
+#: unless the CMF sets its own ``use_inv_t`` (``dreamer.utils.walk_type``).  The
+#: fingerprint functions take the trajectory's resolved ``walk_type`` and use it as
+#: this knob's value, so a row whose CMF follows the global keeps the fingerprint
+#: it always had, and a per-CMF override gets the fingerprint of that walk type.
 WALK_TYPE_KNOB = "search.DEFAULT_USES_INV_T"
 
 
@@ -203,7 +207,14 @@ def _meta(name: str) -> Optional[AttributeMeta]:
     return ATTRIBUTE_META.get(name)
 
 
-def attribute_fingerprint(name: str, walk_depth: Optional[int]) -> str:
+def _knob_value_for(knob: str, walk_type: Optional[int]):
+    """Knob value, with the walk-type knob replaced by the trajectory's resolved walk type."""
+    if knob == WALK_TYPE_KNOB and walk_type is not None:
+        return int(walk_type) == 1
+    return knob_value(knob)
+
+
+def attribute_fingerprint(name: str, walk_depth: Optional[int], walk_type: Optional[int] = None) -> str:
     """Current validity fingerprint of attribute *name* for a trajectory.
 
     ``hash(version, own knob values, walk depth if used, fingerprints of deps)``.
@@ -211,6 +222,8 @@ def attribute_fingerprint(name: str, walk_depth: Optional[int]) -> str:
 
     :param name: Registry attribute name, or ``"tier1"`` for the core group.
     :param walk_depth: The trajectory's walk depth (``None`` when unknown).
+    :param walk_type: The trajectory's resolved walk type (1 or 2), used as the
+        value of :data:`WALK_TYPE_KNOB`; ``None`` = the global setting.
     :return: A 16-hex-char fingerprint.
     """
     meta = _meta(name)
@@ -218,13 +231,14 @@ def attribute_fingerprint(name: str, walk_depth: Optional[int]) -> str:
         knobs, deps, uses_depth, version = _all_knobs(), (TIER1,), True, 0
     else:
         knobs, deps, uses_depth, version = meta.config, meta.deps, meta.uses_depth, meta.version
-    values = tuple((k, json.dumps(_canonical(knob_value(k)), sort_keys=True)) for k in sorted(knobs))
+    values = tuple((k, json.dumps(_canonical(_knob_value_for(k, walk_type)), sort_keys=True))
+                   for k in sorted(knobs))
     if reuse_policy() == "recompute":
         values += (("@run", str(getattr(config.system, "RUN_ID", None))),)
     return _fingerprint_for(
         name, version, values,
         int(walk_depth) if (uses_depth and walk_depth is not None) else None,
-        tuple(attribute_fingerprint(d, walk_depth) for d in deps),
+        tuple(attribute_fingerprint(d, walk_depth, walk_type) for d in deps),
     )
 
 
@@ -234,14 +248,15 @@ def _fingerprint_for(name, version, values, depth, dep_fps) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-def tier1_fingerprint(walk_depth: Optional[int]) -> str:
+def tier1_fingerprint(walk_depth: Optional[int], walk_type: Optional[int] = None) -> str:
     """Fingerprint of the Tier-1 core group (a row's ``config_fingerprint``)."""
-    return attribute_fingerprint(TIER1, walk_depth)
+    return attribute_fingerprint(TIER1, walk_depth, walk_type)
 
 
-def fingerprints_for(names: Iterable[str], walk_depth: Optional[int]) -> Dict[str, str]:
+def fingerprints_for(names: Iterable[str], walk_depth: Optional[int],
+                     walk_type: Optional[int] = None) -> Dict[str, str]:
     """``{name: fingerprint}`` for several attributes of one trajectory."""
-    return {n: attribute_fingerprint(n, walk_depth) for n in names}
+    return {n: attribute_fingerprint(n, walk_depth, walk_type) for n in names}
 
 
 # ---------------------------------------------------------------------------
@@ -274,12 +289,14 @@ def tier1_record_fresh(record: Optional[dict], current_fp: str) -> bool:
     return record.get("config_fingerprint") == current_fp
 
 
-def tier1_is_fresh(record: Optional[dict], walk_depth: Optional[int]) -> bool:
-    """:func:`tier1_record_fresh` for a trajectory of the given walk depth."""
-    return tier1_record_fresh(record, tier1_fingerprint(walk_depth))
+def tier1_is_fresh(record: Optional[dict], walk_depth: Optional[int],
+                   walk_type: Optional[int] = None) -> bool:
+    """:func:`tier1_record_fresh` for a trajectory of the given walk depth and walk type."""
+    return tier1_record_fresh(record, tier1_fingerprint(walk_depth, walk_type))
 
 
-def stale_attributes(record: Optional[dict], names: Iterable[str], walk_depth: Optional[int]) -> List[str]:
+def stale_attributes(record: Optional[dict], names: Iterable[str], walk_depth: Optional[int],
+                     walk_type: Optional[int] = None) -> List[str]:
     """The attributes of *names* that must be (re)computed for *record*.
 
     A value is reusable when present and — under ``"strict"`` — stored with the
@@ -289,6 +306,7 @@ def stale_attributes(record: Optional[dict], names: Iterable[str], walk_depth: O
     :param record: The stored ``(trajectory, constant)`` row, or ``None``.
     :param names: Attribute names wanted.
     :param walk_depth: The trajectory's walk depth.
+    :param walk_type: The trajectory's resolved walk type (``None`` = global).
     :return: Names to compute, in the given order.
     """
     names = list(names)
@@ -301,6 +319,6 @@ def stale_attributes(record: Optional[dict], names: Iterable[str], walk_depth: O
         present = n in record or f"{n}_error" in record
         if not present:
             out.append(n)
-        elif policy != "keep" and stored.get(n) != attribute_fingerprint(n, walk_depth):
+        elif policy != "keep" and stored.get(n) != attribute_fingerprint(n, walk_depth, walk_type):
             out.append(n)
     return out
