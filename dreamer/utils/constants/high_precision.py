@@ -14,7 +14,9 @@ computation, checks that the resulting ball is accurate to the requested
 precision (retrying with more guard bits otherwise), and returns a sympy
 ``Float`` with the **same binary precision** that ``expr.evalf(digits)`` would
 produce, so every downstream formula is unchanged.  Anything the converter does
-not support falls back to ``expr.evalf(digits)``.
+not support falls back to ``expr.evalf(digits)``; at ``FALLBACK_RELEASE_DIGITS``
+digits or more that fallback logs a warning and frees mpmath's caches afterwards
+(:func:`release_mpmath_caches`).
 
 Supported nodes: integers, rationals, floats, π, e, γ (Euler), Catalan, the
 golden ratio, ``+``, ``×``, powers (integer exponents; rational exponents of
@@ -46,10 +48,51 @@ from functools import lru_cache
 import sympy as sp
 from mpmath.libmp import dps_to_prec, normalize, round_nearest
 
+from dreamer.utils.logger import Logger
+
 #: Extra working bits above the target precision for the first attempt.
 _GUARD_BITS = 64
 #: Attempts (doubling the guard bits each time) before falling back to evalf.
 _MAX_ATTEMPTS = 4
+
+#: The evalf fallback at this many digits or more logs a warning and then frees
+#: mpmath's caches (:func:`release_mpmath_caches`).  mpmath keeps, e.g., one list
+#: of Borwein coefficients per precision for ζ(n), ≈ 0.42 MB·(digits/1000)²,
+#: never freed: ~10 MB at 5 000 digits, ~168 MB at 20 000, ~19.5 GB for the two
+#: precisions of ~143k / ~164k digits that an 8F7 trajectory needed (R22,
+#: ``context/investigations/big_walk_memory``).  Below 5 000 digits the caches
+#: stay (≤ ~10 MB, and they make repeated low-precision calls fast).
+FALLBACK_RELEASE_DIGITS = 5000
+
+#: Expressions already warned about (one warning per expression per process).
+_WARNED_FALLBACKS: set = set()
+
+#: mpmath's module-level memo caches (pure memoisation: clearing them only costs
+#: recomputation).  Precomputed tables (``int_cache``, ``small_factorial_cache``,
+#: prime sieves) are not touched.
+_MPMATH_CACHES = {
+    "mpmath.libmp.gammazeta": ("borwein_cache", "zeta_int_cache", "bernoulli_cache",
+                               "gamma_taylor_cache", "gamma_stirling_cache"),
+    "mpmath.libmp.libelefun": ("cos_sin_cache", "log_int_cache", "log_taylor_cache", "atan_taylor_cache"),
+}
+
+
+def release_mpmath_caches() -> int:
+    """Clear mpmath's high-precision memo caches (see ``_MPMATH_CACHES``).
+
+    :return: Number of cache entries removed.
+    """
+    import importlib
+
+    removed = 0
+    for module_name, names in _MPMATH_CACHES.items():
+        module = importlib.import_module(module_name)
+        for name in names:
+            cache = getattr(module, name, None)
+            if isinstance(cache, dict):
+                removed += len(cache)
+                cache.clear()
+    return removed
 
 
 def _check_digits(digits) -> None:
@@ -211,7 +254,33 @@ def high_precision(expr: sp.Expr, digits: int) -> sp.Float:
     try:
         return arb_value(expr, digits)
     except Unsupported:
-        return sp.sympify(expr).evalf(int(digits))
+        return _evalf_fallback(expr, int(digits))
+
+
+def _evalf_fallback(expr: sp.Expr, digits: int) -> sp.Float:
+    """``expr.evalf(digits)`` for what arb cannot evaluate, without keeping mpmath's caches.
+
+    At ``digits >= FALLBACK_RELEASE_DIGITS`` it logs a warning (once per
+    expression) and frees mpmath's memo caches afterwards; the peak memory of
+    the evalf call itself remains (≈ 0.42 MB·(digits/1000)² for ζ(n)).
+
+    :param expr: Numeric sympy expression.
+    :param digits: Decimal digits (positive integer).
+    :return: ``sp.sympify(expr).evalf(digits)``.
+    """
+    expr = sp.sympify(expr)
+    value = expr.evalf(digits)
+    if digits >= FALLBACK_RELEASE_DIGITS:
+        key = sp.srepr(expr)
+        if key not in _WARNED_FALLBACKS:
+            _WARNED_FALLBACKS.add(key)
+            Logger(
+                f"high_precision: arb cannot evaluate {expr}; using the sympy/mpmath evalf fallback at "
+                f"{digits} digits (slow, and needs ~(digits/1000)² MB while it runs; mpmath's caches are "
+                f"released afterwards)", Logger.Levels.warning,
+            ).log()
+        release_mpmath_caches()
+    return value
 
 
 #: An error |estimate − C| is trusted only when it exceeds the constant's own
