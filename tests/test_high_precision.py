@@ -453,6 +453,7 @@ from dreamer.utils.logger import Logger                                   # noqa
 
 class _FakeLogger:
     records = []
+    Levels = Logger.Levels
 
     def __init__(self, msg, level=None):
         type(self).records.append((msg, level))
