@@ -52,7 +52,16 @@ _n = sp.Symbol("n")
 
 
 class WalkTypeConversionError(ValueError):
-    """A converted type-1 ray cannot be walked (its start lies on a pole or a singular step)."""
+    """A converted type-1 ray cannot be walked (its start lies on a pole or a singular step).
+
+    :ivar bad_steps: The steps ``n ≥ 0`` with a pole or a singular matrix.
+    :ivar singular: ``True`` when the determinant vanishes at every step.
+    """
+
+    def __init__(self, msg: str, bad_steps: Sequence[int] = (), singular: bool = False):
+        super().__init__(msg)
+        self.bad_steps = list(bad_steps)
+        self.singular = singular
 
 
 # ---------------------------------------------------------------------------
@@ -218,13 +227,15 @@ def check_type1_walkable(cmf, start: Sequence, direction: Sequence, *, context: 
     ray = f"type-1 start {tuple(start)}, direction {tuple(direction)} in {cmf!r}"
     if singular:
         raise WalkTypeConversionError(
-            f"{where}the converted {ray} is singular at every step (det M(n) ≡ 0); it cannot be walked as type 1."
+            f"{where}the converted {ray} is singular at every step (det M(n) ≡ 0); it cannot be walked as type 1.",
+            steps, True,
         )
     if steps:
         raise WalkTypeConversionError(
             f"{where}the converted {ray} hits a pole or a singular matrix at step(s) n = {steps} "
             f"(n = 0 is the start). It becomes walkable from start + k·direction with k = {steps[-1] + 1}; "
-            f"RD does not shift it on its own — move the seed if that is intended."
+            f"RD does not shift it on its own — move the seed if that is intended.",
+            steps,
         )
 
 
@@ -301,19 +312,61 @@ def _source_of(formatter) -> Type2Source:
     raise TypeError(f"no walk-type conversion for {type(formatter).__name__}")
 
 
+def _drop_unwalkable_seeds(data, src: Type2Source, points, trajectories, new_points, new_trajectories, new_shifts):
+    """Check every converted seed that has a trajectory; report and drop the unwalkable ones.
+
+    A seed whose type-1 walk would hit a pole or a singular step is not fatal: it is
+    reported with a warning event (``type2_seed_unwalkable``: screen + run monitor) and
+    removed, and the run continues with the other seeds and shards of the CMF.  If the
+    CMF is ``only_selected`` and no seed is left, it yields no shards
+    (``type2_no_walkable_seed`` event).  Selected points are offsets from the shift, so
+    the walk is checked from ``point + shift``.
+
+    :return: ``data`` with the walkable seeds only.
+    """
+    from dreamer.utils.logger import Logger
+
+    keep_points, keep_trajectories = [], []
+    for pt2, t2, pt1, t1 in zip(points, trajectories, new_points, new_trajectories):
+        if t1 is not None:
+            absolute = tuple(v + sh for v, sh in zip(pt1, new_shifts))
+            try:
+                check_type1_walkable(data.cmf, absolute, t1,
+                                     context=f"type-2 seed {tuple(pt2)} / {tuple(t2)} of {src.cmf_label()}")
+            except WalkTypeConversionError as err:
+                Logger.event(
+                    "type2_seed_unwalkable", f"{err} This seed is skipped; the run continues without it.",
+                    level=Logger.Levels.warning, cmf=src.cmf_label(),
+                    type2_start=[_jsonable(v) for v in pt2], type2_direction=[_jsonable(v) for v in t2],
+                    type1_start=[_jsonable(v) for v in absolute], type1_direction=[_jsonable(v) for v in t1],
+                    bad_steps=err.bad_steps, singular=err.singular,
+                )
+                continue
+        keep_points.append(pt1)
+        keep_trajectories.append(t1)
+    if data.only_selected and not keep_points:
+        Logger.event(
+            "type2_no_walkable_seed",
+            f"{src.cmf_label()}: only_selected=True and none of its type-2 seeds is walkable as type 1; "
+            f"this CMF yields no shards.",
+            level=Logger.Levels.warning, cmf=src.cmf_label(),
+        )
+    return dataclasses.replace(data, selected_points=keep_points, selected_trajectories=keep_trajectories)
+
+
 def convert_type2_request(formatter):
     """``CMFData`` of the type-1 formal-adjoint CMF of a type-2 ``pFq`` / ``MeijerG`` formatter.
 
     Converts ``z``, the shifts (``s ↦ −s``: a start is an integer point plus the shift, and
     ``1 − x``, ``2 − y``, ``−b`` keep integer offsets integer), every selected start point,
     and every selected trajectory.  Each seed with a trajectory is checked with
-    :func:`check_type1_walkable`.  The result is walked as type 1 (``use_inv_t=True``), has
+    :func:`check_type1_walkable`; an unwalkable seed is reported (warning event) and
+    skipped, it does not stop the run (:func:`_drop_unwalkable_seeds`).  The result is walked as type 1 (``use_inv_t=True``), has
     the adjoint CMF's ``cmf_name`` (so it shares shards and stored rows with type-1 runs of
     that CMF), and carries a :class:`Type2Source` in ``type2_source``.
 
     :param formatter: A ``pFq`` or ``MeijerG`` formatter whose walk type resolves to 2.
-    :return: The converted ``CMFData``.
-    :raises WalkTypeConversionError: If a converted seed starts on a pole / singular step.
+    :return: The converted ``CMFData`` (without unwalkable seeds).
     """
     from dreamer.loading.funcs.meijerG_fmt import MeijerG
     from dreamer.utils.logger import Logger
@@ -348,10 +401,8 @@ def convert_type2_request(formatter):
     data = adjoint.to_cmf()
 
     if new_points and new_trajectories:
-        for pt2, t2, pt1, t1 in zip(points, trajectories, new_points, new_trajectories):
-            if t1 is not None:
-                check_type1_walkable(data.cmf, pt1, t1,
-                                     context=f"type-2 seed {tuple(pt2)} / {tuple(t2)} of {src.cmf_label()}")
+        data = _drop_unwalkable_seeds(data, src, points, trajectories, new_points, new_trajectories, new_shifts)
+        new_points = data.selected_points
 
     Logger(
         f"{src.cmf_label()} requested as walk type 2 → walked as type 1 on its formal adjoint "

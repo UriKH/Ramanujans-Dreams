@@ -79,9 +79,12 @@ returns the adjoint CMF, walked as type 1 (`funcs/walk_type_conversion.py`):
 - The converted CMF has the adjoint CMF's `cmf_name`, so it shares shards and stored
   rows with type-1 runs of that CMF. Each row it writes also stores the ray in the
   requested coordinates: `"type2": {"cmf", "start_point", "direction"}`.
-- A converted seed whose type-1 walk would hit a pole or a singular step raises
-  `WalkTypeConversionError`. The message names the seed and the smallest walkable
-  shift `k`; RD never moves a seed on its own.
+- A converted seed whose type-1 walk would hit a pole or a singular step is **reported and
+  skipped**, not fatal: a warning event `type2_seed_unwalkable` (screen + run monitor) names
+  the type-2 seed, the bad steps and the smallest walkable shift `k`, and the run continues
+  with the other seeds and shards. RD never moves a seed on its own. With
+  `only_selected=True` and no walkable seed left, the CMF yields no shards
+  (event `type2_no_walkable_seed`).
 - The exported CMF JSON keeps the type-2 request (it is converted again on reload).
 - Other families (`BaseCMF`) have no such map and are walked natively as type 2.
 - There is no separate switch: the walk type (`use_inv_t` / `DEFAULT_USES_INV_T`) decides.
