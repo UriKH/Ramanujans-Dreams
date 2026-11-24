@@ -18,8 +18,9 @@ How
   — the exact code of the sequential loop — with ``system.TOTAL_CORES`` set to
   its share of the cores and ``system.MEMORY_LIMIT_MB`` to its share of the
   memory, so its eval pool sizes itself with the existing machinery.
-* ``K`` = min(#shards, cores // workers per shard, what memory allows for
-  ``K × workers``); a configured value overrides the automatic choice.
+* Workers per shard ``W = max(D + 1, cores // #shards)`` and
+  ``K = min(#shards, cores · ANNEAL_OVERSUBSCRIBE // W, shard processes memory fits)``
+  (see :func:`plan_shards`); configured values override the automatic choice.
 * A shard process that dies breaks the executor: the shards that were running
   are re-run **one at a time** at the end (a shard re-reads its own JSONL, so
   finished walks are not repeated); a shard that kills its process again is
@@ -64,38 +65,64 @@ def plan_shards(n_shards: int, dims: Sequence[int], *, requested: int = 0,
                 workers_per_shard: int = 0) -> ShardPlan:
     """Choose how many shards run at once and what each gets.
 
+    Rules (measured on a laptop, ``context`` study ``sa_idle_cores``): one SA shard
+    gains little from many workers — a 5-D shard with ``D + 1 = 6`` workers ran as fast
+    as with 9, and did 1.7x more work per core than with 18 — so with many shards each
+    gets a small pool and more shards run side by side; with few shards the cores are
+    shared out among them.
+
+    * workers per shard ``W = max(D + 1, cores // #shards)`` (``D`` = largest CMF
+      dimension), at most all cores;
+    * ``K = min(#shards, floor(cores · ANNEAL_OVERSUBSCRIBE) // W, shards memory fits)``.
+
+    The memory check counts only what a shard needs to start (its process and one
+    worker); each shard's eval pool then sizes itself within its memory share and
+    shrinks when memory runs low.
+
     :param n_shards: Number of shards to search.
-    :param dims: CMF dimension ``D`` of each shard; the default workers per shard
-        is ``2·max(D)`` (the neighbour walks of one SA step).
+    :param dims: CMF dimension ``D`` of each shard.
     :param requested: ``> 0`` fixes ``K`` (``1`` = sequential); ``0`` = automatic.
-    :param workers_per_shard: ``> 0`` overrides the per-shard worker count.
+    :param workers_per_shard: ``> 0`` overrides ``W``.
     :return: The :class:`ShardPlan`; ``concurrent == 1`` means "run sequentially".
     """
     from dreamer.utils.multi_processing import search_worker_budget
-    from dreamer.utils.memory_budget import memory_worker_cap
 
     total = max(1, int(search_worker_budget()))
-    want = int(workers_per_shard) or 2 * max([int(d) for d in dims] or [1])
+    n_shards = max(1, int(n_shards))
+    floor_w = max([int(d) for d in dims] or [1]) + 1
+    want = int(workers_per_shard) or max(floor_w, total // n_shards)
     want = max(1, min(want, total))
     if requested and int(requested) > 0:
         k = int(requested)
     else:
-        k_cores = total // want
-        fit = memory_worker_cap(k_cores * want, log=False)
-        k_memory = max(1, fit // want)
+        over = max(1.0, float(getattr(config.search, "ANNEAL_OVERSUBSCRIBE", 1.0) or 1.0))
+        k_cores = max(1, int(total * over) // want)
+        k_memory = _memory_shard_cap()
         k = min(k_cores, k_memory)
         if k_memory < k_cores and n_shards > k_memory:
             Logger(
-                f"Concurrent shards: memory allows ~{fit} worker(s) by the pre-run estimate "
-                f"(system.WORKER_MEMORY_MB / measured baseline + headroom), so {k_memory} shard(s) "
-                f"at a time instead of {k_cores}; set ANNEAL_CONCURRENT_SHARDS (and MEMORY_LIMIT_MB) "
-                f"to override.",
+                f"Concurrent shards: memory fits ~{k_memory} shard process(es) with one worker each, "
+                f"so {k_memory} shard(s) at a time instead of {min(k_cores, n_shards)}; set "
+                f"ANNEAL_CONCURRENT_SHARDS (and MEMORY_LIMIT_MB) to override.",
                 Logger.Levels.info,
             ).log()
-    k = max(1, min(k, int(n_shards)))
+    k = max(1, min(k, n_shards))
     if k <= 1:
         return ShardPlan(1, total, None)
-    return ShardPlan(k, max(1, total // k), _memory_share(k))
+    # A fixed K splits all cores; otherwise W, topped up by cores left over (never below W,
+    # so oversubscription keeps W workers per shard: K·W > cores).
+    workers = max(1, total // k) if requested and int(requested) > 0 else max(want, total // k)
+    return ShardPlan(k, workers, _memory_share(k))
+
+
+def _memory_shard_cap() -> int:
+    """Shard processes that fit in memory, each with its process and one worker (>= 1)."""
+    if not getattr(config.system, "MEMORY_AWARE_WORKERS", True):
+        return 10 ** 6
+    from dreamer.utils.memory_budget import available_memory_mb, measured_worker_baseline_mb, per_worker_mb
+    reserve = float(getattr(config.system, "MEMORY_RESERVE_MB", 1024))
+    each = measured_worker_baseline_mb() + per_worker_mb()
+    return max(1, int((available_memory_mb() - reserve) // each)) if each > 0 else 10 ** 6
 
 
 def _memory_share(k: int) -> Optional[int]:

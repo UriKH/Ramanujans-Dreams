@@ -293,7 +293,11 @@ class SearchConfig(Configurable):
     )
     ANNEAL_WORKERS_PER_SHARD: int = field(
         default=0,
-        metadata={"description": "Workers per shard process when shards run concurrently. 0 = 2*D (D = CMF dimension: the neighbour walks of one annealing step)."},
+        metadata={"description": "Workers per shard process when shards run concurrently. 0 = max(D+1, cores // #shards) (D = largest CMF dimension): many shards get small pools and more run at once — measured, a 5-D shard with D+1 = 6 workers was as fast as with 9 and did 1.7x more work per core than with 18; few shards share out all cores."},
+    )
+    ANNEAL_OVERSUBSCRIBE: float = field(
+        default=1.0,
+        metadata={"description": "Run up to cores x this factor workers in total when shards run concurrently (K = cores*factor // workers per shard). > 1 lets other shards' workers fill one shard's idle gaps (start-up, seeding, waiting for its slowest walk) through the OS scheduler; costs memory per extra worker. 1.0 = one worker per core."},
     )
     ANNEAL_NUM_EVAL_WORKERS: int = field(
         default=0,
