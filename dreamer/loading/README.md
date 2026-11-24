@@ -62,6 +62,33 @@ saved to the exported JSON as `null`, so a reloaded CMF keeps following the glob
 The resolved walk type is stored in every result row (`walk_type`) and is part of the
 row's fingerprints. Resolution rule: `dreamer/utils/walk_type.py`.
 
+### Type-2 requests of pFq and MeijerG are walked as type 1
+
+RD's mathematics is built on type-1 walks. A **type-2** walk of a CMF is the type-1 walk of
+the CMF of its **formal adjoint**, and for `pFq` and `MeijerG` that is again a CMF of the
+same family. So when a `pFq` / `MeijerG` formatter resolves to walk type 2, `to_cmf()`
+returns the adjoint CMF, walked as type 1 (`funcs/walk_type_conversion.py`):
+
+| Family | start | direction | z |
+|---|---|---|---|
+| `pFq(p, q, z)` | `x → 1 − x`, `y → 2 − y` | `d → −d` | `(−1)^(p+q+1) z` (same z for p = q + 1; `−z` for 1F1, 2F2, 3F1) |
+| `MeijerG(m, n, p, q, z)` | `a → 1 − a`, `b → −b` | `d → −d` | `(−1)^(p+q) z` (`−z` for odd p + q, e.g. 𝒢 G^{0,2}_{2,1}, γ G^{3,2}_{2,3}) |
+
+- z, the shifts (`s → −s`), every selected start point and selected trajectory are
+  converted. The map is its own inverse, so a walked ray maps back exactly.
+- The converted CMF has the adjoint CMF's `cmf_name`, so it shares shards and stored
+  rows with type-1 runs of that CMF. Each row it writes also stores the ray in the
+  requested coordinates: `"type2": {"cmf", "start_point", "direction"}`.
+- A converted seed whose type-1 walk would hit a pole or a singular step is **reported and
+  skipped**, not fatal: a warning event `type2_seed_unwalkable` (screen + run monitor) names
+  the type-2 seed, the bad steps and the smallest walkable shift `k`, and the run continues
+  with the other seeds and shards. RD never moves a seed on its own. With
+  `only_selected=True` and no walkable seed left, the CMF yields no shards
+  (event `type2_no_walkable_seed`).
+- The exported CMF JSON keeps the type-2 request (it is converted again on reload).
+- Other families (`BaseCMF`) have no such map and are walked natively as type 2.
+- There is no separate switch: the walk type (`use_inv_t` / `DEFAULT_USES_INV_T`) decides.
+
 ---
 
 ## Directory contents
@@ -72,6 +99,7 @@ row's fingerprints. Resolution rule: `dreamer/utils/walk_type.py`.
 | `funcs/pFq_fmt.py` | `pFq` formatter — hypergeometric ${}_pF_q$ inspiration functions. |
 | `funcs/meijerG_fmt.py` | `MeijerG` formatter — Meijer-G inspiration functions. |
 | `funcs/base_cmf.py` | `BaseCMF` — wrap an existing `ramanujantools` CMF with no special structure. |
+| `funcs/walk_type_conversion.py` | Type 2 → type 1 conversion of pFq / MeijerG requests (formal adjoint), pole check, `Type2Source`. |
 | `databases/db_v1/` | A reference database module: `db.py` (the store), `db_mod.py` (`BasicDBMod` / `DBModScheme`), `config.py`. |
 | `config.py` | Loading-stage annotation constants (DB command/data tags). |
 | `errors.py` | Loading-specific exceptions. |

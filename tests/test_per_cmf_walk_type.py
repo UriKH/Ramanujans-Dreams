@@ -29,7 +29,7 @@ from dreamer import e, log
 from dreamer.configs import config
 from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.extraction.shard import Shard
-from dreamer.loading import MeijerG, pFq
+from dreamer.loading import BaseCMF, MeijerG, pFq
 from dreamer.loading.funcs.formatter import Formatter
 from dreamer.utils.stage_pool import StagePool, Tier1Task, run_tier1_task
 from dreamer.utils.storage.attribute_fingerprints import (
@@ -109,7 +109,8 @@ class TestResolveWalkType:
 
 class TestFormatterKeepsValue:
     def test_default_is_none_not_frozen(self, monkeypatch):
-        f = pFq(log(2), 2, 1, -1)
+        # BaseCMF: pFq / MeijerG type-2 requests are converted to type 1 (R1, test_walk_type_conversion).
+        f = BaseCMF(log(2), "my2F1", rt_pFq(2, 1, -1))
         assert f.use_inv_t is None
         # The global changes after the formatter was built: the CMF follows it.
         monkeypatch.setattr(config.search, "DEFAULT_USES_INV_T", False)
@@ -123,8 +124,12 @@ class TestFormatterKeepsValue:
         assert obj["data"]["use_inv_t"] is value
         assert Formatter.from_json_obj(obj).use_inv_t is value
 
-    @pytest.mark.parametrize("value", [None, False])
-    def test_meijer_g_passes_value_to_cmf_data(self, value):
+    @pytest.mark.parametrize("value", [None, True, False])
+    def test_base_cmf_passes_value_to_cmf_data(self, value):
+        assert BaseCMF(log(2), "my2F1", rt_pFq(2, 1, -1), use_inv_t=value).to_cmf().use_inv_t is value
+
+    @pytest.mark.parametrize("value", [None, True])
+    def test_meijer_g_passes_type1_value_to_cmf_data(self, value):
         assert MeijerG(log(2), 1, 2, 2, 2, -1, use_inv_t=value).to_cmf().use_inv_t is value
 
     def test_shard_keeps_none_and_explicit(self, cmf, symbols):
@@ -132,7 +137,7 @@ class TestFormatterKeepsValue:
         assert _shard(cmf, symbols, False).use_inv_t is False
 
     def test_shard_from_cmf_data_keeps_override(self):
-        cmf_data = pFq(log(2), 2, 1, -1, use_inv_t=False).to_cmf()
+        cmf_data = BaseCMF(log(2), "my2F1", rt_pFq(2, 1, -1), use_inv_t=False).to_cmf()
         sh = Shard.from_cmf_data(cmf_data, log(2), [], [])
         assert sh.use_inv_t is False and searchable_walk_type(sh) == 2
 

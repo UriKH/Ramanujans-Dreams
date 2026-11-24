@@ -28,7 +28,8 @@ class Shard(Searchable, JSONable):
                  use_inv_t: Optional[bool] = None,
                  cmf_name: str = 'UnknownCMF',
                  hyperplanes_already_shifted: bool = False,
-                 selected_trajectory: Optional[Position] = None
+                 selected_trajectory: Optional[Position] = None,
+                 type2_source=None,
                  ):
         """
         :param cmf: The CMF this shard is a part of
@@ -47,6 +48,9 @@ class Shard(Searchable, JSONable):
             stage evaluates it alongside the sampled trajectories and the search methods
             use it as the initial optimiser seed (instead of a reservoir-sampled seed).
             Kept in-memory only (not serialised to the shard DTO/cache).
+        :param type2_source: Set when the CMF is the type-1 formal adjoint of a type-2
+            request (:class:`~dreamer.loading.funcs.walk_type_conversion.Type2Source`);
+            stored rows then also carry the ray's type-2 coordinates.
         :param hyperplanes_already_shifted: When True, ``hyperplanes`` are
             already in shifted coordinates, so the (expensive, sympy)
             per-hyperplane ``apply_shift`` is skipped.  The shift is the
@@ -72,6 +76,7 @@ class Shard(Searchable, JSONable):
             self.A, self.b, self.symbols = self.generate_matrices(shifted_hyperplanes, encoding)
         self.start_coord = interior_point
         self.selected_trajectory = selected_trajectory
+        self.type2_source = type2_source
         self.is_whole_space = self.A is None or self.b is None
 
     @classmethod
@@ -86,6 +91,7 @@ class Shard(Searchable, JSONable):
             interior_point, cmf_data.use_inv_t, cmf_data.cmf_name,
             hyperplanes_already_shifted=hyperplanes_already_shifted,
             selected_trajectory=selected_trajectory,
+            type2_source=cmf_data.type2_source,
         )
 
     @classmethod

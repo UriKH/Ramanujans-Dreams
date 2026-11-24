@@ -3,6 +3,7 @@ from ramanujantools.cmf.meijer_g import MeijerG as rt_mg
 from dreamer.utils.constants.constant import Constant
 from dreamer.loading.funcs.formatter import Formatter
 from dreamer.utils.types import CMFData
+from dreamer.utils.walk_type import resolve_walk_type
 from ramanujantools import Position
 from typing import Optional, List, Tuple, Union
 import sympy as sp
@@ -91,6 +92,10 @@ class MeijerG(Formatter):
         Converts the MeijerG to a CMF.
         :return: A tuple (CMF, shifts)
         """
+        if resolve_walk_type(self.use_inv_t) == 2:
+            # A type-2 request is walked as type 1 on the formal-adjoint CMF (REQUESTS R1).
+            from dreamer.loading.funcs.walk_type_conversion import convert_type2_request
+            return convert_type2_request(self)
         cmf = rt_mg(self.m, self.n, self.p, self.q, self.z)
         shifts = Position({k: v for k, v in zip(cmf.matrices.keys(), self.shifts)})
         return CMFData(cmf, shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name,
