@@ -441,3 +441,82 @@ def test_legacy_calc_delta_gives_up_beyond_max(monkeypatch, log2_shard):
     traj_len = float(np.sqrt(sum(float(v) ** 2 for v in traj.values())))
     m = log2_shard.cmf.trajectory_matrix(traj, start)
     assert log2_shard.calc_delta(m, traj, start, R.log(2).value_sympy, traj_len) == (None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# R29 — memory guard of the evalf fallback (mpmath keeps O(digits²) caches)
+# ---------------------------------------------------------------------------
+import dreamer.utils.constants.high_precision as hp_mod                    # noqa: E402
+from mpmath.libmp import gammazeta as _gammazeta                           # noqa: E402
+from dreamer.utils.logger import Logger                                   # noqa: E402
+
+
+class _FakeLogger:
+    records = []
+
+    def __init__(self, msg, level=None):
+        type(self).records.append((msg, level))
+
+    def log(self, *args, **kwargs):
+        return None
+
+
+@pytest.fixture
+def fallback_logs(monkeypatch):
+    """Captured fallback warnings; fresh lru / warned-once state for every test."""
+    _FakeLogger.records = []
+    monkeypatch.setattr(hp_mod, "Logger", _FakeLogger)
+    monkeypatch.setattr(hp_mod, "_WARNED_FALLBACKS", set())
+    high_precision.cache_clear()
+    yield _FakeLogger.records
+    high_precision.cache_clear()
+
+
+class TestFallbackMemory:
+    """The evalf fallback above ``FALLBACK_RELEASE_DIGITS`` warns and frees mpmath's caches (R22: an mpmath ζ(5)
+    at ~164 000 digits left ~19.5 GB of Borwein coefficients behind; at 20 000 digits it is ~168 MB)."""
+
+    def test_supported_constants_never_use_the_fallback(self, monkeypatch, fallback_logs):
+        def forbidden(expr, digits):
+            raise AssertionError(f"{expr} reached the evalf fallback")
+        monkeypatch.setattr(hp_mod, "_evalf_fallback", forbidden)
+        for expr in CONSTANTS.values():
+            high_precision(expr, 200)
+        assert fallback_logs == []
+
+    def test_large_fallback_warns_and_releases_mpmath_caches(self, fallback_logs):
+        expr = sp.besselj(0, 1) + sp.zeta(5)
+        digits = hp_mod.FALLBACK_RELEASE_DIGITS
+        reference = expr.evalf(digits)
+        hp_mod.release_mpmath_caches()
+        assert high_precision(expr, digits) == reference
+        assert _gammazeta.borwein_cache == {} and _gammazeta.zeta_int_cache == {}
+        assert len(fallback_logs) == 1
+        msg, level = fallback_logs[0]
+        assert level == Logger.Levels.warning
+        assert "fallback" in msg and str(digits) in msg
+
+    def test_small_fallback_is_silent_and_keeps_caches(self, fallback_logs):
+        expr = sp.besselj(0, 1) + sp.zeta(5)
+        digits = hp_mod.FALLBACK_RELEASE_DIGITS // 4
+        assert high_precision(expr, digits) == expr.evalf(digits)
+        assert _gammazeta.borwein_cache != {}
+        assert fallback_logs == []
+
+    def test_warns_once_per_expression(self, fallback_logs):
+        expr = sp.besselj(0, 1)
+        digits = hp_mod.FALLBACK_RELEASE_DIGITS
+        high_precision(expr, digits)
+        high_precision(expr, digits + 1)
+        high_precision(sp.besselj(0, 2), digits)
+        assert len(fallback_logs) == 2
+
+    def test_release_mpmath_caches_keeps_values_correct(self):
+        import mpmath as mp
+        with mp.workdps(2000):
+            before = mp.zeta(5)
+        assert _gammazeta.borwein_cache != {} or _gammazeta.zeta_int_cache != {}
+        hp_mod.release_mpmath_caches()
+        assert _gammazeta.borwein_cache == {} and _gammazeta.zeta_int_cache == {}
+        with mp.workdps(2000):
+            assert mp.zeta(5) == before
