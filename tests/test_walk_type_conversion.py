@@ -245,12 +245,55 @@ class TestPoles:
         with pytest.raises(WalkTypeConversionError, match="pole|singular"):
             check_type1_walkable(rt_pFq(3, 2, z1), s1, d1)
 
-    def test_formatter_seed_on_a_pole_raises(self):
+    @staticmethod
+    def _capture_events(monkeypatch):
+        from dreamer.utils.logger import Logger
+        events = []
+        monkeypatch.setattr(Logger, "event", classmethod(
+            lambda cls, kind, msg, level=None, **fields: events.append((kind, msg, level, fields))))
+        return events
+
+    def test_formatter_seed_on_a_pole_is_dropped_with_event(self, monkeypatch):
+        """R27: a seed on a pole is reported (warning event) and skipped; loading does not raise."""
+        from dreamer.utils.logger import Logger
+        events = self._capture_events(monkeypatch)
         f = pFq(log(2), 3, 2, R(1, 2), use_inv_t=False,
                 selected_start_points=[(1, 1, 1, 2, 1)], selected_trajectories=[(7, 5, 6, 2, 1)])
-        with pytest.raises(WalkTypeConversionError) as err:
-            f.to_cmf()
-        assert "(1, 1, 1, 2, 1)" in str(err.value)        # names the type-2 seed
+        data = f.to_cmf()
+        assert data.selected_points == [] and data.selected_trajectories == []
+        (kind, msg, level, fields), = [e for e in events if e[0] == "type2_seed_unwalkable"]
+        assert level == Logger.Levels.warning
+        assert "(1, 1, 1, 2, 1)" in msg and "pole" in msg       # names the type-2 seed and the reason
+        assert fields["type2_start"] == [1, 1, 1, 2, 1] and fields["bad_steps"] == [0]
+
+    def test_only_the_bad_seed_is_dropped(self, monkeypatch):
+        events = self._capture_events(monkeypatch)
+        f = pFq(log(2), 3, 2, R(1, 2), use_inv_t=False,
+                selected_start_points=[(1, 1, 1, 2, 1), (2, 2, 2, 3, 3)],
+                selected_trajectories=[(7, 5, 6, 2, 1), (1, 1, 1, 1, 1)])
+        data = f.to_cmf()
+        assert data.selected_points == [(-1, -1, -1, -1, -1)]
+        assert data.selected_trajectories == [(-1, -1, -1, -1, -1)]
+        assert [e[0] for e in events].count("type2_seed_unwalkable") == 1
+
+    def test_only_selected_without_walkable_seed_reports_no_shards(self, monkeypatch):
+        events = self._capture_events(monkeypatch)
+        f = pFq(log(2), 3, 2, R(1, 2), use_inv_t=False, only_selected=True,
+                selected_start_points=[(1, 1, 1, 2, 1)], selected_trajectories=[(7, 5, 6, 2, 1)])
+        data = f.to_cmf()
+        assert data.only_selected and data.selected_points == []
+        assert "type2_no_walkable_seed" in [e[0] for e in events]
+
+    def test_pole_check_uses_absolute_coordinates(self, monkeypatch):
+        """Selected points are offsets from the shift: the check walks point + shift."""
+        from dreamer.loading.funcs import walk_type_conversion as wtc
+        seen = []
+        monkeypatch.setattr(wtc, "check_type1_walkable",
+                            lambda cmf, start, direction, **kw: seen.append(tuple(start)))
+        pFq(log(2), 2, 1, -1, shifts=[R(1, 2), 0, 0], use_inv_t=False,
+            selected_start_points=[(1, 1, 3)], selected_trajectories=[(1, 1, 2)]).to_cmf()
+        # absolute type-2 start (3/2, 1, 3) → absolute type-1 start (-1/2, 0, -1)
+        assert seen == [(R(-1, 2), 0, -1)]
 
     def test_walkable_ray_passes(self):
         z1, s1, d1 = pfq_adjoint(2, 1, R(-1, 2), (2, 2, 4), (1, 1, 2))
