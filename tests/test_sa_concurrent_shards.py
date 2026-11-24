@@ -1,8 +1,8 @@
 """Tests for running simulated-annealing shards concurrently (``shard_concurrency``).
 
 Coverage:
-  - plan_shards: automatic K from cores and CMF dimension, the memory cap, a fixed K,
-    never more than the number of shards, K = 1 → sequential plan.
+  - plan_shards: W = max(D + 1, cores // #shards), K from cores (× oversubscription) and the
+    memory check, a fixed K / W, never more than the number of shards, K = 1 → sequential plan.
   - run_shards: every shard runs once with its core / memory share; shard processes
     pass the run directory on to their pools; a shard whose search raises is reported
     and the others finish; a shard whose process dies is re-run alone; one that dies
@@ -27,28 +27,50 @@ from dreamer.search.searchers import shard_concurrency as sc
 
 @pytest.fixture
 def cores(monkeypatch):
-    def set_cores(n, fit=None):
+    """Fix the core budget and the memory check (``fit`` = shards that fit, None = no limit)."""
+    def set_cores(n, fit=None, oversubscribe=1.0):
         monkeypatch.setattr(sys_config, "TOTAL_CORES", n)
-        monkeypatch.setattr("dreamer.utils.memory_budget.memory_worker_cap",
-                            lambda requested, log=True: requested if fit is None else min(requested, fit))
+        monkeypatch.setattr(config.search, "ANNEAL_OVERSUBSCRIBE", oversubscribe)
+        monkeypatch.setattr(sc, "_memory_shard_cap", lambda: 10 ** 6 if fit is None else fit)
         monkeypatch.setattr(sc, "_memory_share", lambda k: 1000 // k)
     return set_cores
 
 
 class TestPlan:
-    def test_auto_from_cores_and_dimension(self, cores):
+    """Workers per shard W = max(D + 1, cores // #shards); K = min(#shards, cores·oversubscribe // W, memory).
+
+    Measured (investigations/sa_idle_cores): one 5-D shard with 6 workers is as fast as with 9, and does 1.7x more
+    work per core than with 18 — so many shards get small pools, and few shards share out all the cores.
+    """
+
+    def test_many_shards_small_pools(self, cores):
         cores(128)
-        p = sc.plan_shards(18, [5] * 18)
-        assert (p.concurrent, p.workers_per_shard) == (12, 10)     # 128 // (2·5)
+        p = sc.plan_shards(3000, [11] * 3000)                      # 6F5-like: D = 11
+        assert (p.concurrent, p.workers_per_shard) == (10, 12)     # W = D + 1, K = 128 // 12
+
+    def test_fewer_shards_share_all_cores(self, cores):
+        cores(18)
+        assert (lambda p: (p.concurrent, p.workers_per_shard))(sc.plan_shards(2, [5, 5])) == (2, 9)
+        assert (lambda p: (p.concurrent, p.workers_per_shard))(sc.plan_shards(4, [5] * 4)) == (3, 6)
 
     def test_never_more_than_shards(self, cores):
         cores(128)
-        assert sc.plan_shards(3, [5, 5, 5]).concurrent == 3
+        p = sc.plan_shards(18, [5] * 18)
+        assert (p.concurrent, p.workers_per_shard) == (18, 7)      # W = max(6, 128 // 18)
+
+    def test_largest_dimension_sets_the_floor(self, cores):
+        cores(18)
+        assert sc.plan_shards(10, [3, 5, 3]).workers_per_shard == 6
+
+    def test_oversubscription_runs_more_shards(self, cores):
+        cores(128, oversubscribe=1.25)
+        p = sc.plan_shards(3000, [11] * 3000)
+        assert (p.concurrent, p.workers_per_shard) == (13, 12)     # 160 // 12
 
     def test_memory_caps_k(self, cores, caplog):
-        cores(128, fit=35)                                         # memory fits 35 workers
-        assert sc.plan_shards(18, [5] * 18).concurrent == 3
-        assert "3 shard(s) at a time instead of 12" in caplog.text   # says why, and how to override
+        cores(128, fit=3)
+        assert sc.plan_shards(3000, [11] * 3000).concurrent == 3
+        assert "3 shard(s) at a time instead of 10" in caplog.text  # says why, and how to override
 
     def test_requested_and_workers_override(self, cores):
         cores(64)
@@ -57,8 +79,13 @@ class TestPlan:
 
     def test_sequential_when_cores_allow_one(self, cores):
         cores(12)
-        p = sc.plan_shards(18, [5] * 18)
+        p = sc.plan_shards(18, [11] * 18)                          # W = 12 = all cores
         assert p.concurrent == 1 and p.workers_per_shard == 12 and p.memory_mb_per_shard is None
+
+    def test_one_shard_gets_everything(self, cores):
+        cores(18)
+        p = sc.plan_shards(1, [5])
+        assert p.concurrent == 1 and p.workers_per_shard == 18
 
 
 # ---------------------------------------------------------------------------
