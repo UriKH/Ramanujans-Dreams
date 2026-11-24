@@ -146,7 +146,9 @@ ATTRIBUTE_META: Dict[str, AttributeMeta] = {
     "recurrence_coeffs": AttributeMeta(config=(WALK_TYPE_KNOB,), deps=("order",)),
     "companion_coboundary_rank": _RECURRENCE,
     # ----- spectral (trajectory matrix only) -----
-    "eigenvalues": _SPECTRAL,
+    # v2: walk-type-1 reciprocals at the working precision (were at the worker's
+    # global mpmath precision, so stored values depended on worker history).
+    "eigenvalues": AttributeMeta(config=(WALK_TYPE_KNOB,), version=2),
     "eigenvalue_errors": AttributeMeta(deps=("eigenvalues",)),
     "spectral_gap": AttributeMeta(deps=("eigenvalues",)),
     # ----- built on the identified p/q and the walk -----
