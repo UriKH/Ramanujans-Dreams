@@ -262,6 +262,11 @@ class TestUseInvTDefault:
     ])
     @pytest.mark.parametrize("value", [True, False])
     def test_follows_config_changed_after_import(self, monkeypatch, make, value):
+        """``use_inv_t=None`` follows the global at walk time (REQUESTS R24): the
+        formatter keeps ``None`` and the resolved walk type is the current global."""
         from dreamer.configs import config
+        from dreamer.utils.walk_type import resolve_walk_type
         monkeypatch.setattr(config.search, "DEFAULT_USES_INV_T", value)
-        assert make().use_inv_t is value
+        f = make()
+        assert f.use_inv_t is None
+        assert resolve_walk_type(f.to_cmf().use_inv_t) == (1 if value else 2)

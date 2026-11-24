@@ -140,7 +140,7 @@ def walk_depth_for(cmf, direction) -> int:
     return int(search_config.DEPTH_FROM_TRAJECTORY_LEN(_trajectory_norm(direction), cmf.dim()))
 
 
-def tier1_config_fingerprint(walk_depth: int) -> str:
+def tier1_config_fingerprint(walk_depth: int, walk_type: Optional[int] = None) -> str:
     """Stable fingerprint of the config knobs that influence Tier-1 values.
 
     Two trajectory computations with the same ``trajectory_id`` are
@@ -176,13 +176,15 @@ def tier1_config_fingerprint(walk_depth: int) -> str:
     would spuriously invalidate every cached record.
 
     :param walk_depth: The walk depth used (or to be used) for this trajectory.
+    :param walk_type: The trajectory's resolved walk type (1 or 2; a per-CMF
+        ``use_inv_t`` overrides the global).  ``None`` = the global setting.
     :return: A 16-hex-char stable fingerprint string.
     """
     # Delegates to the per-attribute fingerprint machinery: the Tier-1 core is
     # the "tier1" group of attribute_fingerprints.ATTRIBUTE_META (its knobs are
     # checked against the code by tests/test_attribute_fingerprints.py).
     from dreamer.utils.storage.attribute_fingerprints import tier1_fingerprint
-    return tier1_fingerprint(walk_depth)
+    return tier1_fingerprint(walk_depth, walk_type=walk_type)
 
 
 def derive_trajectory_id(
@@ -210,7 +212,8 @@ def derive_trajectory_id(
 # DTO factory
 # ---------------------------------------------------------------------------
 
-def computed_fingerprints(values: dict, walk_depth: Optional[int]) -> Dict[str, str]:
+def computed_fingerprints(values: dict, walk_depth: Optional[int],
+                          walk_type: Optional[int] = None) -> Dict[str, str]:
     """Fingerprints for the attributes present in a computed *values* dict.
 
     ``<name>_error`` entries are fingerprinted as ``<name>`` (an error under the
@@ -219,11 +222,12 @@ def computed_fingerprints(values: dict, walk_depth: Optional[int]) -> Dict[str, 
     :param values: ``{attr or attr_error: value}`` as returned by
         :func:`compute_attributes`.
     :param walk_depth: The trajectory's walk depth.
+    :param walk_type: The trajectory's resolved walk type (``None`` = global).
     :return: ``{attr: fingerprint}``.
     """
     from dreamer.utils.storage.attribute_fingerprints import attribute_fingerprint
     names = {k[: -len("_error")] if k.endswith("_error") else k for k in values if k != "fingerprints"}
-    return {n: attribute_fingerprint(n, walk_depth) for n in sorted(names)}
+    return {n: attribute_fingerprint(n, walk_depth, walk_type=walk_type) for n in sorted(names)}
 
 
 def attributes_patch(
@@ -256,7 +260,7 @@ def attributes_patch(
     patch = {"trajectory_id": record.get("trajectory_id"), "constant": record.get("constant")}
     patch.update(values)
     if values:
-        patch["fingerprints"] = computed_fingerprints(values, handler.walk_depth())
+        patch["fingerprints"] = computed_fingerprints(values, handler.walk_depth(), handler.walk_type())
     return patch
 
 
@@ -328,7 +332,7 @@ def build_trajectory_dtos(
 
     walk_type = int(handler.walk_type())
     walk_depth = int(handler.walk_depth())
-    fingerprint = tier1_config_fingerprint(handler.walk_depth())
+    fingerprint = tier1_config_fingerprint(handler.walk_depth(), walk_type=walk_type)
 
     dtos: List[TrajectoryDTO] = []
     for c in constants_list:
@@ -348,7 +352,7 @@ def build_trajectory_dtos(
             c_sympy, sync_attributes=row_attrs,
         )
         if extra:
-            extra["fingerprints"] = computed_fingerprints(extra, walk_depth)
+            extra["fingerprints"] = computed_fingerprints(extra, walk_depth, walk_type)
 
         dtos.append(TrajectoryDTO(
             trajectory_id=trajectory_id,
@@ -427,8 +431,9 @@ class TrajectoryAttributesHandler:
         walk_type : int, optional
             ``1`` → walk uses ``M.inv().T`` (the dual recurrence);
             ``2`` → walk uses ``M`` directly.
-            When omitted, resolved from ``search.DEFAULT_USES_INV_T``
-            (``True`` → 1, ``False`` → 2).
+            When omitted: the per-CMF walk type of *searchable*
+            (``use_inv_t``), else ``search.DEFAULT_USES_INV_T`` (``True`` → 1,
+            ``False`` → 2); see :mod:`dreamer.utils.walk_type`.
         searchable : Searchable, optional
             The ``Searchable`` (typically the ``Shard``) this trajectory was
             sampled from.  When provided, its ``cache`` is consulted/updated
@@ -449,8 +454,10 @@ class TrajectoryAttributesHandler:
         self._depth = walk_depth
         self._cache: dict = {}
         if walk_type is None:
-            walk_type = 1 if search_config.DEFAULT_USES_INV_T else 2
-        self._walk_type = walk_type
+            # The searchable's per-CMF walk type (use_inv_t), else the global setting.
+            from dreamer.utils.walk_type import searchable_walk_type
+            walk_type = searchable_walk_type(searchable)
+        self._walk_type = int(walk_type)
         self._searchable = searchable
         self._utility_cache: dict = {}  # separate cache for non-core attributes like p/q vectors
         # Per-instance constant resolution state — avoids the class-level shared-state

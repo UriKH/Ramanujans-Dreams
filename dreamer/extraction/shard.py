@@ -37,7 +37,9 @@ class Shard(Searchable, JSONable):
         :param encoding: The indicator vector that indicates whether the shard is below or above the hyperplanes
         :param shift: The shift in start points required
         :param interior_point: A point within the shard
-        :param use_inv_t: Whether to use inverse transpose when preforming walk or not
+        :param use_inv_t: Per-CMF walk type: ``True`` = type 1 (``W^-T``), ``False`` = type 2
+            (``W``), ``None`` = follow ``search.DEFAULT_USES_INV_T`` at walk time
+            (see :mod:`dreamer.utils.walk_type`).
         :param cmf_name: The name of the CMF
         :param selected_trajectory: An optional user-supplied trajectory direction
             (real-space ``Position`` over the CMF symbols) associated with this shard.
@@ -52,9 +54,7 @@ class Shard(Searchable, JSONable):
             and reuse the result across all shards instead of re-shifting
             in each ``Shard.__init__``.
         """
-        use_inv_t_value: bool = bool(config.search.DEFAULT_USES_INV_T if use_inv_t is None else use_inv_t)
-
-        super().__init__(cmf, constants, shift, use_inv_t_value, cmf_name)
+        super().__init__(cmf, constants, shift, use_inv_t, cmf_name)
         self.symbols = list(cmf.matrices.keys())
         self.A, self.b = None, None
         # Sign vector relative to the parent CMF's hyperplane list:

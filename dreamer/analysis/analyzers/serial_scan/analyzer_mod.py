@@ -56,6 +56,7 @@ from dreamer.utils.storage.trajectory_attributes import (
     tier1_config_fingerprint,
     walk_depth_for,
 )
+from dreamer.utils.walk_type import searchable_walk_type
 from dreamer.utils.multi_processing import SLIM_VALUE_CHARS, load_seen_trajectories
 from dreamer.utils.stage_pool import (
     BufferedJsonlWriter,
@@ -291,7 +292,9 @@ class AnalyzerModV1(AnalyzerModScheme):
                 continue
             processed_tids.add(tid)
 
-            current_fp = tier1_config_fingerprint(walk_depth_for(shard.cmf, traj))
+            current_fp = tier1_config_fingerprint(
+                walk_depth_for(shard.cmf, traj), walk_type=searchable_walk_type(shard),
+            )
             bucket = run.seen.get(tid, {})
             # Reuse only when *every* shard constant has a fresh, objective-
             # covered row — else recompute (a changed walk depth / walk type /

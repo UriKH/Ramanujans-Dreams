@@ -16,7 +16,7 @@ class BaseCMF(Formatter):
                  cmf_name: str, cmf: CMF, shifts: Optional[list] = None,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
-                 use_inv_t: bool = None,
+                 use_inv_t: Optional[bool] = None,
                  selected_trajectories: Optional[List[Optional[Tuple[Union[int, sp.Rational], ...]]]] = None
                  ):
         """
@@ -28,6 +28,9 @@ class BaseCMF(Formatter):
         While 0 indicates no shift (None if not doesn't matter).
         :param selected_start_points: Optional list of start points to extract shards from.
         :param only_selected: If True, only extract shards from the selected start points.
+        :param use_inv_t: Walk type of this CMF: ``True`` = type 1 (``W^-T``), ``False`` = type 2
+            (``W``); overrides ``config.search.DEFAULT_USES_INV_T``. ``None`` = follow that
+            global setting at walk time.
         """
         self.cmf = cmf
         # The user-given name (``self.cmf_name`` also carries the shift segment);

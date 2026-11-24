@@ -37,6 +37,9 @@ def attribute_report(
 ) -> Dict[str, Counter]:
     """Count fresh / stale / missing values per attribute in *results_dir*.
 
+    Each row is checked against the walk type it was walked with (its stored
+    ``walk_type``; a per-CMF ``use_inv_t`` can differ from the global setting).
+
     :param results_dir: Directory of per-shard ``*.jsonl`` files.
     :param attributes: Attribute names to report (default: the configured Tier-2
         and Tier-3 lists).  The Tier-1 core is always reported as ``"tier1"``.
@@ -52,14 +55,14 @@ def attribute_report(
     for path in sorted(glob.glob(os.path.join(results_dir, "*.jsonl"))):
         for by_const in load_seen_trajectories(path, omit_values_over=SLIM_VALUE_CHARS).values():
             for rec in by_const.values():
-                depth = rec.get("walk_depth")
-                t1 = tier1_record_fresh(rec, attribute_fingerprint(TIER1, depth))
+                depth, walk_type = rec.get("walk_depth"), rec.get("walk_type")
+                t1 = tier1_record_fresh(rec, attribute_fingerprint(TIER1, depth, walk_type))
                 report[TIER1]["fresh" if t1 else "stale"] += 1
                 fps = rec.get("fingerprints") or {}
                 for a in attributes:
                     if a not in rec and f"{a}_error" not in rec:
                         report[a]["missing"] += 1
-                    elif keep or fps.get(a) == attribute_fingerprint(a, depth):
+                    elif keep or fps.get(a) == attribute_fingerprint(a, depth, walk_type):
                         report[a]["fresh"] += 1
                     else:
                         report[a]["stale"] += 1

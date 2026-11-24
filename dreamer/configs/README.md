@@ -139,6 +139,7 @@ The largest category. Shared knobs plus one block per optimiser
 | Field | Meaning |
 |-------|---------|
 | `GLOBAL_SEED` | Master RNG seed for all samplers + search methods. |
+| `DEFAULT_USES_INV_T` | Global walk type: `True` (default) = type 1 (`W^-T`), `False` = type 2 (`W`). A CMF's own `use_inv_t=True/False` overrides it for that CMF; `use_inv_t=None` follows it at walk time (see the [loading README](../loading/README.md)). Part of the fingerprints, as the row's resolved walk type. |
 | `NUM_TRAJECTORIES_FROM_DIM` | Trajectory count per shard during search. |
 | `DEPTH_FROM_TRAJECTORY_LEN` | Walk depth as a function of trajectory length + dimension (default: between 1000 and 1500; shorter trajectories walk deeper). |
 | `CONSTANT_NO_DIGITS_HIGH_RES` / `MAX_CONSTANT_RESOLUTION` | Precision of the constant for δ: starts at `HIGH_RES` digits (10 000) and doubles until the estimate's error is clearly larger than the constant's rounding, up to `MAX_CONSTANT_RESOLUTION` (1 000 000). Long trajectories need ~10⁵ digits; constants are evaluated with FLINT's arb, so this is cheap (ζ(3) at 10⁶ digits ≈ 0.4 s, 20 MB). |
