@@ -21,10 +21,12 @@ How
 * Workers per shard ``W = max(D + 1, cores // #shards)`` and
   ``K = min(#shards, cores · ANNEAL_OVERSUBSCRIBE // W, shard processes memory fits)``
   (see :func:`plan_shards`); configured values override the automatic choice.
-* A shard process that dies breaks the executor: the shards that were running
-  are re-run **one at a time** at the end; a shard that kills its process again is
-  reported as failed, with the cause (executor message and exit code / signal).
-  Other shards are unaffected.  A re-run is the same search as an uninterrupted
+* Every shard runs in its own one-process executor, so a shard process that
+  dies (e.g. killed for memory) takes down only that shard: it is re-queued at the
+  front and restarts at once, its eval pool starting at one worker and growing
+  with memory; after ``MAX_SHARD_ATTEMPTS`` deaths it is reported as failed, with
+  the cause (executor message and exit code / signal).  Other shards are never
+  re-run.  A re-run is the same search as an uninterrupted
   run: it seeds only from the rows its JSONL had before the first attempt (size
   recorded by the caller), while the killed attempt's rows serve as cached walks
   and a half-written last line is cut off.  The dead process's eval workers and
@@ -180,10 +182,22 @@ def _shard_process_init(config_overrides: dict, monitor_dir: Optional[str]) -> N
             pass
 
 
+#: Attempts per shard before it is reported as failed (its process died every time).
+MAX_SHARD_ATTEMPTS = 2
+
+
 def run_shards(task: Callable, jobs: Sequence[Tuple[str, tuple]], plan: ShardPlan, *,
                label: str = "shard search",
                on_done: Optional[Callable[[str], None]] = None) -> Dict[str, str]:
     """Run ``task(*args)`` for every ``(shard_id, args)`` in *jobs*, ``plan.concurrent`` at a time.
+
+    Every shard gets its **own** one-process executor, so a shard process that dies
+    (e.g. killed for memory) takes down only that shard: it is re-queued at the
+    front and restarts as soon as its slot is free, with its eval pool starting at
+    one worker (``POOL_SLOW_START = 1``; it grows as memory allows).  After
+    :data:`MAX_SHARD_ATTEMPTS` deaths it is reported as failed, with the cause
+    (executor message, exit code / signal).  A shard whose search *raises* is
+    reported at once (a bug, not a resource problem).  Other shards are never re-run.
 
     :param task: Module-level (picklable) per-shard function.
     :param jobs: ``(shard_id, args)`` pairs, in the order to start them.
@@ -192,6 +206,7 @@ def run_shards(task: Callable, jobs: Sequence[Tuple[str, tuple]], plan: ShardPla
     :param on_done: Called with each shard id as it finishes (progress).
     :return: ``{shard_id: "ok" | "failed: <reason>"}``.
     """
+    from collections import deque
     from dreamer.utils import monitoring
     from dreamer.utils.mp_context import pool_context
 
@@ -199,7 +214,8 @@ def run_shards(task: Callable, jobs: Sequence[Tuple[str, tuple]], plan: ShardPla
     overrides["system"] = dict(overrides.get("system", {}), TOTAL_CORES=plan.workers_per_shard)
     if plan.memory_mb_per_shard is not None:
         overrides["system"]["MEMORY_LIMIT_MB"] = plan.memory_mb_per_shard
-    initargs = (overrides, monitoring.worker_run_dir())
+    retry_overrides = dict(overrides, system=dict(overrides["system"], POOL_SLOW_START=1))
+    run_dir = monitoring.worker_run_dir()
     Logger(
         f"{label}: {len(jobs)} shard(s), {plan.concurrent} at a time, "
         f"{plan.workers_per_shard} worker(s) each"
@@ -209,58 +225,54 @@ def run_shards(task: Callable, jobs: Sequence[Tuple[str, tuple]], plan: ShardPla
 
     outcome: Dict[str, str] = {}
     by_id = dict(jobs)
+    attempts: Dict[str, int] = {sid: 0 for sid, _ in jobs}
+    deaths: Dict[str, List[str]] = {sid: [] for sid, _ in jobs}
+    pending = deque(sid for sid, _ in jobs)
+    inflight: Dict[cf.Future, Tuple[str, cf.ProcessPoolExecutor]] = {}
+    ctx = pool_context()
+
     def finish(sid: str, result: str) -> None:
         outcome[sid] = result
         if on_done is not None:
             on_done(sid)
 
-    reasons: List[str] = []
+    def start(sid: str) -> None:
+        attempts[sid] += 1
+        initargs = (overrides if attempts[sid] == 1 else retry_overrides, run_dir)
+        ex = cf.ProcessPoolExecutor(1, mp_context=ctx, initializer=_shard_process_init, initargs=initargs)
+        inflight[ex.submit(task, *by_id[sid])] = (sid, ex)
 
-    def run_batch(ids: List[str], workers: int) -> List[str]:
-        """Run *ids*, at most *workers* in flight; return those in flight when a process died.
-
-        Shards are submitted only as slots free up, so a dead process implicates
-        just the shards that were running; the rest continue on a fresh pool.
-        """
-        ctx = pool_context()
-        pending, died = list(ids), []
-        while pending:
-            with cf.ProcessPoolExecutor(workers, mp_context=ctx, initializer=_shard_process_init,
-                                        initargs=initargs) as ex:
-                inflight: Dict[cf.Future, str] = {}
-                broken = False
-                while (pending or inflight) and not broken:
-                    while pending and len(inflight) < workers:
-                        sid = pending.pop(0)
-                        inflight[ex.submit(task, *by_id[sid])] = sid
-                    done, _ = cf.wait(inflight, return_when=cf.FIRST_COMPLETED)
-                    for fut in done:
-                        sid = inflight.pop(fut)
-                        try:
-                            fut.result()
-                            finish(sid, "ok")
-                        except BrokenProcessPool as exc:
-                            if not broken:
-                                reasons.append(_break_reason(exc, ex))
-                            broken = True
-                            died.append(sid)
-                        except Exception as exc:     # the search itself raised — report, go on
-                            Logger(f"{label}: shard {sid} failed: {exc!r}", Logger.Levels.exception).log()
-                            finish(sid, f"failed: {exc!r}")
-                if broken:                           # everything still running went down with it
-                    died.extend(inflight.values())
-        return died
-
-    suspects = run_batch([sid for sid, _ in jobs], plan.concurrent)
-    if suspects:
-        Logger(
-            f"{label}: a shard process died ({reasons[-1]}); re-running "
-            f"{len(suspects)} shard(s) that were in flight, one at a time.",
-            Logger.Levels.warning,
-        ).log()
-    for sid in suspects:
-        if run_batch([sid], 1):
-            Logger(f"{label}: shard {sid} killed its process again ({reasons[-1]}) — giving up on it.",
-                   Logger.Levels.exception).log()
-            finish(sid, f"failed: process died twice ({reasons[-1]})")
+    try:
+        while pending or inflight:
+            while pending and len(inflight) < plan.concurrent:
+                start(pending.popleft())
+            done, _ = cf.wait(inflight, return_when=cf.FIRST_COMPLETED)
+            for fut in done:
+                sid, ex = inflight.pop(fut)
+                try:
+                    fut.result()
+                    finish(sid, "ok")
+                except BrokenProcessPool as exc:
+                    why = _break_reason(exc, ex)
+                    deaths[sid].append(why)
+                    if attempts[sid] < MAX_SHARD_ATTEMPTS:
+                        Logger(
+                            f"{label}: the process of shard {sid} died ({why}); restarting it now "
+                            f"(attempt {attempts[sid] + 1} of {MAX_SHARD_ATTEMPTS}, its pool starts at one "
+                            f"worker and grows with memory). Other shards are not affected.",
+                            Logger.Levels.warning,
+                        ).log()
+                        pending.appendleft(sid)
+                    else:
+                        Logger(f"{label}: shard {sid} killed its process {attempts[sid]} times ({why}) — "
+                               f"giving up on it.", Logger.Levels.exception).log()
+                        finish(sid, f"failed: process died {attempts[sid]} times ({why})")
+                except Exception as exc:         # the search itself raised — report, go on
+                    Logger(f"{label}: shard {sid} failed: {exc!r}", Logger.Levels.exception).log()
+                    finish(sid, f"failed: {exc!r}")
+                finally:
+                    ex.shutdown(wait=True, cancel_futures=True)
+    finally:
+        for _sid, ex in inflight.values():       # interrupted: do not leave shard processes behind
+            ex.shutdown(wait=False, cancel_futures=True)
     return outcome
