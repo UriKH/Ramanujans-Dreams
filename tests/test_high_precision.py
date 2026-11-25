@@ -521,3 +521,53 @@ class TestFallbackMemory:
         assert _gammazeta.borwein_cache == {} and _gammazeta.zeta_int_cache == {}
         with mp.workdps(2000):
             assert mp.zeta(5) == before
+
+
+# ---------------------------------------------------------------------------
+# R28 — more functions evaluated by arb, so they never reach the mpmath fallback
+# ---------------------------------------------------------------------------
+_h = sp.Rational(1, 2)
+ARB_NODES = {
+    "besselj": sp.besselj(0, 1), "besselj_half": sp.besselj(_h, 3), "bessely": sp.bessely(1, 2),
+    "besseli": sp.besseli(2, sp.Rational(1, 3)), "besselk": sp.besselk(0, 2),
+    "erf": sp.erf(_h), "erfc": sp.erfc(2), "erfi": sp.erfi(1),
+    "asin": sp.asin(sp.Rational(1, 3)), "acos": sp.acos(sp.Rational(-1, 4)), "tan": sp.tan(2),
+    "sinh": sp.sinh(1), "cosh": sp.cosh(2), "tanh": sp.tanh(_h),
+    "asinh": sp.asinh(3), "acosh": sp.acosh(2), "atanh": sp.atanh(sp.Rational(1, 5)),
+    "lambertw": sp.LambertW(1), "lambertw_neg": sp.LambertW(sp.Rational(-1, 4)),
+    "airyai": sp.airyai(1), "airybi": sp.airybi(-1),
+    "Si": sp.Si(1), "Ci": sp.Ci(2), "Shi": sp.Shi(1), "Chi": sp.Chi(2), "li": sp.li(2),
+    "fresnels": sp.fresnels(1), "fresnelc": sp.fresnelc(2), "loggamma": sp.loggamma(sp.Rational(7, 2)),
+    "elliptic_k": sp.elliptic_k(_h), "elliptic_e": sp.elliptic_e(sp.Rational(1, 3)),
+    "uppergamma": sp.uppergamma(_h, 3), "lowergamma": sp.lowergamma(sp.Rational(1, 3), 1),
+    "mixed": sp.besselj(0, 1) + sp.zeta(5) - sp.erf(1) * sp.pi,
+}
+
+# Outside the real domain the value is complex or undefined: arb must refuse (→ the evalf fallback, as before).
+ARB_OUTSIDE_DOMAIN = [sp.asin(2), sp.acosh(_h), sp.bessely(0, -1), sp.LambertW(-1), sp.elliptic_k(2),
+                      sp.atanh(2), sp.Ci(-1), sp.LambertW(sp.Rational(-1, 4), -1)]
+
+
+@pytest.mark.parametrize("name", sorted(ARB_NODES))
+def test_more_nodes_evaluated_by_arb(name):
+    expr = ARB_NODES[name]
+    ours = arb_value(expr, DIGITS)                 # arb only — raises Unsupported if the node is not converted
+    reference = expr.evalf(DIGITS + 30)
+    assert agreeing_digits(ours, reference) >= DIGITS
+    assert ours._prec == expr.evalf(DIGITS)._prec
+
+
+@pytest.mark.parametrize("name", ["besselj", "erf", "lambertw", "elliptic_k", "Chi", "mixed"])
+@pytest.mark.parametrize("digits", [15, 200, 1000])
+def test_more_nodes_agree_at_several_precisions(name, digits):
+    expr = ARB_NODES[name]
+    ours, ref = arb_value(expr, digits), expr.evalf(digits + 20)
+    assert agreeing_digits(ours, ref) >= digits
+
+
+@pytest.mark.parametrize("expr", ARB_OUTSIDE_DOMAIN, ids=str)
+def test_outside_real_domain_falls_back(expr):
+    with pytest.raises(Unsupported):
+        arb_value(expr, 50)
+    high_precision.cache_clear()
+    assert high_precision(expr, 50) == expr.evalf(50)
