@@ -491,7 +491,7 @@ class TestFallbackMemory:
 
     def test_large_fallback_warns_and_releases_mpmath_caches(self, fallback_logs):
         expr = FALLBACK_EXPR
-        digits = hp_mod.FALLBACK_RELEASE_DIGITS
+        digits = hp_mod.fallback_release_digits()
         reference = expr.evalf(digits)
         hp_mod.release_mpmath_caches()
         assert high_precision(expr, digits) == reference
@@ -503,14 +503,14 @@ class TestFallbackMemory:
 
     def test_small_fallback_is_silent_and_keeps_caches(self, fallback_logs):
         expr = FALLBACK_EXPR
-        digits = hp_mod.FALLBACK_RELEASE_DIGITS // 4
+        digits = hp_mod.fallback_release_digits() // 4
         assert high_precision(expr, digits) == expr.evalf(digits)
         assert _gammazeta.borwein_cache != {}
         assert fallback_logs == []
 
     def test_warns_once_per_expression(self, fallback_logs):
         expr = sp.airyaiprime(1)
-        digits = hp_mod.FALLBACK_RELEASE_DIGITS
+        digits = hp_mod.fallback_release_digits()
         high_precision(expr, digits)
         high_precision(expr, digits + 1)
         high_precision(sp.airyaiprime(2), digits)
@@ -575,3 +575,37 @@ def test_outside_real_domain_falls_back(expr):
         arb_value(expr, 50)
     high_precision.cache_clear()
     assert high_precision(expr, 50) == expr.evalf(50)
+
+
+class TestCacheBudget:
+    """R31: the release threshold comes from ``search.MAX_CONSTANT_CACHE_MB`` (memory kept per constant)."""
+
+    def test_default_budget_is_50_mb_about_10900_digits(self):
+        from dreamer.configs import config
+        assert config.search.MAX_CONSTANT_CACHE_MB == 50
+        assert hp_mod.fallback_release_digits() == hp_mod.fallback_release_digits(50)
+        assert 10_850 <= hp_mod.fallback_release_digits(50) <= 10_950
+
+    def test_budget_to_digits(self):
+        assert 6_850 <= hp_mod.fallback_release_digits(20) <= 6_950        # user's example: 20 MB ≈ 6 900 digits
+        assert hp_mod.fallback_release_digits(0) == 0                       # 0 MB: release after every fallback
+
+    def test_config_change_moves_the_threshold(self, monkeypatch):
+        from dreamer.configs import config
+        monkeypatch.setattr(config.search, "MAX_CONSTANT_CACHE_MB", 20)
+        assert hp_mod.fallback_release_digits() == hp_mod.fallback_release_digits(20)
+
+    @pytest.mark.parametrize("bad", [-1, float("nan"), "50", None])
+    def test_bad_budget_rejected(self, bad, monkeypatch):
+        from dreamer.configs import config
+        monkeypatch.setattr(config.search, "MAX_CONSTANT_CACHE_MB", bad)
+        with pytest.raises(ValueError):
+            hp_mod.fallback_release_digits()
+
+    def test_small_budget_releases_after_small_fallback(self, monkeypatch, fallback_logs):
+        from dreamer.configs import config
+        monkeypatch.setattr(config.search, "MAX_CONSTANT_CACHE_MB", 0.5)   # ≈ 1 090 digits
+        digits = hp_mod.fallback_release_digits() + 10
+        assert high_precision(FALLBACK_EXPR, digits) == FALLBACK_EXPR.evalf(digits)
+        assert _gammazeta.borwein_cache == {}
+        assert len(fallback_logs) == 1
