@@ -14,8 +14,8 @@ computation, checks that the resulting ball is accurate to the requested
 precision (retrying with more guard bits otherwise), and returns a sympy
 ``Float`` with the **same binary precision** that ``expr.evalf(digits)`` would
 produce, so every downstream formula is unchanged.  Anything the converter does
-not support falls back to ``expr.evalf(digits)``; at ``FALLBACK_RELEASE_DIGITS``
-digits or more that fallback logs a warning and frees mpmath's caches afterwards
+not support falls back to ``expr.evalf(digits)``; above the precision derived from
+``search.MAX_CONSTANT_CACHE_MB`` (:func:`fallback_release_digits`) that fallback logs a warning and frees mpmath's caches afterwards
 (:func:`release_mpmath_caches`).
 
 Supported nodes: integers, rationals, floats, π, e, γ (Euler), Catalan, the
@@ -60,14 +60,33 @@ _GUARD_BITS = 64
 #: Attempts (doubling the guard bits each time) before falling back to evalf.
 _MAX_ATTEMPTS = 4
 
-#: The evalf fallback at this many digits or more logs a warning and then frees
-#: mpmath's caches (:func:`release_mpmath_caches`).  mpmath keeps, e.g., one list
-#: of Borwein coefficients per precision for ζ(n), ≈ 0.42 MB·(digits/1000)²,
-#: never freed: ~10 MB at 5 000 digits, ~168 MB at 20 000, ~19.5 GB for the two
-#: precisions of ~143k / ~164k digits that an 8F7 trajectory needed (R22,
-#: ``context/investigations/big_walk_memory``).  Below 5 000 digits the caches
-#: stay (≤ ~10 MB, and they make repeated low-precision calls fast).
-FALLBACK_RELEASE_DIGITS = 5000
+#: mpmath's ζ(n) cache (one list of Borwein coefficients per precision, never
+#: freed) is ≈ this many MB × (digits/1000)²: measured 42 MB at 10 000 digits,
+#: 168 MB at 20 000 (R22, ``context/investigations/big_walk_memory``).  It is the
+#: largest mpmath cache found; :func:`fallback_release_digits` uses it to turn
+#: the per-constant memory budget ``search.MAX_CONSTANT_CACHE_MB`` into digits.
+MPMATH_CACHE_MB_PER_KDIGITS_SQUARED = 0.42
+
+
+def fallback_release_digits(budget_mb=None) -> int:
+    """Precision (digits) from which the evalf fallback frees mpmath's caches.
+
+    ``digits = 1000·√(budget_mb / 0.42)`` — the precision at which mpmath's
+    ζ(n) cache reaches *budget_mb* (50 MB → ~10 900 digits, 20 MB → ~6 900).
+
+    :param budget_mb: Memory budget per constant in MB; ``None`` reads
+        ``search.MAX_CONSTANT_CACHE_MB``.  0 means: release after every fallback.
+    :raises ValueError: if the budget is not a non-negative number.
+    """
+    import math
+
+    if budget_mb is None:
+        from dreamer.configs import config
+        budget_mb = config.search.MAX_CONSTANT_CACHE_MB
+    if isinstance(budget_mb, bool) or not isinstance(budget_mb, (int, float)) or not budget_mb >= 0:
+        raise ValueError(f"search.MAX_CONSTANT_CACHE_MB must be a non-negative number, got {budget_mb!r}")
+    return int(1000 * math.sqrt(budget_mb / MPMATH_CACHE_MB_PER_KDIGITS_SQUARED))
+
 
 #: Expressions already warned about (one warning per expression per process).
 _WARNED_FALLBACKS: set = set()
@@ -303,7 +322,7 @@ def high_precision(expr: sp.Expr, digits: int) -> sp.Float:
 def _evalf_fallback(expr: sp.Expr, digits: int) -> sp.Float:
     """``expr.evalf(digits)`` for what arb cannot evaluate, without keeping mpmath's caches.
 
-    At ``digits >= FALLBACK_RELEASE_DIGITS`` it logs a warning (once per
+    At ``digits >= fallback_release_digits()`` (from ``search.MAX_CONSTANT_CACHE_MB``) it logs a warning (once per
     expression) and frees mpmath's memo caches afterwards; the peak memory of
     the evalf call itself remains (≈ 0.42 MB·(digits/1000)² for ζ(n)).
 
@@ -313,7 +332,7 @@ def _evalf_fallback(expr: sp.Expr, digits: int) -> sp.Float:
     """
     expr = sp.sympify(expr)
     value = expr.evalf(digits)
-    if digits >= FALLBACK_RELEASE_DIGITS:
+    if digits >= fallback_release_digits():
         key = sp.srepr(expr)
         if key not in _WARNED_FALLBACKS:
             _WARNED_FALLBACKS.add(key)

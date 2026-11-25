@@ -606,6 +606,8 @@ class TestCacheBudget:
         from dreamer.configs import config
         monkeypatch.setattr(config.search, "MAX_CONSTANT_CACHE_MB", 0.5)   # ≈ 1 090 digits
         digits = hp_mod.fallback_release_digits() + 10
-        assert high_precision(FALLBACK_EXPR, digits) == FALLBACK_EXPR.evalf(digits)
+        reference = FALLBACK_EXPR.evalf(digits)
+        hp_mod.release_mpmath_caches()
+        assert high_precision(FALLBACK_EXPR, digits) == reference
         assert _gammazeta.borwein_cache == {}
         assert len(fallback_logs) == 1
