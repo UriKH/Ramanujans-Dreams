@@ -15,7 +15,7 @@ after another.
 
 import os
 from collections import defaultdict
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 from dreamer.search.methods.flatland.evaluator import EvalStats, log_eval_stats
 from dreamer.configs import config
@@ -37,7 +37,9 @@ from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.utils import monitoring
 from dreamer.utils.multi_processing import (
     sink_item_dto,
+    load_seed_trajectories,
     load_seen_trajectories_for_search,
+    repair_trailing_fragment,
     worker_pool,
     write_jsonl_line,
 )
@@ -96,7 +98,13 @@ class SimulatedAnnealingMod(SearcherModScheme):
                 self._run_shard(shard, identified_consts)
             return
 
-        jobs = [(shard_id, (shard, list(shard_identified[shard_id]), self.use_LIReC))
+        # Each shard's JSONL size before any attempt: a shard re-run after its process
+        # died seeds from that part only (see run_annealing_shard), so it searches as
+        # if it had not been interrupted.
+        def size_now(sid: str) -> int:
+            path = os.path.join(sys_config.EXPORT_SEARCH_RESULTS, f"{sid}.jsonl")
+            return os.path.getsize(path) if os.path.exists(path) else 0
+        jobs = [(shard_id, (shard, list(shard_identified[shard_id]), self.use_LIReC, size_now(shard_id)))
                 for shard_id, shard in shard_by_id.items()]
         bar = SmartTQDM(total=len(jobs), desc="Simulated annealing in shards: ", **sys_config.TQDM_CONFIG)
         try:
@@ -121,7 +129,8 @@ class SimulatedAnnealingMod(SearcherModScheme):
         run_annealing_shard(shard, identified_consts, self.use_LIReC)
 
 
-def run_annealing_shard(shard: Shard, identified_consts: List[Constant], use_LIReC: bool) -> str:
+def run_annealing_shard(shard: Shard, identified_consts: List[Constant], use_LIReC: bool,
+                        seed_upto: Optional[int] = None) -> str:
     """Run SA for each identified constant of a single shard (whole per-shard pipeline).
 
     Builds the shard's geometry, eval pool and result writer, runs every
@@ -129,6 +138,10 @@ def run_annealing_shard(shard: Shard, identified_consts: List[Constant], use_LIR
     process of a concurrent run (:mod:`shard_concurrency`) executes exactly the
     code the sequential loop runs.
 
+    :param seed_upto: Size in bytes of the shard's JSONL before its first attempt.
+        SA seeds come only from that part of the file, so a re-run after a killed
+        attempt searches exactly as the uninterrupted run (the attempt's rows still
+        serve as cached walks).  ``None``: seed from the whole file (one attempt).
     :return: The shard id (for the concurrent scheduler's bookkeeping).
     """
     cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
@@ -137,7 +150,10 @@ def run_annealing_shard(shard: Shard, identified_consts: List[Constant], use_LIR
         Logger.Levels.debug,
     ).log()
     output_path = os.path.join(sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl")
+    repair_trailing_fragment(output_path)
     seen_trajectories = load_seen_trajectories_for_search(output_path, shard_id)
+    seed_rows = (None if seed_upto is None
+                 else load_seed_trajectories(output_path, shard_id, seed_upto))
 
     handler_cache = make_handler_cache()
 
@@ -178,6 +194,7 @@ def run_annealing_shard(shard: Shard, identified_consts: List[Constant], use_LIR
                             geom=geom,
                             start=start,
                             pool=eval_pool,
+                            seed_trajectories=seed_rows,
                         )
                 except NoInitialIdentification as e:
                     Logger(str(e), Logger.Levels.warning).log()

@@ -32,6 +32,7 @@ import json
 import multiprocessing as mp
 from collections import namedtuple
 from multiprocessing import Pool
+from multiprocessing.managers import SyncManager
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from dreamer.configs import config
@@ -103,6 +104,14 @@ def make_eval_pool(shard, start, workers: int) -> Optional[Pool]:
     )
 
 
+def _start_manager() -> SyncManager:
+    """``multiprocessing.Manager()`` whose server process exits when its owner dies."""
+    from dreamer.utils import mp_context
+    manager = SyncManager(ctx=mp.get_context())
+    manager.start(initializer=mp_context.start_parent_watchdog)
+    return manager
+
+
 def make_shared_eval_pool(shard, start, workers: int):
     """Per-shard eval pool with a shared ``(p, q)`` cache log attached.
 
@@ -125,7 +134,7 @@ def make_shared_eval_pool(shard, start, workers: int):
     """
     if resolve_eval_workers(workers) <= 1:
         return None, None
-    manager = mp.Manager()
+    manager = _start_manager()
     shard.shared_pq_log = manager.list()
     pool = make_eval_pool(shard, start, workers)
     if pool is None:  # Defensive: resolution disagreed (shouldn't happen).

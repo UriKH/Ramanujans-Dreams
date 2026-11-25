@@ -166,6 +166,8 @@ def _shard_process_init(config_overrides: dict, monitor_dir: Optional[str]) -> N
     """Initializer of a shard process: the parent's config (with this process's
     core / memory share) and the run monitor as a worker."""
     config.configure(**config_overrides)
+    from dreamer.utils import mp_context
+    mp_context.start_parent_watchdog()          # exit if the run's main process dies
     if monitor_dir:
         try:
             from dreamer.utils import monitoring

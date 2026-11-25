@@ -62,3 +62,31 @@ def pool_context():
             pass
         _preload_set = True
     return ctx
+
+
+def start_parent_watchdog(interval: float = 1.0) -> None:
+    """Exit this process when its parent process dies.
+
+    A pool worker or manager whose parent is SIGKILLed (e.g. a shard process killed
+    by the out-of-memory killer) is re-parented and would otherwise live on: it keeps
+    the ``multiprocessing`` resource tracker's pipe open, so the run's main process
+    waits for it at exit for ever.  A daemon thread polls ``os.getppid()`` every
+    *interval* seconds and calls ``os._exit`` once the parent has changed (the
+    original parent is gone).  Call it at the start of a child process (pool
+    initializer, manager initializer).
+
+    :param interval: Polling period in seconds.
+    """
+    import os
+    import threading
+
+    parent = os.getppid()
+
+    def watch() -> None:
+        import time
+        while True:
+            time.sleep(interval)
+            if os.getppid() != parent:
+                os._exit(1)
+
+    threading.Thread(target=watch, name="parent-watchdog", daemon=True).start()

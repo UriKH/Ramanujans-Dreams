@@ -245,7 +245,7 @@ def _slim(record: dict, limit: int) -> dict:
 
 
 def load_seen_trajectories(
-    jsonl_path: str, *, omit_values_over: Optional[int] = None,
+    jsonl_path: str, *, omit_values_over: Optional[int] = None, max_bytes: Optional[int] = None,
 ) -> Dict[str, Dict[str, dict]]:
     """Read and merge all ``(trajectory, constant)`` rows from a JSONL file.
 
@@ -263,13 +263,21 @@ def load_seen_trajectories(
         Tier-1 values, scalar metrics and *which* attributes exist — a shard
         whose rows carry Tier-3 ``relation`` strings can be ~1 GB on disk, all of
         which a full load keeps in memory.  ``None`` (default) keeps everything.
+    :param max_bytes: Read only the complete rows inside the file's first *max_bytes*
+        bytes (the file as it was when a shard's search started; see
+        :func:`load_seed_trajectories`).  ``None`` reads the whole file.
     :return: The merged map; an empty dict if the file does not exist.
     """
     merged: Dict[str, Dict[str, dict]] = {}
     try:
-        with open(jsonl_path, "r") as f:
-            for line in f:
-                line = line.strip()
+        with open(jsonl_path, "rb") as f:           # streamed: shard files can be large
+            used = 0
+            for raw in f:
+                if max_bytes is not None:
+                    used += len(raw)
+                    if used > max_bytes or not raw.endswith(b"\n"):
+                        break                       # past the prefix, or an incomplete row
+                line = raw.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
                 try:
@@ -349,6 +357,66 @@ def load_seen_trajectories_for_search(output_path: str, shard_id: str) -> Dict[s
                 fout.write(json.dumps(rec) + "\n")
                 seen.setdefault(rec["trajectory_id"], {})[rec["constant"]] = _slim(rec, SLIM_VALUE_CHARS)
     return seen
+
+
+def load_seed_trajectories(output_path: str, shard_id: str, upto: int) -> Dict[str, dict]:
+    """The shard's rows as they were when its search first started (SA seed candidates).
+
+    A shard re-run after its process died must search exactly as if it had not been
+    interrupted.  Its JSONL then also holds the rows the killed attempt wrote; using
+    those as seed candidates would start a different search.  So seeds come from the
+    file's first *upto* bytes (its size recorded before the first attempt) plus, when
+    analysis rows are stored separately, the analysis store — the same rows the first
+    attempt saw.  All rows still serve as the value cache (a stored walk is not repeated).
+
+    :param output_path: The shard's search JSONL.
+    :param shard_id: Structural shard id (names the analysis-store file).
+    :param upto: Size of *output_path* in bytes before the first attempt.
+    :return: ``{trajectory_id: {constant: record}}`` (slim, as for the search).
+    """
+    seen = load_seen_trajectories(output_path, omit_values_over=SLIM_VALUE_CHARS, max_bytes=upto)
+    if config.analysis.STORE_TRAJECTORIES_SEPARATELY:
+        analysis_path = os.path.join(sys_config.EXPORT_ANALYSIS_RESULTS, f"{shard_id}.jsonl")
+        if os.path.abspath(analysis_path) != os.path.abspath(output_path):
+            for tid, by_const in load_seen_trajectories(analysis_path).items():
+                for const, rec in by_const.items():
+                    seen.setdefault(tid, {}).setdefault(const, _slim(rec, SLIM_VALUE_CHARS))
+    return seen
+
+
+def repair_trailing_fragment(path: str) -> None:
+    """Cut off a half-written last line (a process killed mid-write leaves one).
+
+    Rows end with a newline, so text after the last newline is not a row; the next
+    append would otherwise glue a new row onto it.  Complete rows are never touched.
+    """
+    try:
+        with open(path, "rb+") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            if size == 0:
+                return
+            f.seek(size - 1)
+            if f.read(1) == b"\n":
+                return
+            pos, chunk = size, 1 << 16
+            while pos > 0:                           # find the last newline
+                start = max(0, pos - chunk)
+                f.seek(start)
+                block = f.read(pos - start)
+                k = block.rfind(b"\n")
+                if k >= 0:
+                    keep = start + k + 1
+                    break
+                pos = start
+            else:
+                keep = 0
+            f.truncate(keep)
+    except FileNotFoundError:
+        return
+    from dreamer.utils.logger import Logger
+    Logger(f"{path}: cut off an incomplete last line ({size - keep} bytes, a write interrupted by a "
+           f"killed process); all complete rows kept.", Logger.Levels.warning).log()
 
 
 def load_seen_shards(jsonl_path: str) -> Dict[str, dict]:
