@@ -82,6 +82,11 @@ class TestPlan:
         p = sc.plan_shards(18, [11] * 18)                          # W = 12 = all cores
         assert p.concurrent == 1 and p.workers_per_shard == 12 and p.memory_mb_per_shard is None
 
+    def test_default_oversubscription_is_measured_value(self):
+        """Default 1.25: best on Zeus in two rounds with look-ahead on (investigations/sa_idle_cores)."""
+        from dreamer.configs.search import SearchConfig
+        assert SearchConfig().ANNEAL_OVERSUBSCRIBE == 1.25
+
     def test_one_shard_gets_everything(self, cores):
         cores(18)
         p = sc.plan_shards(1, [5])
