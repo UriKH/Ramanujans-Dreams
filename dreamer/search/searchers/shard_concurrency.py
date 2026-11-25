@@ -22,10 +22,14 @@ How
   ``K = min(#shards, cores · ANNEAL_OVERSUBSCRIBE // W, shard processes memory fits)``
   (see :func:`plan_shards`); configured values override the automatic choice.
 * A shard process that dies breaks the executor: the shards that were running
-  are re-run **one at a time** at the end (a shard re-reads its own JSONL, so
-  finished walks are not repeated); a shard that kills its process again is
+  are re-run **one at a time** at the end; a shard that kills its process again is
   reported as failed, with the cause (executor message and exit code / signal).
-  Other shards are unaffected.
+  Other shards are unaffected.  A re-run is the same search as an uninterrupted
+  run: it seeds only from the rows its JSONL had before the first attempt (size
+  recorded by the caller), while the killed attempt's rows serve as cached walks
+  and a half-written last line is cut off.  The dead process's eval workers and
+  (p, q) Manager exit on their own (``mp_context.start_parent_watchdog``), so the
+  run still exits.
   A shard whose search *raises* is reported and not retried.
 * Shard processes report to the run monitor as workers (events, watchdog), and
   their eval pools report to the same run directory.  Progress *nodes* exist only
