@@ -5,9 +5,9 @@ Coverage:
     memory check, a fixed K / W, never more than the number of shards, K = 1 → sequential plan.
   - run_shards: every shard runs once with its core / memory share; shard processes
     pass the run directory on to their pools; a shard whose search raises is reported
-    and the others finish; a shard whose process dies is re-run alone; one that dies
-    again is reported as failed, with the cause (exit code); never-started shards are
-    not penalised by another shard's death.
+    and the others finish; a shard whose process dies is restarted at once (re-queued
+    at the front, its eval pool starting at one worker) and only it is re-run; one that
+    keeps dying is given up after MAX_SHARD_ATTEMPTS, with the cause (exit code).
   - End to end: SimulatedAnnealingMod on all shards of a real 2F1 log(2) CMF writes
     byte-identical per-shard JSONL files sequentially and concurrently.
 """
@@ -127,6 +127,23 @@ def task_die_once(sid, marker_dir):
     return task_report(sid, marker_dir)
 
 
+def task_log_runs(sid, marker_dir):
+    """Log each start (time, pool slow start); 'flaky' dies on its first run, 'poison' on every run."""
+    import time
+    with open(os.path.join(marker_dir, f"{sid}.runs"), "a") as f:
+        f.write(f"{time.time()} {config.system.POOL_SLOW_START}\n")
+    runs = sum(1 for _ in open(os.path.join(marker_dir, f"{sid}.runs")))
+    if sid == "poison" or (sid == "flaky" and runs == 1):
+        os._exit(1)
+    time.sleep(0.5)
+    return task_report(sid, marker_dir)
+
+
+def _runs(marker_dir, sid):
+    path = os.path.join(marker_dir, f"{sid}.runs")
+    return [line.split() for line in open(path)] if os.path.exists(path) else []
+
+
 PLAN = sc.ShardPlan(concurrent=2, workers_per_shard=3, memory_mb_per_shard=777)
 
 
@@ -154,14 +171,38 @@ class TestRunShards:
         out = sc.run_shards(task_raise, jobs, PLAN)
         assert out["a"] == out["c"] == "ok" and out["bad"].startswith("failed: ValueError")
 
-    def test_dead_process_rerun_alone_then_given_up(self, tmp_path):
-        jobs = [(s, (s, str(tmp_path))) for s in ("a", "flaky", "poison", "d", "e")]
-        out = sc.run_shards(task_die_once, jobs, PLAN)
-        assert out["flaky"] == "ok"                     # died once, fine when re-run
-        assert out["poison"].startswith("failed: process died twice (")
+    def test_dead_shard_restarted_others_not_rerun(self, tmp_path):
+        """Only the shard whose process died is re-run; the shards running beside it are untouched."""
+        jobs = [(s, (s, str(tmp_path))) for s in ("a", "flaky", "c", "d", "e")]
+        out = sc.run_shards(task_log_runs, jobs, PLAN)
+        assert all(v == "ok" for v in out.values()), out
+        assert len(_runs(tmp_path, "flaky")) == 2
+        assert all(len(_runs(tmp_path, s)) == 1 for s in ("a", "c", "d", "e"))
+
+    def test_poison_given_up_after_cap_with_cause(self, tmp_path):
+        jobs = [(s, (s, str(tmp_path))) for s in ("a", "poison", "c")]
+        out = sc.run_shards(task_log_runs, jobs, PLAN)
+        assert out["a"] == out["c"] == "ok"
+        assert len(_runs(tmp_path, "poison")) == sc.MAX_SHARD_ATTEMPTS
+        assert out["poison"].startswith(f"failed: process died {sc.MAX_SHARD_ATTEMPTS} times (")
         assert "exit code 1" in out["poison"]           # the real cause, not a guess
-        assert all(out[s] == "ok" for s in ("a", "d", "e"))
-        assert all((tmp_path / s).exists() for s in ("a", "flaky", "d", "e"))
+
+    def test_restart_is_immediate(self, tmp_path):
+        """The dead shard is re-queued at the front: it restarts before shards queued after it."""
+        jobs = [(s, (s, str(tmp_path))) for s in ("flaky", "b", "c", "d")]
+        out = sc.run_shards(task_log_runs, jobs, PLAN)
+        assert all(v == "ok" for v in out.values()), out
+        retry_start = float(_runs(tmp_path, "flaky")[1][0])
+        assert retry_start < float(_runs(tmp_path, "c")[0][0])
+        assert retry_start < float(_runs(tmp_path, "d")[0][0])
+
+    def test_retry_pool_starts_small(self, tmp_path):
+        """First attempt: the configured slow start; a retry starts its eval pool at one worker (grows with memory)."""
+        out = sc.run_shards(task_log_runs, [("flaky", ("flaky", str(tmp_path)))], PLAN)
+        assert out == {"flaky": "ok"}
+        first, retry = _runs(tmp_path, "flaky")
+        assert int(first[1]) == int(config.system.POOL_SLOW_START)
+        assert int(retry[1]) == 1
 
 
 # ---------------------------------------------------------------------------
