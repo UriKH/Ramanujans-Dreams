@@ -22,7 +22,12 @@ Supported nodes: integers, rationals, floats, π, e, γ (Euler), Catalan, the
 golden ratio, ``+``, ``×``, powers (integer exponents; rational exponents of
 positive bases), ``exp``, ``log``, ``zeta`` (also Hurwitz ``zeta(s, a)``), ``polygamma``, ``Ei``,
 ``expint`` (E_ν), ``polylog``, ``gamma``,
-``Abs``, ``sin``/``cos``/``atan`` and generalized hypergeometric ``hyper``.
+``Abs``, ``sin``/``cos``/``atan`` and generalized hypergeometric ``hyper``; and (R28) Bessel
+``besselj``/``bessely``/``besseli``/``besselk``, ``erf``/``erfc``/``erfi``, ``tan``, ``asin``/``acos``,
+hyperbolic and inverse hyperbolic functions, ``airyai``/``airybi``, ``Si``/``Ci``/``Shi``/``Chi``, ``li``,
+``fresnels``/``fresnelc``, ``loggamma``, principal ``LambertW``, ``uppergamma``/``lowergamma`` and the complete
+``elliptic_k``/``elliptic_e``.  Outside a function's real domain arb returns NaN or a non-real value, which is
+rejected, so such inputs still use the fallback.
 
 **Resolved errors** (:func:`resolved_error`).  The constant ``C`` is used rounded
 to ``P = dps_to_prec(digits)`` bits (≈ digits·log2(10) + 4; 10 000 digits =
@@ -194,7 +199,45 @@ def _to_arb(expr: sp.Expr):
     if func is sp.hyper:
         ap, bq, z = args
         return _to_arb(z).hypgeom([_to_arb(a) for a in ap], [_to_arb(b) for b in bq])
+    # R28: more real special functions by arb, so they never reach mpmath (whose caches grow ~digits²).
+    # Outside the real domain arb returns NaN (asin(2), acosh(½), Ci(−1), …), which arb_value rejects → fallback.
+    if func in _ARB_ONE_ARG and len(args) == 1:
+        return getattr(_to_arb(args[0]), _ARB_ONE_ARG[func])()
+    if func in _ARB_BESSEL:
+        return getattr(_to_arb(args[1]), _ARB_BESSEL[func])(_to_arb(args[0]))   # sympy besselX(ν, x)
+    if func is sp.loggamma:
+        x = _to_arb(args[0])
+        if not x > 0:
+            raise Unsupported(f"loggamma of a non-positive value {expr}")
+        return x.lgamma()
+    if func is sp.LambertW:
+        if len(args) == 2 and args[1] != 0:
+            raise Unsupported(f"non-principal LambertW branch {expr}")
+        return _to_arb(args[0]).lambertw()
+    if func is sp.uppergamma:
+        return _to_arb(args[1]).gamma_upper(_to_arb(args[0]))                    # Γ(s, x)
+    if func is sp.lowergamma:
+        return _to_arb(args[1]).gamma_lower(_to_arb(args[0]))                    # γ(s, x)
+    if func in (sp.elliptic_k, sp.elliptic_e) and len(args) == 1:                # complete, parameter m
+        from flint import acb
+        value = getattr(acb(_to_arb(args[0])), "elliptic_k" if func is sp.elliptic_k else "elliptic_e")()
+        if not value.imag.is_zero():
+            raise Unsupported(f"non-real {expr}")
+        return value.real
     raise Unsupported(f"{func.__name__} in {expr}")
+
+
+#: sympy function → arb method (one real argument).
+_ARB_ONE_ARG = {
+    sp.erf: "erf", sp.erfc: "erfc", sp.erfi: "erfi",
+    sp.tan: "tan", sp.asin: "asin", sp.acos: "acos",
+    sp.sinh: "sinh", sp.cosh: "cosh", sp.tanh: "tanh", sp.asinh: "asinh", sp.acosh: "acosh", sp.atanh: "atanh",
+    sp.airyai: "airy_ai", sp.airybi: "airy_bi",
+    sp.Si: "si", sp.Ci: "ci", sp.Shi: "shi", sp.Chi: "chi", sp.li: "li",
+    sp.fresnels: "fresnel_s", sp.fresnelc: "fresnel_c",                       # both normalised (sympy's convention)
+}
+#: sympy Bessel function besselX(ν, x) → arb method x.bessel_X(ν).
+_ARB_BESSEL = {sp.besselj: "bessel_j", sp.bessely: "bessel_y", sp.besseli: "bessel_i", sp.besselk: "bessel_k"}
 
 
 def _ball_to_float(ball, prec: int) -> sp.Float:

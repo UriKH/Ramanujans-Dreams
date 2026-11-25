@@ -70,7 +70,7 @@ def test_float_input_is_exact():
     assert arb_value(x * sp.pi, 200) == (sp.Rational(5, 4) * sp.pi).evalf(200)
 
 
-@pytest.mark.parametrize("expr", [sp.besselj(0, 1), sp.I + 1, sp.log(-2), (-2) ** sp.Rational(1, 3)])
+@pytest.mark.parametrize("expr", [sp.airyaiprime(1), sp.I + 1, sp.log(-2), (-2) ** sp.Rational(1, 3)])
 def test_unsupported_falls_back_to_evalf(expr):
     with pytest.raises(Unsupported):
         arb_value(expr, 50)
@@ -451,6 +451,10 @@ from mpmath.libmp import gammazeta as _gammazeta                           # noq
 from dreamer.utils.logger import Logger                                   # noqa: E402
 
 
+#: arb cannot evaluate Ai'(x) (not converted), so this goes through evalf — and its ζ(5) through mpmath.
+FALLBACK_EXPR = sp.airyaiprime(1) + sp.zeta(5)
+
+
 class _FakeLogger:
     records = []
     Levels = Logger.Levels
@@ -486,7 +490,7 @@ class TestFallbackMemory:
         assert fallback_logs == []
 
     def test_large_fallback_warns_and_releases_mpmath_caches(self, fallback_logs):
-        expr = sp.besselj(0, 1) + sp.zeta(5)
+        expr = FALLBACK_EXPR
         digits = hp_mod.FALLBACK_RELEASE_DIGITS
         reference = expr.evalf(digits)
         hp_mod.release_mpmath_caches()
@@ -498,18 +502,18 @@ class TestFallbackMemory:
         assert "fallback" in msg and str(digits) in msg
 
     def test_small_fallback_is_silent_and_keeps_caches(self, fallback_logs):
-        expr = sp.besselj(0, 1) + sp.zeta(5)
+        expr = FALLBACK_EXPR
         digits = hp_mod.FALLBACK_RELEASE_DIGITS // 4
         assert high_precision(expr, digits) == expr.evalf(digits)
         assert _gammazeta.borwein_cache != {}
         assert fallback_logs == []
 
     def test_warns_once_per_expression(self, fallback_logs):
-        expr = sp.besselj(0, 1)
+        expr = sp.airyaiprime(1)
         digits = hp_mod.FALLBACK_RELEASE_DIGITS
         high_precision(expr, digits)
         high_precision(expr, digits + 1)
-        high_precision(sp.besselj(0, 2), digits)
+        high_precision(sp.airyaiprime(2), digits)
         assert len(fallback_logs) == 2
 
     def test_release_mpmath_caches_keeps_values_correct(self):
