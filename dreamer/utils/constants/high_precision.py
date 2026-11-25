@@ -204,7 +204,7 @@ def _to_arb(expr: sp.Expr):
     if func is sp.Ei:
         return _to_arb(args[0]).ei()
     if func is sp.polylog:
-        return _to_arb(args[1]).polylog(_to_arb(args[0]))
+        return _arb_polylog(args[0], args[1])
     if func is sp.gamma:
         return _to_arb(args[0]).gamma()
     if func is sp.Abs:
@@ -257,6 +257,28 @@ _ARB_ONE_ARG = {
 }
 #: sympy Bessel function besselX(ν, x) → arb method x.bessel_X(ν).
 _ARB_BESSEL = {sp.besselj: "bessel_j", sp.bessely: "bessel_y", sp.besseli: "bessel_i", sp.besselk: "bessel_k"}
+
+
+def _arb_polylog(s_expr: sp.Expr, z_expr: sp.Expr):
+    """Li_s(z) with arb, by the fastest route that is accurate (R32).
+
+    For an integer order s ≥ 1 and real |z| < 1, Li_s(z) = z·ₛ₊₁Fₛ(1,…,1; 2,…,2; z)
+    by arb's hypergeometric series: Li₃(½) at 10 000 / 30 000 digits in 0.05 /
+    0.19 s, against 17 s / > 30 min with arb's ``polylog`` and 0.4 / 2.8 s with
+    mpmath.  Near |z| = 1 that ball loses accuracy (Li₄(0.99): 546 of 3 400
+    bits), so when it is less accurate than the working precision arb's
+    ``polylog`` is used instead.  Either result is a rigorous ball; the caller
+    (:func:`arb_value`) still checks its accuracy.
+    """
+    from flint import ctx
+
+    s, z = _to_arb(s_expr), _to_arb(z_expr)
+    if s_expr.is_Integer and int(s_expr) >= 1 and abs(z) < 1:
+        k = int(s_expr)
+        value = z.hypgeom([1] * (k + 1), [2] * k) * z
+        if value.is_finite() and value.rel_accuracy_bits() >= ctx.prec - 16:
+            return value
+    return z.polylog(s)
 
 
 def _ball_to_float(ball, prec: int) -> sp.Float:

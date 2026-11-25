@@ -1792,7 +1792,7 @@ class TrajectoryAttributesHandler:
             # identification possible.  ``identified()`` reads this as False;
             # ``p_vector``/``q_vector`` propagate ``None``.
             return None, None
-        low_res_constant = self.constant().evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES)
+        low_res_constant = high_precision(self.constant(), search_config.CONSTANT_NO_DIGITS_LOW_RES)
         walk_col = sp.Matrix(walk_values)
 
         # If searchable is provided, try to find a cached p/q pair that matches the effective walk values.
@@ -1837,7 +1837,7 @@ class TrajectoryAttributesHandler:
             reconstructs the constant within ``IDENTIFY_CHECK_THRESHOLD``; else ``None``.
         """
         try:
-            res = db.identify([self.constant().evalf(digits)] + [v.evalf(digits) for v in walk_values[1:]])
+            res = db.identify([high_precision(self.constant(), digits)] + [v.evalf(digits) for v in walk_values[1:]])
         except Exception as e:
             Logger(f'Error while identifying constant. LIReC failed with: "{e}"', Logger.Levels.warning).log()
             return None
@@ -1862,12 +1862,26 @@ class TrajectoryAttributesHandler:
         q = [q_dict[sym] for sym in ext_syms]
 
         estimated = estimated_expr.subs({sym: v for sym, v in zip(ext_syms, list(walk_values))})
-        err = abs(sp.N(estimated - self.constant(), 15))   # numeric: no assumption system on huge integers
+        err = self._reconstruction_error(estimated)
         if err > search_config.IDENTIFY_CHECK_THRESHOLD:
             # LIReC provided a combination that does not reconstruct the constant
             # to tolerance (spurious relation) — treat as not identified.
             return None
         return p, q, estimated_expr
+
+    def _reconstruction_error(self, estimated: sp.Expr) -> sp.Expr:
+        """``|estimated − constant|`` for the reconstruction check, the constant from arb.
+
+        Was ``abs(sp.N(estimated − constant, 15))``, whose adaptive evalf evaluates
+        the constant with mpmath.  The check only compares the error with
+        ``IDENTIFY_CHECK_THRESHOLD`` (1e-10), so ``CONSTANT_NO_DIGITS_LOW_RES``
+        digits (cached by :func:`high_precision`) decide it identically; a
+        non-rational estimate keeps the old expression.
+        """
+        if not estimated.is_Rational:
+            return abs(sp.N(estimated - self.constant(), 15))
+        reference = high_precision(self.constant(), search_config.CONSTANT_NO_DIGITS_LOW_RES)
+        return abs(sp.Float(estimated, precision=reference._prec) - reference)
 
     def _identify_low_precision(self, depth: int, walk_values: list):
         """Retry LIReC with the digits a slow-converging walk really has.
@@ -1953,7 +1967,7 @@ class TrajectoryAttributesHandler:
         estimated = form.subs({sym: v for sym, v in zip(syms, walk_values)})
         if not estimated.is_finite:
             return float('-inf')   # zero denominator on this column
-        err = sp.Abs(sp.Float(estimated, precision) - self.constant().evalf(precision))
+        err = sp.Abs(sp.Float(estimated, precision) - high_precision(self.constant(), precision))
         return float('inf') if err == 0 else float(-sp.log(err, 10))
 
     def p_vector(self, depth: Optional[int] = None) -> list:

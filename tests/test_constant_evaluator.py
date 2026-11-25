@@ -48,11 +48,13 @@ def test_polylog_is_fast_at_high_precision():
 
 @pytest.fixture
 def no_mpmath_constant(monkeypatch):
-    """Fail if an expression containing ``log`` (the target log 2) is evaluated by evalf at ≥ 100 digits."""
+    """Fail if an expression containing the target log 2 is evaluated by evalf at ≥ 100 digits.
+
+    (``log`` of a numeric error, e.g. ``-log(err, 10)`` in ``_form_correct_digits``, is not the constant.)"""
     original = EvalfMixin.evalf
 
     def guarded(self, n=15, *args, **kwargs):
-        if n >= 100 and getattr(self, "has", None) and self.has(sp.log):
+        if n >= 100 and getattr(self, "has", None) and self.has(sp.log(2)):
             raise AssertionError(f"evalf({n}) of {self} — the constant must go through high_precision")
         return original(self, n, *args, **kwargs)
     monkeypatch.setattr(EvalfMixin, "evalf", guarded)
