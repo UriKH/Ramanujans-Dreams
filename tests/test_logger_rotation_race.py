@@ -26,15 +26,19 @@ def _enable(path):
 
 
 def test_base_log_rotated_by_another_run_meanwhile(tmp_path, monkeypatch):
+    import os.path
     log = tmp_path / "run.log"
-    log.write_text("previous run\n")
+    (tmp_path / "run.log.1").write_text("previous run\n")      # the other run archived it ...
     _enable(log)
+    real_exists = os.path.exists
+    stale = {"left": 1}
 
-    def other_run_rotates_first(base):
-        (tmp_path / "run.log.1").write_text(log.read_text())   # the other run's os.replace
-        log.unlink()
-        return 1
-    monkeypatch.setattr(Logger, "_next_run_index", classmethod(lambda cls, base: other_run_rotates_first(base)))
+    def exists(path):                                        # ... after this run saw it still there
+        if os.path.abspath(str(path)) == str(log) and stale["left"]:
+            stale["left"] -= 1
+            return True
+        return real_exists(path)
+    monkeypatch.setattr(os.path, "exists", exists)
 
     Logger.start_run()                                          # must not raise
     Logger("this run", Logger.Levels.info).log()
