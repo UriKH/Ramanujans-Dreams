@@ -70,7 +70,7 @@ def test_float_input_is_exact():
     assert arb_value(x * sp.pi, 200) == (sp.Rational(5, 4) * sp.pi).evalf(200)
 
 
-@pytest.mark.parametrize("expr", [sp.besselj(0, 1), sp.I + 1, sp.log(-2), (-2) ** sp.Rational(1, 3)])
+@pytest.mark.parametrize("expr", [sp.airyaiprime(1), sp.I + 1, sp.log(-2), (-2) ** sp.Rational(1, 3)])
 def test_unsupported_falls_back_to_evalf(expr):
     with pytest.raises(Unsupported):
         arb_value(expr, 50)
@@ -441,3 +441,173 @@ def test_legacy_calc_delta_gives_up_beyond_max(monkeypatch, log2_shard):
     traj_len = float(np.sqrt(sum(float(v) ** 2 for v in traj.values())))
     m = log2_shard.cmf.trajectory_matrix(traj, start)
     assert log2_shard.calc_delta(m, traj, start, R.log(2).value_sympy, traj_len) == (None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# R29 — memory guard of the evalf fallback (mpmath keeps O(digits²) caches)
+# ---------------------------------------------------------------------------
+import dreamer.utils.constants.high_precision as hp_mod                    # noqa: E402
+from mpmath.libmp import gammazeta as _gammazeta                           # noqa: E402
+from dreamer.utils.logger import Logger                                   # noqa: E402
+
+
+#: arb cannot evaluate Ai'(x) (not converted), so this goes through evalf — and its ζ(5) through mpmath.
+FALLBACK_EXPR = sp.airyaiprime(1) + sp.zeta(5)
+
+
+class _FakeLogger:
+    records = []
+    Levels = Logger.Levels
+
+    def __init__(self, msg, level=None):
+        type(self).records.append((msg, level))
+
+    def log(self, *args, **kwargs):
+        return None
+
+
+@pytest.fixture
+def fallback_logs(monkeypatch):
+    """Captured fallback warnings; fresh lru / warned-once state for every test."""
+    _FakeLogger.records = []
+    monkeypatch.setattr(hp_mod, "Logger", _FakeLogger)
+    monkeypatch.setattr(hp_mod, "_WARNED_FALLBACKS", set())
+    high_precision.cache_clear()
+    yield _FakeLogger.records
+    high_precision.cache_clear()
+
+
+class TestFallbackMemory:
+    """The evalf fallback above ``FALLBACK_RELEASE_DIGITS`` warns and frees mpmath's caches (R22: an mpmath ζ(5)
+    at ~164 000 digits left ~19.5 GB of Borwein coefficients behind; at 20 000 digits it is ~168 MB)."""
+
+    def test_supported_constants_never_use_the_fallback(self, monkeypatch, fallback_logs):
+        def forbidden(expr, digits):
+            raise AssertionError(f"{expr} reached the evalf fallback")
+        monkeypatch.setattr(hp_mod, "_evalf_fallback", forbidden)
+        for expr in CONSTANTS.values():
+            high_precision(expr, 200)
+        assert fallback_logs == []
+
+    def test_large_fallback_warns_and_releases_mpmath_caches(self, fallback_logs):
+        expr = FALLBACK_EXPR
+        digits = hp_mod.fallback_release_digits()
+        reference = expr.evalf(digits)
+        hp_mod.release_mpmath_caches()
+        assert high_precision(expr, digits) == reference
+        assert _gammazeta.borwein_cache == {} and _gammazeta.zeta_int_cache == {}
+        assert len(fallback_logs) == 1
+        msg, level = fallback_logs[0]
+        assert level == Logger.Levels.warning
+        assert "fallback" in msg and str(digits) in msg
+
+    def test_small_fallback_is_silent_and_keeps_caches(self, fallback_logs):
+        expr = FALLBACK_EXPR
+        digits = hp_mod.fallback_release_digits() // 4
+        assert high_precision(expr, digits) == expr.evalf(digits)
+        assert _gammazeta.borwein_cache != {}
+        assert fallback_logs == []
+
+    def test_warns_once_per_expression(self, fallback_logs):
+        expr = sp.airyaiprime(1)
+        digits = hp_mod.fallback_release_digits()
+        high_precision(expr, digits)
+        high_precision(expr, digits + 1)
+        high_precision(sp.airyaiprime(2), digits)
+        assert len(fallback_logs) == 2
+
+    def test_release_mpmath_caches_keeps_values_correct(self):
+        import mpmath as mp
+        with mp.workdps(2000):
+            before = mp.zeta(5)
+        assert _gammazeta.borwein_cache != {} or _gammazeta.zeta_int_cache != {}
+        hp_mod.release_mpmath_caches()
+        assert _gammazeta.borwein_cache == {} and _gammazeta.zeta_int_cache == {}
+        with mp.workdps(2000):
+            assert mp.zeta(5) == before
+
+
+# ---------------------------------------------------------------------------
+# R28 — more functions evaluated by arb, so they never reach the mpmath fallback
+# ---------------------------------------------------------------------------
+_h = sp.Rational(1, 2)
+ARB_NODES = {
+    "besselj": sp.besselj(0, 1), "besselj_half": sp.besselj(_h, 3), "bessely": sp.bessely(1, 2),
+    "besseli": sp.besseli(2, sp.Rational(1, 3)), "besselk": sp.besselk(0, 2),
+    "erf": sp.erf(_h), "erfc": sp.erfc(2), "erfi": sp.erfi(1),
+    "asin": sp.asin(sp.Rational(1, 3)), "acos": sp.acos(sp.Rational(-1, 4)), "tan": sp.tan(2),
+    "sinh": sp.sinh(1), "cosh": sp.cosh(2), "tanh": sp.tanh(_h),
+    "asinh": sp.asinh(3), "acosh": sp.acosh(2), "atanh": sp.atanh(sp.Rational(1, 5)),
+    "lambertw": sp.LambertW(1), "lambertw_neg": sp.LambertW(sp.Rational(-1, 4)),
+    "airyai": sp.airyai(1), "airybi": sp.airybi(-1),
+    "Si": sp.Si(1), "Ci": sp.Ci(2), "Shi": sp.Shi(1), "Chi": sp.Chi(2), "li": sp.li(2),
+    "fresnels": sp.fresnels(1), "fresnelc": sp.fresnelc(2), "loggamma": sp.loggamma(sp.Rational(7, 2)),
+    "elliptic_k": sp.elliptic_k(_h), "elliptic_e": sp.elliptic_e(sp.Rational(1, 3)),
+    "uppergamma": sp.uppergamma(_h, 3), "lowergamma": sp.lowergamma(sp.Rational(1, 3), 1),
+    "mixed": sp.besselj(0, 1) + sp.zeta(5) - sp.erf(1) * sp.pi,
+}
+
+# Outside the real domain the value is complex or undefined: arb must refuse (→ the evalf fallback, as before).
+ARB_OUTSIDE_DOMAIN = [sp.asin(2), sp.acosh(_h), sp.bessely(0, -1), sp.LambertW(-1), sp.elliptic_k(2),
+                      sp.atanh(2), sp.Ci(-1), sp.LambertW(sp.Rational(-1, 4), -1)]
+
+
+@pytest.mark.parametrize("name", sorted(ARB_NODES))
+def test_more_nodes_evaluated_by_arb(name):
+    expr = ARB_NODES[name]
+    ours = arb_value(expr, DIGITS)                 # arb only — raises Unsupported if the node is not converted
+    reference = expr.evalf(DIGITS + 30)
+    assert agreeing_digits(ours, reference) >= DIGITS
+    assert ours._prec == expr.evalf(DIGITS)._prec
+
+
+@pytest.mark.parametrize("name", ["besselj", "erf", "lambertw", "elliptic_k", "Chi", "mixed"])
+@pytest.mark.parametrize("digits", [15, 200, 1000])
+def test_more_nodes_agree_at_several_precisions(name, digits):
+    expr = ARB_NODES[name]
+    ours, ref = arb_value(expr, digits), expr.evalf(digits + 20)
+    assert agreeing_digits(ours, ref) >= digits
+
+
+@pytest.mark.parametrize("expr", ARB_OUTSIDE_DOMAIN, ids=str)
+def test_outside_real_domain_falls_back(expr):
+    with pytest.raises(Unsupported):
+        arb_value(expr, 50)
+    high_precision.cache_clear()
+    assert high_precision(expr, 50) == expr.evalf(50)
+
+
+class TestCacheBudget:
+    """R31: the release threshold comes from ``search.MAX_CONSTANT_CACHE_MB`` (memory kept per constant)."""
+
+    def test_default_budget_is_50_mb_about_10900_digits(self):
+        from dreamer.configs import config
+        assert config.search.MAX_CONSTANT_CACHE_MB == 50
+        assert hp_mod.fallback_release_digits() == hp_mod.fallback_release_digits(50)
+        assert 10_850 <= hp_mod.fallback_release_digits(50) <= 10_950
+
+    def test_budget_to_digits(self):
+        assert 6_850 <= hp_mod.fallback_release_digits(20) <= 6_950        # user's example: 20 MB ≈ 6 900 digits
+        assert hp_mod.fallback_release_digits(0) == 0                       # 0 MB: release after every fallback
+
+    def test_config_change_moves_the_threshold(self, monkeypatch):
+        from dreamer.configs import config
+        monkeypatch.setattr(config.search, "MAX_CONSTANT_CACHE_MB", 20)
+        assert hp_mod.fallback_release_digits() == hp_mod.fallback_release_digits(20)
+
+    @pytest.mark.parametrize("bad", [-1, float("nan"), "50", None])
+    def test_bad_budget_rejected(self, bad, monkeypatch):
+        from dreamer.configs import config
+        monkeypatch.setattr(config.search, "MAX_CONSTANT_CACHE_MB", bad)
+        with pytest.raises(ValueError):
+            hp_mod.fallback_release_digits()
+
+    def test_small_budget_releases_after_small_fallback(self, monkeypatch, fallback_logs):
+        from dreamer.configs import config
+        monkeypatch.setattr(config.search, "MAX_CONSTANT_CACHE_MB", 0.5)   # ≈ 1 090 digits
+        digits = hp_mod.fallback_release_digits() + 10
+        reference = FALLBACK_EXPR.evalf(digits)
+        hp_mod.release_mpmath_caches()
+        assert high_precision(FALLBACK_EXPR, digits) == reference
+        assert _gammazeta.borwein_cache == {}
+        assert len(fallback_logs) == 1

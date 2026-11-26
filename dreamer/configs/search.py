@@ -535,6 +535,19 @@ class SearchConfig(Configurable):
         )},
     )
 
+    MAX_CONSTANT_CACHE_MB: float = field(
+        default=50,
+        metadata={"description": (
+            "Approximate memory (MB) a constant may leave behind in mpmath's caches.  Only constants "
+            "arb cannot evaluate use mpmath (sympy evalf); mpmath keeps ~0.42 MB x (digits/1000)^2 "
+            "per precision (zeta(n), its largest cache), never freed.  From this budget RD derives the "
+            "precision above which it frees mpmath's caches after such an evaluation: "
+            "digits = 1000 x sqrt(MB / 0.42) (50 MB -> ~10 900 digits, 20 MB -> ~6 900; 0 = always). "
+            "Above it a warning is logged; re-evaluating then costs one cold evaluation per precision. "
+            "Bounds the memory kept after the call, not the peak during it.  Does not change any value."
+        )},
+    )
+
     # ----- joint (common-denominator) δ for JointConstant targets -----
     JOINT_RECOGNITION_DEPTH: int = field(
         default=150,

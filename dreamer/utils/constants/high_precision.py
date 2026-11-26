@@ -14,13 +14,20 @@ computation, checks that the resulting ball is accurate to the requested
 precision (retrying with more guard bits otherwise), and returns a sympy
 ``Float`` with the **same binary precision** that ``expr.evalf(digits)`` would
 produce, so every downstream formula is unchanged.  Anything the converter does
-not support falls back to ``expr.evalf(digits)``.
+not support falls back to ``expr.evalf(digits)``; above the precision derived from
+``search.MAX_CONSTANT_CACHE_MB`` (:func:`fallback_release_digits`) that fallback logs a warning and frees mpmath's caches afterwards
+(:func:`release_mpmath_caches`).
 
 Supported nodes: integers, rationals, floats, π, e, γ (Euler), Catalan, the
 golden ratio, ``+``, ``×``, powers (integer exponents; rational exponents of
 positive bases), ``exp``, ``log``, ``zeta`` (also Hurwitz ``zeta(s, a)``), ``polygamma``, ``Ei``,
 ``expint`` (E_ν), ``polylog``, ``gamma``,
-``Abs``, ``sin``/``cos``/``atan`` and generalized hypergeometric ``hyper``.
+``Abs``, ``sin``/``cos``/``atan`` and generalized hypergeometric ``hyper``; and (R28) Bessel
+``besselj``/``bessely``/``besseli``/``besselk``, ``erf``/``erfc``/``erfi``, ``tan``, ``asin``/``acos``,
+hyperbolic and inverse hyperbolic functions, ``airyai``/``airybi``, ``Si``/``Ci``/``Shi``/``Chi``, ``li``,
+``fresnels``/``fresnelc``, ``loggamma``, principal ``LambertW``, ``uppergamma``/``lowergamma`` and the complete
+``elliptic_k``/``elliptic_e``.  Outside a function's real domain arb returns NaN or a non-real value, which is
+rejected, so such inputs still use the fallback.
 
 **Resolved errors** (:func:`resolved_error`).  The constant ``C`` is used rounded
 to ``P = dps_to_prec(digits)`` bits (≈ digits·log2(10) + 4; 10 000 digits =
@@ -46,10 +53,70 @@ from functools import lru_cache
 import sympy as sp
 from mpmath.libmp import dps_to_prec, normalize, round_nearest
 
+from dreamer.utils.logger import Logger
+
 #: Extra working bits above the target precision for the first attempt.
 _GUARD_BITS = 64
 #: Attempts (doubling the guard bits each time) before falling back to evalf.
 _MAX_ATTEMPTS = 4
+
+#: mpmath's ζ(n) cache (one list of Borwein coefficients per precision, never
+#: freed) is ≈ this many MB × (digits/1000)²: measured 42 MB at 10 000 digits,
+#: 168 MB at 20 000 (R22, ``context/investigations/big_walk_memory``).  It is the
+#: largest mpmath cache found; :func:`fallback_release_digits` uses it to turn
+#: the per-constant memory budget ``search.MAX_CONSTANT_CACHE_MB`` into digits.
+MPMATH_CACHE_MB_PER_KDIGITS_SQUARED = 0.42
+
+
+def fallback_release_digits(budget_mb=None) -> int:
+    """Precision (digits) from which the evalf fallback frees mpmath's caches.
+
+    ``digits = 1000·√(budget_mb / 0.42)`` — the precision at which mpmath's
+    ζ(n) cache reaches *budget_mb* (50 MB → ~10 900 digits, 20 MB → ~6 900).
+
+    :param budget_mb: Memory budget per constant in MB; ``None`` reads
+        ``search.MAX_CONSTANT_CACHE_MB``.  0 means: release after every fallback.
+    :raises ValueError: if the budget is not a non-negative number.
+    """
+    import math
+
+    if budget_mb is None:
+        from dreamer.configs import config
+        budget_mb = config.search.MAX_CONSTANT_CACHE_MB
+    if isinstance(budget_mb, bool) or not isinstance(budget_mb, (int, float)) or not budget_mb >= 0:
+        raise ValueError(f"search.MAX_CONSTANT_CACHE_MB must be a non-negative number, got {budget_mb!r}")
+    return int(1000 * math.sqrt(budget_mb / MPMATH_CACHE_MB_PER_KDIGITS_SQUARED))
+
+
+#: Expressions already warned about (one warning per expression per process).
+_WARNED_FALLBACKS: set = set()
+
+#: mpmath's module-level memo caches (pure memoisation: clearing them only costs
+#: recomputation).  Precomputed tables (``int_cache``, ``small_factorial_cache``,
+#: prime sieves) are not touched.
+_MPMATH_CACHES = {
+    "mpmath.libmp.gammazeta": ("borwein_cache", "zeta_int_cache", "bernoulli_cache",
+                               "gamma_taylor_cache", "gamma_stirling_cache"),
+    "mpmath.libmp.libelefun": ("cos_sin_cache", "log_int_cache", "log_taylor_cache", "atan_taylor_cache"),
+}
+
+
+def release_mpmath_caches() -> int:
+    """Clear mpmath's high-precision memo caches (see ``_MPMATH_CACHES``).
+
+    :return: Number of cache entries removed.
+    """
+    import importlib
+
+    removed = 0
+    for module_name, names in _MPMATH_CACHES.items():
+        module = importlib.import_module(module_name)
+        for name in names:
+            cache = getattr(module, name, None)
+            if isinstance(cache, dict):
+                removed += len(cache)
+                cache.clear()
+    return removed
 
 
 def _check_digits(digits) -> None:
@@ -137,7 +204,7 @@ def _to_arb(expr: sp.Expr):
     if func is sp.Ei:
         return _to_arb(args[0]).ei()
     if func is sp.polylog:
-        return _to_arb(args[1]).polylog(_to_arb(args[0]))
+        return _arb_polylog(args[0], args[1])
     if func is sp.gamma:
         return _to_arb(args[0]).gamma()
     if func is sp.Abs:
@@ -151,7 +218,67 @@ def _to_arb(expr: sp.Expr):
     if func is sp.hyper:
         ap, bq, z = args
         return _to_arb(z).hypgeom([_to_arb(a) for a in ap], [_to_arb(b) for b in bq])
+    # R28: more real special functions by arb, so they never reach mpmath (whose caches grow ~digits²).
+    # Outside the real domain arb returns NaN (asin(2), acosh(½), Ci(−1), …), which arb_value rejects → fallback.
+    if func in _ARB_ONE_ARG and len(args) == 1:
+        return getattr(_to_arb(args[0]), _ARB_ONE_ARG[func])()
+    if func in _ARB_BESSEL:
+        return getattr(_to_arb(args[1]), _ARB_BESSEL[func])(_to_arb(args[0]))   # sympy besselX(ν, x)
+    if func is sp.loggamma:
+        x = _to_arb(args[0])
+        if not x > 0:
+            raise Unsupported(f"loggamma of a non-positive value {expr}")
+        return x.lgamma()
+    if func is sp.LambertW:
+        if len(args) == 2 and args[1] != 0:
+            raise Unsupported(f"non-principal LambertW branch {expr}")
+        return _to_arb(args[0]).lambertw()
+    if func is sp.uppergamma:
+        return _to_arb(args[1]).gamma_upper(_to_arb(args[0]))                    # Γ(s, x)
+    if func is sp.lowergamma:
+        return _to_arb(args[1]).gamma_lower(_to_arb(args[0]))                    # γ(s, x)
+    if func in (sp.elliptic_k, sp.elliptic_e) and len(args) == 1:                # complete, parameter m
+        from flint import acb
+        value = getattr(acb(_to_arb(args[0])), "elliptic_k" if func is sp.elliptic_k else "elliptic_e")()
+        if not value.imag.is_zero():
+            raise Unsupported(f"non-real {expr}")
+        return value.real
     raise Unsupported(f"{func.__name__} in {expr}")
+
+
+#: sympy function → arb method (one real argument).
+_ARB_ONE_ARG = {
+    sp.erf: "erf", sp.erfc: "erfc", sp.erfi: "erfi",
+    sp.tan: "tan", sp.asin: "asin", sp.acos: "acos",
+    sp.sinh: "sinh", sp.cosh: "cosh", sp.tanh: "tanh", sp.asinh: "asinh", sp.acosh: "acosh", sp.atanh: "atanh",
+    sp.airyai: "airy_ai", sp.airybi: "airy_bi",
+    sp.Si: "si", sp.Ci: "ci", sp.Shi: "shi", sp.Chi: "chi", sp.li: "li",
+    sp.fresnels: "fresnel_s", sp.fresnelc: "fresnel_c",                       # both normalised (sympy's convention)
+}
+#: sympy Bessel function besselX(ν, x) → arb method x.bessel_X(ν).
+_ARB_BESSEL = {sp.besselj: "bessel_j", sp.bessely: "bessel_y", sp.besseli: "bessel_i", sp.besselk: "bessel_k"}
+
+
+def _arb_polylog(s_expr: sp.Expr, z_expr: sp.Expr):
+    """Li_s(z) with arb, by the fastest route that is accurate (R32).
+
+    For an integer order s ≥ 1 and real |z| < 1, Li_s(z) = z·ₛ₊₁Fₛ(1,…,1; 2,…,2; z)
+    by arb's hypergeometric series: Li₃(½) at 10 000 / 30 000 digits in 0.05 /
+    0.19 s, against 17 s / > 30 min with arb's ``polylog`` and 0.4 / 2.8 s with
+    mpmath.  Near |z| = 1 that ball loses accuracy (Li₄(0.99): 546 of 3 400
+    bits), so when it is less accurate than the working precision arb's
+    ``polylog`` is used instead.  Either result is a rigorous ball; the caller
+    (:func:`arb_value`) still checks its accuracy.
+    """
+    from flint import ctx
+
+    s, z = _to_arb(s_expr), _to_arb(z_expr)
+    if s_expr.is_Integer and int(s_expr) >= 1 and abs(z) < 1:
+        k = int(s_expr)
+        value = z.hypgeom([1] * (k + 1), [2] * k) * z
+        if value.is_finite() and value.rel_accuracy_bits() >= ctx.prec - 16:
+            return value
+    return z.polylog(s)
 
 
 def _ball_to_float(ball, prec: int) -> sp.Float:
@@ -211,7 +338,33 @@ def high_precision(expr: sp.Expr, digits: int) -> sp.Float:
     try:
         return arb_value(expr, digits)
     except Unsupported:
-        return sp.sympify(expr).evalf(int(digits))
+        return _evalf_fallback(expr, int(digits))
+
+
+def _evalf_fallback(expr: sp.Expr, digits: int) -> sp.Float:
+    """``expr.evalf(digits)`` for what arb cannot evaluate, without keeping mpmath's caches.
+
+    At ``digits >= fallback_release_digits()`` (from ``search.MAX_CONSTANT_CACHE_MB``) it logs a warning (once per
+    expression) and frees mpmath's memo caches afterwards; the peak memory of
+    the evalf call itself remains (≈ 0.42 MB·(digits/1000)² for ζ(n)).
+
+    :param expr: Numeric sympy expression.
+    :param digits: Decimal digits (positive integer).
+    :return: ``sp.sympify(expr).evalf(digits)``.
+    """
+    expr = sp.sympify(expr)
+    value = expr.evalf(digits)
+    if digits >= fallback_release_digits():
+        key = sp.srepr(expr)
+        if key not in _WARNED_FALLBACKS:
+            _WARNED_FALLBACKS.add(key)
+            Logger(
+                f"high_precision: arb cannot evaluate {expr}; using the sympy/mpmath evalf fallback at "
+                f"{digits} digits (slow, and needs ~(digits/1000)² MB while it runs; mpmath's caches are "
+                f"released afterwards)", Logger.Levels.warning,
+            ).log()
+        release_mpmath_caches()
+    return value
 
 
 #: An error |estimate − C| is trusted only when it exceeds the constant's own
