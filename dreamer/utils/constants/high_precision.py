@@ -129,6 +129,14 @@ class Unsupported(Exception):
     """The expression contains a node the arb converter does not handle."""
 
 
+def _is_fast_third(a) -> bool:
+    """*a* is a rational p/3 that :func:`trigamma_third` evaluates (shift within ``MAX_SHIFT``).
+
+    ψ₁(p/3) and ζ(2, p/3) then use the fast hypergeometric route of :mod:`.rational_polygamma` (R33)."""
+    from dreamer.utils.constants.rational_polygamma import MAX_SHIFT
+    return bool(a.is_Rational and a.q == 3 and abs(a.p // 3) <= MAX_SHIFT)
+
+
 def _to_arb(expr: sp.Expr):
     """Evaluate a numeric sympy expression with arb at the current ``ctx.prec``."""
     from flint import arb, fmpq, fmpz
@@ -175,6 +183,8 @@ def _to_arb(expr: sp.Expr):
 
     func = expr.func
     args = expr.args
+    if func in (sp.zeta, sp.polygamma):
+        from dreamer.utils.constants.rational_polygamma import trigamma_third
     if func is sp.exp:
         return _to_arb(args[0]).exp()
     if func is sp.log and len(args) == 1:
@@ -185,9 +195,13 @@ def _to_arb(expr: sp.Expr):
     if func is sp.zeta and len(args) == 1:
         return _to_arb(args[0]).zeta()
     if func is sp.zeta and len(args) == 2:
+        if args[0] == 2 and args[1].is_Rational and args[1] > 0 and _is_fast_third(args[1]):
+            return trigamma_third(int(args[1].p), int(args[1].q))   # ζ(2, a) = ψ₁(a), a > 0 (R33)
         return _to_arb(args[0]).zeta(_to_arb(args[1]))          # Hurwitz zeta ζ(s, a)
     if func is sp.polygamma:
         m = args[0]
+        if m == 1 and _is_fast_third(args[1]):
+            return trigamma_third(int(args[1].p), int(args[1].q))   # hypergeometric route (R33)
         if not (m.is_Integer and m >= 0):
             raise Unsupported(f"polygamma of non-integer order {expr}")
         from flint import acb
