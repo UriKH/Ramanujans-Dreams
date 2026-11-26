@@ -691,7 +691,7 @@ class TrajectoryAttributesHandler:
         def compute():
             try:
                 walked = self._raw_walks([depth])[depth]
-                return walked if self.walk_type() == 2 else walked.inv().T
+                return walked if self.walk_type() == 2 else self._inverse_transpose(depth, walked)
             except Exception as e:
                 Logger(
                     f'Walk failed at depth {depth}: {e} {self._trajectory_repr()}',
@@ -699,6 +699,54 @@ class TrajectoryAttributesHandler:
                 ).log()
                 return None
         return self.__get_utility(f"walked_{depth}", compute)
+
+    def _inverse_transpose(self, depth: int, walked: Matrix) -> Matrix:
+        """``W(depth)^{-T}`` as a ramanujantools ``Matrix`` — exactly ``walked.inv().T``.
+
+        For a numeric walk it inverts the stored FLINT checkpoint (``fmpq_mat``)
+        instead of the sympy copy: 1.3–2.3× faster including the conversion back
+        (R30, ``context/investigations/big_walk_memory`` §7).  Symbolic walks use
+        sympy.  Raises ``ZeroDivisionError`` (FLINT) or sympy's
+        ``NonInvertibleMatrixError`` when ``W`` is singular; callers catch both.
+
+        :param depth: Walk depth of *walked*.
+        :param walked: ``W(depth)`` as returned by :meth:`_raw_walks`.
+        """
+        if self._numeric_walk_possible() and depth in self._checkpoints:
+            from ramanujantools.flint_core import NumericMatrix
+            return NumericMatrix(self._checkpoints[depth].inv().transpose()).to_rt()
+        return walked.inv().T
+
+    def _type1_raw_column(self, depth: int):
+        """Column ``j`` of ``W(depth)^{-T}`` from the FLINT checkpoint (numeric walks, walk type 1).
+
+        Column ``j`` of ``W^{-T}`` is ``x`` with ``Wᵀ x = e_j``.  When the
+        projection column is already known (it is chosen once, on the first
+        walk) this is **one linear solve** — no inverse; otherwise the FLINT
+        inverse is computed once and the column is chosen from it by
+        :meth:`_projection_column_rule` (and stored).  Exact rationals
+        throughout, so the result equals sympy's ``inv().T`` column bit for bit;
+        6–12× faster than the sympy path on 2F1–8F7 (R30).
+
+        :return: ``(raw column as a list of fmpq, column index)``; ``(None, None)``
+            when no column is normalisable.
+        :raises ZeroDivisionError: the walk hits a pole or ``W`` is singular.
+        """
+        from flint import fmpq_mat
+
+        self._extend_checkpoints([depth])
+        W = self._checkpoints[depth]
+        d = W.nrows()
+        col_index = self._projection_column
+        if col_index is None:
+            S = W.inv().transpose()
+            col_index = self._projection_column_rule([[S[i, j] for i in range(d)] for j in range(d)])
+            if col_index is None:
+                return None, None
+            self._projection_column = col_index
+            return [S[i, col_index] for i in range(d)], col_index
+        x = W.transpose().solve(fmpq_mat(d, 1, [int(i == col_index) for i in range(d)]))
+        return [x[i, 0] for i in range(d)], col_index
 
     def _initial_values(self) -> Optional[Matrix]:
         """The ``[[p], [q]]`` initial-values matrix for the ``Limit`` machinery.
@@ -1074,15 +1122,30 @@ class TrajectoryAttributesHandler:
         otherwise falls back to the first normalisable column.  Returns the column
         index, or ``None`` when no column is normalisable.
         """
+        return self._projection_column_rule([list(walked.col(j)) for j in range(sp.shape(walked)[1])])
+
+    @staticmethod
+    def _projection_column_rule(columns: list) -> Optional[int]:
+        """The column rule of :meth:`_select_projection_column` on raw columns.
+
+        Normalising a column by its (non-zero) top entry does not change which
+        entries are zero, so the rule needs no division (it used to divide the
+        whole matrix once per candidate column).
+
+        :param columns: Columns as sequences of exact entries (sympy or FLINT ``fmpq``).
+        :return: Column index, or ``None`` when every top entry is zero.
+        """
+        def is_zero(v):
+            return bool(v.is_zero) if isinstance(v, sp.Basic) else v == 0
+
         first_normalizable = None
-        for col_ind in range(sp.shape(walked)[1]):
-            if walked[0, col_ind].is_zero:
+        for j, col in enumerate(columns):
+            if is_zero(col[0]):
                 continue
-            col = (walked / walked[0, col_ind]).col(col_ind)
             if first_normalizable is None:
-                first_normalizable = col_ind
-            if all(not v.is_zero for v in col):
-                return col_ind  # no-zero column preferred
+                first_normalizable = j
+            if not any(is_zero(v) for v in col):
+                return j  # no-zero column preferred
         return first_normalizable
 
     def _effective_walk_values(
@@ -1099,8 +1162,9 @@ class TrajectoryAttributesHandler:
         ``Limit`` path silently defaulted to the last column (``e_{-1}``),
         yielding ``zoo`` / ``mpf`` errors when that column was degenerate.
 
-        Pass ``depth`` to walk internally (cached, ``inv().T`` applied after the
-        walk for ``walk_type==1``).  ``walk_matrix`` may be an already-transformed
+        Pass ``depth`` to walk internally (cached; for ``walk_type==1`` the column
+        of ``W^{-T}`` comes from the FLINT walk product — one solve once the
+        column is known, see :meth:`_type1_raw_column`).  ``walk_matrix`` may be an already-transformed
         ``Limit.current`` snapshot — used as-is.
 
         Returns ``(None, None)`` when the walk fails, no column is normalisable,
@@ -1116,7 +1180,45 @@ class TrajectoryAttributesHandler:
 
         depth = depth or self._depth
 
+        def no_column():
+            Logger(
+                'Could not normalize any walk matrix column. '
+                f'Skipping trajectory... {self._trajectory_repr()}',
+                Logger.Levels.warning,
+            ).log()
+            return None, None
+
+        def degenerate(col_index):
+            # The established projection column is degenerate at this depth —
+            # a legitimate, non-fatal outcome (e.g. a non-converging tail).
+            Logger(
+                f'Projection column {col_index} is degenerate at depth {depth}; '
+                f'skipping this depth. {self._trajectory_repr()}',
+                Logger.Levels.debug,
+            ).log()
+            return None, None
+
+        def compute_type1_numeric():
+            # Walk type 1, numeric walk: the column straight from the FLINT checkpoint (R30) —
+            # one solve once the column is known, never sympy's inverse.  Same values as below.
+            try:
+                raw, col_index = self._type1_raw_column(depth)
+            except Exception as e:
+                Logger(
+                    f'Walk failed at depth {depth}: {e} {self._trajectory_repr()}',
+                    Logger.Levels.warning,
+                ).log()
+                return None, None
+            if raw is None:
+                return no_column()
+            top = raw[0]
+            if top == 0:
+                return degenerate(col_index)
+            return [sp.Rational(int(v.p), int(v.q)) for v in (c / top for c in raw)], col_index
+
         def compute():
+            if walk_matrix is None and self.walk_type() == 1 and self._numeric_walk_possible():
+                return compute_type1_numeric()
             walked = walk_matrix if walk_matrix is not None else self._walked_matrix(depth)
             if walked is None:
                 return None, None
@@ -1125,27 +1227,14 @@ class TrajectoryAttributesHandler:
             if col_index is None:
                 col_index = self._select_projection_column(walked)
                 if col_index is None:
-                    Logger(
-                        'Could not normalize any walk matrix column. '
-                        f'Skipping trajectory... {self._trajectory_repr()}',
-                        Logger.Levels.warning,
-                    ).log()
-                    return None, None
+                    return no_column()
                 self._projection_column = col_index
 
             top = walked[0, col_index]
             if top.is_zero:
-                # The established projection column is degenerate at this depth —
-                # a legitimate, non-fatal outcome (e.g. a non-converging tail).
-                Logger(
-                    f'Projection column {col_index} is degenerate at depth {depth}; '
-                    f'skipping this depth. {self._trajectory_repr()}',
-                    Logger.Levels.debug,
-                ).log()
-                return None, None
+                return degenerate(col_index)
 
-            col = (walked / top).col(col_index)
-            return [item for item in col], col_index
+            return [item / top for item in walked.col(col_index)], col_index
 
         if walk_matrix is not None:
             return compute()
@@ -1200,8 +1289,8 @@ class TrajectoryAttributesHandler:
             ]
 
             if self.walk_type() == 1:
-                for i, l in enumerate(limits):
-                    limits[i].current = l.current.inv().T
+                for i, (d, l) in enumerate(zip(depths, limits)):
+                    limits[i].current = self._inverse_transpose(d, l.current)
             return limits
         except Exception as e:
             Logger(
