@@ -14,9 +14,23 @@ Coverage:
 import multiprocessing as mp
 
 from dreamer.configs.logging import logging_config
+from dreamer.utils import logger as logger_mod
 from dreamer.utils.logger import Logger
 
-from tests.test_logger import _reset_logger_runtime_state
+
+def _reset_logger_runtime_state():
+    """Fresh logger state (same as ``tests/test_logger.py``)."""
+    for handler in list(logger_mod.sys_logger.handlers):
+        logger_mod.sys_logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+    Logger._instance = None
+    Logger._file_handler = None
+    Logger._force_overwrite_next_file_open = True
+    Logger._last_generate_logs_value = bool(logging_config.GENERATE_LOGS)
+    Logger.print_func = print
 
 
 def _enable(path):
