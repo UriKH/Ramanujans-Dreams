@@ -123,6 +123,40 @@ class Logger:
         return run_idx
 
     @classmethod
+    def _rotate_base_log(cls, base_filename: str) -> None:
+        """Archive ``base_filename`` as ``base_filename.<n>`` (the lowest free ``n``).
+
+        Safe when several runs start at once in the same folder (R35): the base log is first
+        moved to a name of this process's own with an atomic rename, so only one run takes
+        it (the others see it gone and skip); the archive name is then claimed with
+        ``os.link``, which fails instead of overwriting when another run took that index.
+        No run crashes, and no archive is overwritten.
+
+        :param base_filename: Absolute path of the base log file.
+        """
+        own = f"{base_filename}.rotating-{os.getpid()}"
+        try:
+            os.rename(base_filename, own)
+        except FileNotFoundError:
+            return                                    # another run archived it meanwhile
+        run_idx = cls._next_run_index(base_filename)
+        while True:
+            target = cls._rotated_log_filename(base_filename, run_idx)
+            try:
+                os.link(own, target)                  # atomic; never replaces an existing archive
+            except FileExistsError:
+                run_idx += 1
+                continue
+            except OSError:                           # no hard links on this file system
+                if os.path.exists(target):
+                    run_idx += 1
+                    continue
+                os.replace(own, target)
+                return
+            os.unlink(own)
+            return
+
+    @classmethod
     def start_run(cls):
         """
         Mark the start of a new System.run lifecycle.
@@ -142,10 +176,12 @@ class Logger:
         cls._remove_file_handler()
 
         if os.path.exists(desired_filename):
-            run_idx = cls._next_run_index(desired_filename)
-            os.replace(desired_filename, cls._rotated_log_filename(desired_filename, run_idx))
+            cls._rotate_base_log(desired_filename)
 
-        cls._force_overwrite_next_file_open = True
+        # The base log was just archived, so append mode starts a fresh file; if another run
+        # started in the same folder at the same moment and created it already, append mode
+        # shares it instead of truncating that run's log.
+        cls._force_overwrite_next_file_open = False
         cls._ensure_file_handler()
         cls._log_system_status()
 
