@@ -287,6 +287,18 @@ class SearchConfig(Configurable):
         default=10,
         metadata={"description": "Number of initial candidate trajectories sampled for the SA seed selection."},
     )
+    ANNEAL_CONCURRENT_SHARDS: int = field(
+        default=0,
+        metadata={"description": "Shards searched at the same time, each in its own process with its own eval pool. 0 = auto: min(#shards, cores // workers per shard, what memory allows); 1 = one shard after another. Every shard's search and rows are the same either way (shards are independent); only the wall time changes."},
+    )
+    ANNEAL_WORKERS_PER_SHARD: int = field(
+        default=0,
+        metadata={"description": "Workers per shard process when shards run concurrently. 0 = max(D+1, cores // #shards) (D = largest CMF dimension): many shards get small pools and more run at once — measured, a 5-D shard with D+1 = 6 workers was as fast as with 9 and did 1.7x more work per core than with 18; few shards share out all cores."},
+    )
+    ANNEAL_OVERSUBSCRIBE: float = field(
+        default=1.25,
+        metadata={"description": "Run up to cores x this factor workers in total when shards run concurrently (K = cores*factor // workers per shard). > 1 lets the extra workers use cores that one shard leaves idle (waiting for its slowest walk, start-up, seeding) — with look-ahead on, its speculative walks run there. Measured on Zeus (5-D, two rounds): 1.25 with look-ahead on was fastest (~16 % faster than look-ahead off, ~35 % faster than 1.0 with look-ahead on); 1.5 was slower; without look-ahead it gives nothing. Costs ~20 % more memory (each shard's pool still caps itself to its memory share). 1.0 = one worker per core."},
+    )
     ANNEAL_NUM_EVAL_WORKERS: int = field(
         default=0,
         metadata={"description": "Worker cap for evaluating the neighbour batch in each SA step. 0/None = use the full core budget (search_worker_budget); a positive value caps at min(value, budget). A resolved count <= 1 runs serial."},

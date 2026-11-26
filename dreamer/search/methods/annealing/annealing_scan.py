@@ -144,6 +144,7 @@ class SimulatedAnnealingSearch(SearchMethod):
         pool=None,
         initial_trajectory: Optional[Position] = None,
         stats=None,
+        seed_trajectories: Optional[dict] = None,
     ) -> None:
         """
         Run SA for a single constant, emitting Tier-1 DTOs to *sink*.
@@ -180,6 +181,10 @@ class SimulatedAnnealingSearch(SearchMethod):
         :param stats: Optional :class:`~dreamer.search.methods.flatland.evaluator.EvalStats`
             counting how evaluations were served (reused / revisited / new …);
             the calling module logs its summary.
+        :param seed_trajectories: Stored rows to draw seed candidates from (same shape as
+            *seen_trajectories*); ``None`` uses *seen_trajectories*.  A re-run after a
+            killed attempt passes the rows from before the first attempt, so it starts
+            the same search (see ``annealing_mod.run_annealing_shard``).
         """
         if handler_cache is None:
             handler_cache = make_handler_cache()
@@ -226,7 +231,8 @@ class SimulatedAnnealingSearch(SearchMethod):
         # the shard's stored identified rows (best first), then the reservoir.
         # ``_used_rays`` holds the trajectory ids of seeds already used and of every
         # accepted position, so a reseed always moves to an unexplored candidate.
-        self._seed_queue: List[np.ndarray] = self._stored_seed_candidates(geom, eval_ctx, constant)
+        self._seed_queue: List[np.ndarray] = self._stored_seed_candidates(
+            geom, eval_ctx, constant, rows=seed_trajectories)
         self._reservoir_queued = False
         self._used_rays: set = set()
         Logger(
@@ -503,7 +509,7 @@ class SimulatedAnnealingSearch(SearchMethod):
         return [geom.to_flatland(t) for _, t in candidates]
 
     def _stored_seed_candidates(
-        self, geom: FlatlandGeometry, eval_ctx: dict, constant: Constant,
+        self, geom: FlatlandGeometry, eval_ctx: dict, constant: Constant, rows: Optional[dict] = None,
     ) -> List[np.ndarray]:
         """
         Seed candidates from the shard's already-stored identified rows.
@@ -518,6 +524,7 @@ class SimulatedAnnealingSearch(SearchMethod):
 
         :param geom: Flatland geometry for the current shard.
         :param eval_ctx: Evaluation context (``seen_trajectories``, ``start`` …).
+        :param rows: Rows to draw candidates from; ``None`` = ``eval_ctx["seen_trajectories"]``.
         :param constant: The constant being searched.
         :return: Flatland vectors, best objective score first (ties by trajectory id).
         """
@@ -526,7 +533,8 @@ class SimulatedAnnealingSearch(SearchMethod):
         start_t = [sp.Rational(start[s]) for s in geom.symbols]
         objective_name = active_objective()
         scored: List[Tuple[float, str, np.ndarray]] = []
-        for trajectory_id, by_const in eval_ctx["seen_trajectories"].items():
+        source = eval_ctx["seen_trajectories"] if rows is None else rows
+        for trajectory_id, by_const in source.items():
             rec = by_const.get(constant.name)
             if rec is None or rec.get("direction") is None:
                 continue

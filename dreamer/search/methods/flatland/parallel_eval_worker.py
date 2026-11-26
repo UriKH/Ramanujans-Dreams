@@ -30,6 +30,9 @@ def _pool_init(config_overrides: dict, shard, start) -> None:
     :param start: Interior start :class:`Position` (constant-independent).
     """
     config.configure(**config_overrides)
+    # Exit if the process that owns this pool dies (no orphaned workers).
+    from dreamer.utils import mp_context
+    mp_context.start_parent_watchdog()
     # Rebind this worker's per-shard (p, q) cache onto the shared append-log (if
     # one was attached by the deep-search module before the pool was built), so
     # relations identified by any worker are reused by all of them instead of
